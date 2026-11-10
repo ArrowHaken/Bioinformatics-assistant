@@ -1,0 +1,298 @@
+#!/usr/bin/env Rscript
+# =====================================================================
+#  place.R -- where the run happens: this machine, or the server
+#
+#  WHY A SEPARATE FILE
+#    "Where" is read by the page, written by the page, and acted on when
+#    the choice is committed. If each of those carried its own rule, the
+#    page and the file would sooner or later disagree about what "ready"
+#    means -- and the disagreement would show up as a run that started on
+#    one machine while looking for data on another.
+#
+#  THE ONE RULE THAT MATTERS
+#    The password stays in this file, on this machine, and is never sent
+#    back to the browser -- this app may be reachable from a public
+#    address. On write: an empty or absent password means KEEP what is
+#    stored. It never means "clear". There is no UI that clears a
+#    password on purpose, so an empty field must not silently wipe a
+#    working credential.
+#
+#  ASCII-only source (R 4.1.2 on a Chinese Windows locale). The Chinese
+#  wording the page shows is written with \u escapes on purpose, so this
+#  file stays ASCII from the first byte to the last.
+# =====================================================================
+
+suppressWarnings(options(stringsAsFactors = FALSE, warn = -1))
+
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+
+# ---- small helpers ---------------------------------------------------
+
+place_as_chr <- function(x, default = "") {
+  if (is.null(x) || !length(x)) return(default)
+  v <- as.character(x)[1]
+  if (is.na(v)) return(default)
+  v
+}
+
+# Paths are shown and compared with forward slashes everywhere else in
+# this app; normalise on the way in so nothing downstream has to care
+# which machine wrote the value.
+place_as_path <- function(x, default = "") gsub("\\\\", "/", place_as_chr(x, default))
+
+place_profile_file <- function(app_dir) file.path(app_dir, "config", "server_profile.json")
+
+# NULL never erases. A field the caller did not mention keeps its value,
+# and a nested object merges key by key -- so sending
+# {"server":{"host":"10.0.0.9"}} cannot drop the user name, the paths,
+# the runtime block or the stored password.
+place_deep_merge <- function(base, over) {
+  if (!is.list(over)) return(over)
+  if (!is.list(base)) base <- list()
+  for (nm in names(over)) {
+    if (is.null(nm) || !nzchar(nm)) next
+    v <- over[[nm]]
+    if (is.null(v)) next
+    if (!is.list(v) && length(v) == 0L) next
+    if (is.list(v) && is.list(base[[nm]])) {
+      base[[nm]] <- place_deep_merge(base[[nm]], v)
+    } else {
+      base[[nm]] <- v
+    }
+  }
+  base
+}
+
+place_port <- function(x) {
+  p <- suppressWarnings(as.integer(x %||% NA))
+  if (is.na(p) || p <= 0L || p > 65535L) return(22L)
+  p
+}
+
+place_default <- function() {
+  list(
+    mode = "local",
+    local = list(label = "\u672c\u673a", path = ""),
+    server = list(
+      label  = "\u670d\u52a1\u5668",
+      host = "", port = 22L, user = "", password = "", exec_pc = "",
+      data_root = "", script_root = "", work_root = "", note = "",
+      # ref_mode: how this run gets its annotation reference.
+      #   ""        -> not decided here; ask again at the annotate step
+      #   "path"    -> ref_path is an absolute path on the server
+      #   "upload"  -> a file uploaded into the app (chosen via reference_id)
+      #   "lit"     -> build one from published literature at annotate time
+      #   "none"    -> this run does not need one
+      #   Why store the decision at all: it used to be asked only when the
+      #   annotate step was clicked, which meant every earlier step ran
+      #   without knowing whether a reference even existed — and the executor
+      #   compensated by scanning the whole server. Deciding it up front
+      #   removes the scan in the common case.
+      ref_mode = "", ref_path = "", ref_note = "", ref_archive = "",
+      runtime = list(rscript = "", lib_path = "", ld_library_path = "",
+                     queue = "", node_constraint = "")
+    )
+  )
+}
+
+place_clean_server <- function(s) {
+  if (!is.list(s)) s <- list()
+  s$label     <- place_as_chr(s$label, "")
+  s$host      <- place_as_chr(s$host, "")
+  s$user      <- place_as_chr(s$user, "")
+  # exec_pc: which working computer can reach this server.
+  #   Why it is stored at all: the instruction used to say only "run it on
+  #   the computer that can reach this server", so the executor had to try
+  #   machines one by one and wait out the unreachable ones. One account
+  #   normally has exactly one such machine, so it is worth writing down:
+  #   filled in automatically after the first successful check, and
+  #   overridable by hand in the page.
+  s$exec_pc   <- place_as_chr(s$exec_pc, "")
+  s$data_root <- place_as_path(s$data_root, "")
+  # script_root: where the delivered analysis scripts live, which is a
+  # different directory from the data. On the 7-sample project the data
+  # sits in .../6sample_data_script/matrix and the scripts sit one level
+  # up. Treating "the path" as a single value loses one of the two.
+  s$script_root <- place_as_path(s$script_root, "")
+  s$work_root <- place_as_path(s$work_root, "")
+  s$note      <- place_as_chr(s$note, "")
+  # ref_mode 只认这几个值。认不出来就归成空 —— 空代表"到时候再问"，
+  #   比留一个拼错的字符串然后当"已给过"处理要安全。
+  rm <- tolower(place_as_chr(s$ref_mode, ""))
+  s$ref_mode <- if (rm %in% c("path", "upload", "lit", "none")) rm else ""
+  s$ref_path <- place_as_path(s$ref_path, "")
+  s$ref_note <- place_as_chr(s$ref_note, "")
+  # ref_archive: 文献库那边的存档号。选文献库模式时只填号，不传文件；
+  #   到注释环节由助手拿这个号去文献库取依据。号本身只是一个字符串，
+  #   不在这里校验存在性 —— 应用看不到那个库，假装能验等于撒谎。
+  s$ref_archive <- place_as_chr(s$ref_archive, "")
+  # ref_mode=path 但路径是空的，等于没给：退回空，让注释环节再问一次。
+  if (identical(s$ref_mode, "path") && !nzchar(s$ref_path)) s$ref_mode <- ""
+  s$port      <- place_port(s$port)
+  s$password  <- place_as_chr(s$password, "")
+  rt <- s$runtime
+  if (!is.list(rt)) rt <- list()
+  s$runtime <- list(
+    rscript         = place_as_path(rt$rscript, ""),
+    lib_path        = place_as_path(rt$lib_path, ""),
+    ld_library_path = place_as_path(rt$ld_library_path, ""),
+    queue           = place_as_chr(rt$queue, ""),
+    node_constraint = place_as_chr(rt$node_constraint, "")
+  )
+  s
+}
+
+place_write_file <- function(app_dir, obj) {
+  f <- place_profile_file(app_dir)
+  dir.create(dirname(f), showWarnings = FALSE, recursive = TRUE)
+  # escape = "none": the file is only ever read back on this machine, and
+  # keeping the Chinese readable in the file is worth more than emitting
+  # a wall of \u sequences. It is still valid JSON either way.
+  txt <- jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE, null = "null",
+                          digits = NA, escape = "none")
+  con <- file(f, open = "wb")
+  writeBin(charToRaw(enc2utf8(txt)), con)
+  close(con)
+  invisible(f)
+}
+
+# ---- read ------------------------------------------------------------
+
+place_read <- function(app_dir) {
+  out <- place_default()
+  f <- place_profile_file(app_dir)
+  if (!file.exists(f)) return(out)
+  # jsonlite is loaded by serve.R before this file; a missing package is a
+  # hard stop there, so it is not re-checked here.
+  cur <- tryCatch(
+    jsonlite::fromJSON(readLines(f, warn = FALSE, encoding = "UTF-8"),
+                       simplifyVector = FALSE),
+    error = function(e) NULL)
+  if (is.null(cur) || !is.list(cur)) return(out)
+
+  # Keep unknown top-level keys (such as the _readme block): rewriting the
+  # file must not quietly delete what someone put there on purpose.
+  for (nm in setdiff(names(cur), c("mode", "local", "server"))) out[[nm]] <- cur[[nm]]
+
+  if (!is.null(cur$mode) && nzchar(place_as_chr(cur$mode, "")))
+    out$mode <- tolower(place_as_chr(cur$mode, "local"))
+
+  if (is.list(cur$local)) {
+    # Older files call it default_run_dir; both spellings mean "the run
+    # directory to use in local mode".
+    p <- cur$local$path %||% cur$local$default_run_dir %||% ""
+    out$local <- place_deep_merge(out$local, cur$local)
+    out$local$path <- place_as_path(p, "")
+  }
+  out$local$label <- place_as_chr(out$local$label, "")
+  out$local$path  <- place_as_path(out$local$path, "")
+
+  if (is.list(cur$server)) out$server <- place_deep_merge(out$server, cur$server)
+  out$server <- place_clean_server(out$server)
+  out
+}
+
+# ---- write -----------------------------------------------------------
+
+place_write <- function(app_dir, incoming = list()) {
+  cur <- place_read(app_dir)
+  inc <- if (is.list(incoming)) incoming else list()
+
+  if (!is.null(inc$mode) && nzchar(place_as_chr(inc$mode, "")))
+    cur$mode <- tolower(place_as_chr(inc$mode, "local"))
+
+  if (!is.null(inc$local_path))
+    cur$local$path <- place_as_path(inc$local_path, cur$local$path)
+
+  if (is.list(inc$local)) {
+    loc <- place_deep_merge(list(), inc$local)
+    if (!is.null(loc$label)) cur$local$label <- place_as_chr(loc$label, cur$local$label)
+    if (!is.null(loc$path))  cur$local$path  <- place_as_path(loc$path, cur$local$path)
+  }
+
+  srv_in <- inc$server
+  if (is.list(srv_in)) {
+    keep <- c("label", "host", "port", "user", "password", "exec_pc",
+              "data_root", "script_root", "work_root", "note", "runtime",
+              "ref_mode", "ref_path", "ref_note", "ref_archive")
+    srv_in <- srv_in[intersect(names(srv_in), keep)]
+    # The password is pulled out before the merge so that "empty" and
+    # "unspecified" behave identically: both keep the stored value.
+    pwd <- srv_in$password
+    srv_in$password <- NULL
+    srv_in <- place_deep_merge(list(), srv_in)
+    cur$server <- place_deep_merge(cur$server, srv_in)
+    if (!is.null(pwd) && length(pwd) && nzchar(place_as_chr(pwd, "")))
+      cur$server$password <- place_as_chr(pwd, "")
+  }
+
+  cur$server <- place_clean_server(cur$server)
+  cur$local$label <- place_as_chr(cur$local$label, "")
+  cur$local$path  <- place_as_path(cur$local$path, "")
+  cur$mode <- tolower(place_as_chr(cur$mode, "local"))
+
+  place_write_file(app_dir, cur)
+  cur
+}
+
+# ---- what the browser is allowed to see -------------------------------
+
+place_public <- function(app_dir) {
+  p <- place_read(app_dir)
+  srv <- p$server
+  pwd <- place_as_chr(srv$password, "")
+  srv$password <- NULL                       # never leaves this machine
+  srv$has_password <- nzchar(pwd)
+  srv$password_len <- nchar(pwd, type = "chars")
+  srv$password_len_set <- nzchar(pwd)
+  list(
+    mode = p$mode,
+    local = list(label = place_as_chr(p$local$label, ""),
+                 path  = place_as_path(p$local$path, "")),
+    server = srv
+  )
+}
+
+# ---- is this choice usable --------------------------------------------
+
+place_ready <- function(app_dir) {
+  p <- place_read(app_dir)
+  m <- as.character(p$mode %||% "")
+  if (identical(m, "local")) {
+    lp <- place_as_path(p$local$path, "")
+    return(isTRUE(nzchar(lp) && dir.exists(lp)))
+  }
+  if (identical(m, "server")) {
+    s <- p$server
+    # host / user / data_root are the three things that make a server run
+    # possible at all. Reachability is not checked here: from this machine
+    # the server is usually not reachable, and pretending otherwise would
+    # make "ready" depend on a network that has nothing to do with the
+    # question being answered.
+    return(isTRUE(nzchar(place_as_chr(s$host, "")) &&
+                  nzchar(place_as_chr(s$user, "")) &&
+                  nzchar(place_as_path(s$data_root, ""))))
+  }
+  FALSE
+}
+
+# ---- local mode: the run directory is the chosen one ------------------
+
+place_apply_local <- function(app_dir, app_state_dir = NULL) {
+  p <- place_read(app_dir)
+  if (!identical(as.character(p$mode %||% ""), "local"))
+    return(list(ok = FALSE, runDir = NULL))
+  lp <- place_as_path(p$local$path, "")
+  if (!nzchar(lp) || !dir.exists(lp))
+    return(list(ok = FALSE, runDir = NULL))
+  rd <- normalizePath(lp, winslash = "/", mustWork = FALSE)
+  if (is.null(app_state_dir) || !nzchar(app_state_dir))
+    app_state_dir <- file.path(app_dir, "state")
+  f <- file.path(app_state_dir, "state.json")
+  dir.create(dirname(f), showWarnings = FALSE, recursive = TRUE)
+  txt <- jsonlite::toJSON(list(runDir = rd), auto_unbox = TRUE, null = "null", digits = NA)
+  con <- file(f, open = "wb")
+  writeBin(charToRaw(enc2utf8(txt)), con)
+  close(con)
+  list(ok = TRUE, runDir = rd)
+}

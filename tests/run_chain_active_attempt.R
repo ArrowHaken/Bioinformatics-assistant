@@ -1,0 +1,15 @@
+#!/usr/bin/env Rscript
+source('engine/notebook_build.R'); source('engine/run_notebook.R')
+root <- tempfile('active-attempt-',tmpdir='/tmp'); dir.create(root)
+engine <- file.path(root,'engine');dir.create(engine)
+for(f in c('run_chain.R','run_notebook.R','notebook_build.R','run_lifecycle.R')) stopifnot(file.copy(file.path('engine',f),engine))
+rd <- file.path(root,'run');dir.create(rd)
+writeLines('writeLines("EXECUTED", "must-not-exist")',file.path(root,'fixture.R'))
+writeLines(c("CHAIN_ORDER <- 'a'", "resolve_step_cli <- function(...) list(title='a',cmd='Rscript',args=file.path(dirname(ENGINE_DIR),'fixture.R'),cwd=RUN_DIR)"),file.path(engine,'step_plan.R'))
+s <- rn_init(rd,engine,'a','single')
+manifest <- readBin(nb_manifest_file(rd),'raw',file.info(nb_manifest_file(rd))$size)
+result <- suppressWarnings(system2('Rscript',c(file.path(engine,'run_chain.R'),'--run-dir',rd,'--engine-dir',engine),stdout=TRUE,stderr=TRUE))
+stopifnot(identical(attr(result,'status'),3L),!file.exists(file.path(rd,'must-not-exist')),
+ identical(manifest,readBin(nb_manifest_file(rd),'raw',file.info(nb_manifest_file(rd))$size)))
+rn_finish(s,FALSE)
+cat('PASS actual runner refuses active attempt before executing or replacing existing manifest\n')

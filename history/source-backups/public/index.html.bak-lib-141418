@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个性化分析助手</title>
+<link rel="stylesheet" href="app.20261103a.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <b>个性化分析助手</b>
+      <span id="subline">正在连接本地服务…</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="tally" id="tally"></div>
+    <div id="whoamiHint"></div>
+    <button class="btn btn-sm qbtn" id="injectHint" style="display:none"></button>
+    <div class="btnrow">
+      <button class="btn primary" id="btnNewSession">新建分析</button>
+      <button class="btn" id="btnSessions">历史分析</button>
+      <button class="btn" id="btnHistory">存档与步骤回滚</button>
+      <button class="btn" id="btnLib">脚本数据库</button>
+    </div>
+  </div>
+</header>
+
+<!-- 当前看的是哪一次分析。
+     刷新后它必须还在 —— 这一条的需求原话是「停留在上一次处理的界面，刷新也不会变」。
+     所以这条状态来自服务端记录，不是浏览器内存。 -->
+<div class="sessbar" id="sessbar"></div>
+
+<nav class="sidenav" id="sidenav" aria-label="页面导航"></nav>
+
+<div class="wrap">
+
+  <div id="bootErr" class="card card-pad" style="display:none;border-color:#f3c9c6;background:#fdeceb">
+    <b>连不上本地服务。</b>
+    <p class="small" style="margin:6px 0 0" id="bootErrMsg"></p>
+  </div>
+
+  <div id="main" style="display:none">
+
+    <!-- ============ 第一步：运行位置与脚本库 ============ -->
+    <section class="sec" id="secPlace" data-nav="运行位置与脚本库" data-navgroup="开始">
+      <div class="sec-h">
+        <h2>第一步 · 运行位置与脚本库</h2>
+        <span class="note" id="placeNote"></span>
+      </div>
+      <div id="placeHost"></div>
+      <div id="identifyHost"></div>
+      <div id="taskLogHost"></div>
+    </section>
+
+    <!-- ============ 需要你决定的事 ============ -->
+    <section class="sec" id="secGates" data-nav="需要你决定的事" data-navgroup="开始">
+      <div class="sec-h">
+        <h2>需要你决定的事</h2>
+        <span class="note" id="gatesNote"></span>
+      </div>
+      <div id="gatesHost"></div>
+    </section>
+
+    <!-- ============ 跑分析 ============ -->
+    <section class="sec" id="secRun" data-nav="跑分析" data-navgroup="跑">
+      <div class="sec-h">
+        <h2>跑分析</h2>
+        <span class="note" id="runNote"></span>
+      </div>
+      <div class="card card-pad">
+        <div id="runCtl"></div>
+        <div id="stepsHost" class="stepgrid"></div>
+        <div class="runbar">
+          <button class="btn primary big" id="btnRunAll">一键全流程</button>
+          <button class="btn" id="btnPickMode">多选</button>
+          <button class="btn" id="btnRunSel" style="display:none">按顺序跑勾选的</button>
+          <button class="btn" id="btnPickAll" style="display:none">全选</button>
+          <span id="runSelHint" class="small"></span>
+          <span id="runState" class="runstate">空闲</span>
+          <div class="spacer"></div>
+          <button class="btn" id="btnStop" style="display:none">停止</button>
+        </div>
+        <div class="small" id="runHint" style="margin-top:8px"></div>
+        <div id="delegatedHost" style="margin-top:8px"></div>
+        <div id="flowHost" style="margin-top:14px"></div>
+        <details id="logFold" class="logfold">
+          <summary>运行日志 <span class="sm" id="logHint">还没开始</span></summary>
+          <pre class="log" id="logBox"></pre>
+        </details>
+      </div>
+    </section>
+
+    <!-- ============ 判定与返工 ============ -->
+    <!-- 为什么单独一块而不是塞进「跑分析」：
+         那一块回答「跑到哪了」，这一块回答「跑的东西对不对、能不能交」。
+         两个问题混在一屏，人会用「跑完了」去推断「结果对」，而这正是
+         这套闭环要拆开的那件事。 -->
+
+
+  </div>
+</div>
+
+<!-- ============ 选目录弹窗（供第一步的「选择工作路径」用） ============ -->
+<div class="modal" id="dlgDir" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>选一个工作路径</b>
+      <button class="btn ghost" data-dlgclose="dlgDir">关闭</button>
+    </div>
+    <div class="crumb" id="crumb">读取中…</div>
+    <div class="listing" id="listing"></div>
+    <div class="modal-f">
+      <span class="small" id="dlgHint"></span>
+      <div class="spacer"></div>
+      <button class="btn" id="dlgUp">上一层</button>
+      <button class="btn primary" id="dlgUse">就用这个目录</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 名词解释 ============ -->
+<div class="modal" id="dlgJargon" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>名词解释</b>
+      <span class="small" id="jargonNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgJargon">关闭</button>
+    </div>
+    <div class="modal-body" id="jargonHost"></div>
+  </div>
+</div>
+
+<!-- ============ 历史分析（挑一份记录，整页切过去） ============ -->
+<div class="modal" id="dlgSessions" style="display:none">
+  <div class="modal-box wide">
+    <div class="modal-h">
+      <b>历史分析</b>
+      <span class="small" id="sessNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgSessions">关闭</button>
+    </div>
+    <div class="modal-body" id="sessionsHost"></div>
+  </div>
+</div>
+
+<!-- ============ 存档与步骤回滚 ============ -->
+<div class="modal" id="dlgHistory" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>存档与步骤回滚</b>
+      <span class="small" id="histNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgHistory">关闭</button>
+    </div>
+    <div class="modal-body" id="historyHost"></div>
+  </div>
+</div>
+
+<!-- ============ 再次交给助手（这一步已完成时用） ============ -->
+<div class="modal" id="dlgRetry" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="retryTitle">再次交给助手处理</b>
+      <span class="small" id="retryNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgRetry">关闭</button>
+    </div>
+    <div class="modal-body">
+      <div id="retryDone" style="margin-bottom:14px"></div>
+      <label class="rrlab" for="retryReq">这次要它做什么（可留空，留空就是照原样再跑一次）</label>
+      <textarea id="retryReq" class="idea" placeholder="这次要补什么、改什么"></textarea>
+      <div class="rrhint">
+        这段会附在交给助手的指令里，标成「这次重新执行的额外要求」，和流程闸门的答案分开记录。
+      </div>
+    </div>
+    <div class="modal-f">
+      <span class="small" id="retryHint"></span>
+      <div class="spacer"></div>
+      <button class="btn" data-dlgclose="dlgRetry">取消</button>
+      <button class="btn primary" id="btnRetryGo">交给助手</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 产物下载 ============ -->
+<div class="modal" id="dlgArtifacts" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>产物下载</b>
+      <span class="small" id="artNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgArtifacts">关闭</button>
+    </div>
+    <div class="modal-f" style="border-top:none;border-bottom:1px solid var(--line);display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <button class="btn" id="btnRefreshArt">刷新</button>
+      <button class="btn" id="btnFetchAllArt">全部取回</button>
+      <button class="btn primary" id="btnBuildPpt">生成交付 PPT</button>
+      <button class="btn" id="btnBuildPack">打包交付物</button>
+      <span class="small" id="artActionNote"></span>
+    </div>
+    <div class="modal-body" id="artHost"></div>
+  </div>
+</div>
+
+<!-- ============ 高级参数 ============ -->
+<div class="modal" id="dlgAdv" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>高级参数</b>
+      <span class="small" id="settingsNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgAdv">关闭</button>
+    </div>
+    <div class="modal-body" id="settingsHost"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：打开（看内容） ============ -->
+<!-- ============ 脚本数据库 ============ -->
+<!-- 她要看的是「库里到底有什么」：三层结构 + 每层具体条目 + 条目里的文件。
+     不给结论性摘要：摘要看不出缺哪一份。 -->
+<div class="modal" id="dlgLib" style="display:none">
+  <div class="modal-box wide">
+    <div class="modal-h">
+      <b>脚本数据库</b>
+      <span class="small" id="libNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgLib">关闭</button>
+    </div>
+    <div class="modal-body" id="libHost"></div>
+  </div>
+</div>
+
+<div class="modal" id="dlgScript" style="display:none">
+  <div class="modal-box wide">
+    <div class="modal-h">
+      <b id="scriptTitle">脚本内容</b>
+      <button class="btn ghost" data-dlgclose="dlgScript">关闭</button>
+    </div>
+    <div class="modal-body" id="scriptBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：检查（AI 审核） ============ -->
+<div class="modal" id="dlgCheck" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="checkTitle">脚本检查</b>
+      <button class="btn ghost" data-dlgclose="dlgCheck">关闭</button>
+    </div>
+    <div class="modal-body" id="checkBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：修改（上传新文件 或 写要求交助手） ============ -->
+<div class="modal" id="dlgChange" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="changeTitle">修改脚本</b>
+      <button class="btn ghost" data-dlgclose="dlgChange">关闭</button>
+    </div>
+    <div class="modal-body" id="changeBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：上传（传完自动送审） ============ -->
+<div class="modal" id="dlgUpload" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="uploadTitle">上传脚本</b>
+      <button class="btn ghost" data-dlgclose="dlgUpload">关闭</button>
+    </div>
+    <div class="modal-body" id="uploadBody"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<!-- 平台任务通道（CatsCo Artifact Host API）：页面把「要办的事」变成一次
+     真实会话。它和上面那条 compose 通道是两条独立的路 —— 一条不通不代表
+     另一条不通，所以两条都要在，谁先连上用谁。 -->
+<script src="catsco-artifact-bridge.js?v=20261025origin"></script>
+<script src="app-shell.20261028a.js"></script>
+<script src="app.20261103a.js"></script>
+</body>
+</html>

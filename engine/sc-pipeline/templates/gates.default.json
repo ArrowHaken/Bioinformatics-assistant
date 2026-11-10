@@ -1,0 +1,396 @@
+{
+  "run_id": "",
+  "updated_at": "",
+  "_readme": [
+    "本文件列出「必须由人决定」的问题。脚本不会替人猜，也不会兜底。",
+    "status 三态：pending 等人答 / answered 已答 / auto 系统自动判定无需人管。",
+    "answer 写回后，工作台会同步把 pipeline.json 里对应项的 source 改成 user 并填上 value。",
+    "evidence 是决策依据。没有证据时不要硬填，留 null。"
+  ],
+  "gates": [
+    {
+      "id": "data_indir",
+      "stage": "数据位置",
+      "status": "pending",
+      "title": "原始数据在哪个目录？",
+      "question": "要处理的 10x matrix 放在哪里。这个目录下应当每个样本一个子目录，子目录里是 barcodes / features / matrix 三件套。",
+      "evidence": {
+        "type": "kv",
+        "caption": "当前记录",
+        "items": [
+          {
+            "k": "为什么必须由人指定",
+            "v": "路径因机器而异，猜错会直接读到别的数据，或者读不到而报错。"
+          }
+        ]
+      },
+      "options": [
+        {
+          "value": "auto",
+          "label": "我指定路径（推荐）",
+          "desc": "下面填目录的完整路径"
+        },
+        {
+          "value": "keep",
+          "label": "先放着，等数据拷过来再填",
+          "desc": "暂不推进主流程"
+        }
+      ],
+      "suggested": "auto",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "needs_detail": true,
+      "note": "例如 D:/data/7样本 或 /home/user/matrix。目录不存在时，容量预检会直接告诉你，不会闷头往下跑。",
+      "phase": "A"
+    },
+    {
+      "id": "reference_source",
+      "stage": "注释依据",
+      "status": "pending",
+      "title": "判细胞类型用什么依据？",
+      "question": "注释这一步必须有一份外部依据。没有依据就只能靠猜，那不是注释。",
+      "evidence": {
+        "type": "kv",
+        "caption": "两种依据的区别",
+        "items": [
+          {
+            "k": "文献参考表",
+            "v": "一份表格，写明每种细胞类型有哪些 marker 基因。通常来自论文补充材料。"
+          },
+          {
+            "k": "marker 词典",
+            "v": "JSON 结构，{细胞类型: {markers: [...], refs: [...]}}。可由文献检索自动生成。"
+          },
+          {
+            "k": "两者都不给",
+            "v": "注释这一步跳过，出图的「注释段」和「差异富集段」出不来。"
+          }
+        ]
+      },
+      "options": [
+        {
+          "value": "reference_table",
+          "label": "用文献参考表",
+          "desc": "填文件的完整路径（xlsx / csv 都行）"
+        },
+        {
+          "value": "lit_dict",
+          "label": "用 marker 词典",
+          "desc": "填 JSON 文件的完整路径"
+        },
+        {
+          "value": "skip",
+          "label": "这次不做注释",
+          "desc": "跳过注释；后面注释图和富集图会缺"
+        }
+      ],
+      "suggested": "reference_table",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "needs_detail": true,
+      "note": "以往用的那份是 2021-07-12390D 的 Supplementary Table 5。注意它里面没有尿路上皮（UC）条目 —— 那类细胞当时是靠别的依据命名的。",
+      "phase": "A"
+    },
+    {
+      "id": "qc_threshold",
+      "stage": "质控",
+      "status": "pending",
+      "title": "质控下限 nFeature 取多少？",
+      "question": "官方材料里出现了三个不同的数字，必须确认以哪个为准，否则质控这一步无法执行。",
+      "evidence": {
+        "type": "table",
+        "caption": "四处出处的实测对照",
+        "columns": [
+          "出处",
+          "写的值",
+          "性质",
+          "是否实际执行"
+        ],
+        "rows": [
+          [
+            "官方脚本 analysis.R 第 6 行",
+            "300",
+            "代码",
+            "是"
+          ],
+          [
+            "官方脚本 01_packages.R 注释",
+            "500",
+            "注释掉了，未执行",
+            "否"
+          ],
+          [
+            "官方交付 PPT 第 3 页",
+            "400",
+            "对外文字说明",
+            "否"
+          ],
+          [
+            "官方 RDS 实际数据（81713 细胞）",
+            "最小值 401",
+            "实测反推",
+            "实际生效"
+          ]
+        ]
+      },
+      "options": [
+        {
+          "value": "300",
+          "label": "300（照官方代码）",
+          "desc": "与官方脚本一致；但官方数据里没有低于 401 的细胞，说明他们实际跑的不是这个值"
+        },
+        {
+          "value": "400",
+          "label": "400（对齐官方数据实测）",
+          "desc": "与官方交付数据的最小值吻合"
+        },
+        {
+          "value": "keep",
+          "label": "保持原值，等官方回复",
+          "desc": "暂不推进质控"
+        }
+      ],
+      "suggested": "400",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "note": "这条同时要向官方提问：你们正式答复 300，但你们数据里最小值是 401，以哪个为准？",
+      "phase": "A"
+    },
+    {
+      "id": "read_exclusion",
+      "stage": "读入前剔除",
+      "status": "pending",
+      "title": "读入前要整体剔除样本吗？",
+      "question": "如果有明确不能用的样本（数据质量差、实验设计外），在这里剔除。默认不剔。",
+      "evidence": {
+        "type": "table",
+        "caption": "本次扫描到的样本",
+        "columns": [
+          "样本",
+          "原始 barcode 数",
+          "备注"
+        ],
+        "rows": []
+      },
+      "options": [
+        {
+          "value": "none",
+          "label": "不剔除（推荐）",
+          "desc": "全部样本进入流程"
+        },
+        {
+          "value": "exclude",
+          "label": "剔除指定样本",
+          "desc": "在下面勾选要剔除的样本"
+        }
+      ],
+      "suggested": "none",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "sample_options": [],
+      "note": "读入前剔除最省算力。若只是想看结果，不建议在这剔。",
+      "phase": "A"
+    },
+    {
+      "id": "cluster_filter",
+      "stage": "筛群",
+      "status": "pending",
+      "title": "一次聚类后要剔除哪些簇？",
+      "question": "这一步决定哪些细胞进入后续分析。默认不剔除。若要剔除，优先按细胞类型名，不要按簇号。",
+      "evidence": {
+        "type": "table",
+        "caption": "本次一次聚类结果（跑完第一个样本后自动填充）",
+        "columns": [
+          "簇",
+          "细胞数",
+          "占比",
+          "最高得分类型",
+          "第2类型",
+          "分差",
+          "Top markers"
+        ],
+        "rows": []
+      },
+      "options": [
+        {
+          "value": "none",
+          "label": "不剔除（推荐）",
+          "desc": "保留全部簇。上游过滤越少，下游越可追溯"
+        },
+        {
+          "value": "by_name",
+          "label": "按细胞类型名剔除",
+          "desc": "换数据也安全，推荐用于长期复用"
+        },
+        {
+          "value": "by_cluster",
+          "label": "按本次簇号剔除",
+          "desc": "仅本次有效。换一次运行簇号就全变，必须重做"
+        }
+      ],
+      "suggested": "none",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "needs_detail": true,
+      "note": "历史教训：照抄对方脚本里的「剔除 16–22 号簇」，在自己数据上误删了 1590 个细胞，而且不报错。簇号是本次运行的产物，不是细胞的属性。",
+      "phase": "B"
+    },
+    {
+      "id": "post_cluster_exclusion",
+      "stage": "剔除样本",
+      "status": "pending",
+      "title": "聚类后要剔除哪个样本？",
+      "question": "为了实验设计均衡（如 3 对 3）有时需要剔除某个样本。这是人为决策，脚本不会自己判断。",
+      "evidence": {
+        "type": "table",
+        "caption": "各样本在各类细胞里的占比（跑完一次聚类后自动填充）",
+        "columns": [
+          "样本",
+          "分组",
+          "细胞数",
+          "在各类中的占比"
+        ],
+        "rows": []
+      },
+      "options": [
+        {
+          "value": "none",
+          "label": "不剔除（推荐）",
+          "desc": "保留全部样本"
+        },
+        {
+          "value": "exclude",
+          "label": "剔除指定样本",
+          "desc": "在下面勾选。样本名必须来自本次实际结果，不许预先写死"
+        }
+      ],
+      "suggested": "none",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "sample_options": [],
+      "note": "对方脚本里这一行是写死的样本名。他们的理由（结合细胞类型比例做 3 对 3）不是代码算出来的，是人的判断。",
+      "phase": "B"
+    },
+    {
+      "id": "lowconfidence",
+      "stage": "注释",
+      "status": "pending",
+      "title": "多小的簇算「低置信」，不强行命名？",
+      "question": "细胞数太少的簇，任何统计都不可靠。定一个门槛，低于它的簇标为低置信而不是硬安一个名字。",
+      "evidence": {
+        "type": "table",
+        "caption": "本次各簇细胞数（跑完聚类后自动填充）",
+        "columns": [
+          "簇",
+          "细胞数"
+        ],
+        "rows": []
+      },
+      "options": [
+        {
+          "value": "100",
+          "label": "100 个细胞"
+        },
+        {
+          "value": "200",
+          "label": "200 个细胞（推荐）",
+          "desc": "与以往实践一致"
+        },
+        {
+          "value": "500",
+          "label": "500 个细胞",
+          "desc": "更保守"
+        },
+        {
+          "value": "flag_only",
+          "label": "只标记不剔除",
+          "desc": "低置信照常输出，但打上标记供人工复核"
+        }
+      ],
+      "suggested": "flag_only",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": null,
+      "answered_at": null,
+      "note": "低置信不代表错，只是证据不足。标出来比硬命名负责。",
+      "phase": "B"
+    },
+    {
+      "id": "memory",
+      "stage": "容量预检",
+      "status": "auto",
+      "title": "内存不够时怎么办？",
+      "question": "系统自动判定，无需人工回答。列出仅为留痕。",
+      "evidence": {
+        "type": "kv",
+        "caption": "自动判定结果",
+        "items": []
+      },
+      "options": [
+        {
+          "value": "auto",
+          "label": "自动：够走原路径，不够走分块路径",
+          "desc": "分块等价已实测（排名一致、差 0）"
+        },
+        {
+          "value": "force_blocked",
+          "label": "强制走分块路径"
+        },
+        {
+          "value": "force_native",
+          "label": "强制走原路径（内存不够会失败）"
+        }
+      ],
+      "suggested": "auto",
+      "answer": "auto",
+      "answer_detail": null,
+      "answered_by": "system",
+      "answered_at": null,
+      "note": "铁律：不抽样、不降精度。只有一条替代路径，且必须结果等价。",
+      "phase": "auto"
+    },
+    {
+      "id": "seurat_version",
+      "stage": "依赖检查",
+      "status": "auto",
+      "title": "Seurat 用 v4 还是 v5？",
+      "question": "系统自动判定。官方基于 v4，v5 的槽访问语义不同，结果不可比。",
+      "evidence": {
+        "type": "kv",
+        "caption": "本机实测",
+        "items": []
+      },
+      "options": [
+        {
+          "value": "v4",
+          "label": "Seurat v4（推荐）",
+          "desc": "与官方一致，结果可比"
+        },
+        {
+          "value": "v5_allow",
+          "label": "Seurat v5 + 显式接受差异",
+          "desc": "必须在报告中标注结果不可与官方直接比对"
+        }
+      ],
+      "suggested": "v4",
+      "answer": null,
+      "answer_detail": null,
+      "answered_by": "system",
+      "answered_at": null,
+      "note": "",
+      "phase": "auto"
+    }
+  ]
+}

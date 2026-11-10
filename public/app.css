@@ -1,0 +1,1709 @@
+:root{
+  /* 三个页签各自一套主色。为什么要三套：她说"按钮都用不同的颜色，点中的亮起"。
+     同一套灰按钮分不出自己在哪一页；三色一眼就知道当前停在哪。 */
+  --tab-cur:#0f6b56;  --tab-cur-soft:#e7f2ee;   /* 当前分析：品牌绿 */
+  --tab-hist:#2f5b86; --tab-hist-soft:#e9f0f8;  /* 历史分析：靛蓝 */
+  --tab-lib:#6b4f9e;  --tab-lib-soft:#f1ecf9;   /* 脚本数据库：紫 */
+  --bg:#f5f7f5; --surface:#fff; --line:#e3e8e3; --line-soft:#eef1ee;
+  --ink:#191d1b; --ink2:#4c554f; --ink3:#7c857f;
+  --brand:#0f6b56; --brand-soft:#e7f2ee;
+  --wait:#c2410c; --wait-soft:#fdf3ec;
+  --done:#15803d; --done-soft:#eaf6ee;
+  --info:#1d5fa8; --info-soft:#eaf1f9;
+  --err:#a32b22; --err-soft:#fdeceb;
+  --r:12px; --sh:0 1px 2px rgba(16,24,20,.04), 0 6px 18px rgba(16,24,20,.05);
+}
+
+/* ---------- 文字层级：字号和字重只有这一处定义 ----------
+   为什么集中到这里：这个文件是一点点长出来的，字号字重散落在几十条规则里，
+   同一个语义层在不同地方大小不一（区块标题 17.5 而卡片标题 17，顶栏品牌名却只有 16），
+   还出现过「说明文字比它所属的标题更大更粗」。用户的原话是
+   「不要出现低层的字体比上层还要显眼突出的情况」。所以按语义定成 7 层，
+   层级严格单调，规则里只允许引用变量，不再写死 px。
+
+   L1 页面主标题      顶栏品牌名、空态大标题
+   L2 区块标题        .sec-h h2（「第一步 · 运行位置与脚本库」这类）
+   L3 卡片/分组标题   h3/h4、折叠条标题、弹窗标题、脚本环节名、闸门标题
+   L4 正文与输入值    正文、表单值、按钮、表格正文、选项
+   L5 说明与标签      .small、字段名、时间戳、路径、代码、圆内序号
+   L6 极小注释        徽标、计数、状态标签
+   L7 微标签          左侧导航分组名（比 L6 还小，字重也再降）
+
+   三条不变量（以后改字号先满足它们，否则层级就又乱了）：
+   1) 字号严格递减：fs1 > fs2 > fs3 > fs4 > fs5 > fs6 > fs7。
+   2) 元素只能取自己那一层的字号，不许跨层借用 —— 同层同号是「统一」的前提。
+   3) 字重不得越级：元素字重 ≤ 它所在层的字重上限，L5 / L6 / L7 一律 400。
+      只有 L1–L4 允许加粗，因为小字一加粗就会盖过它上面的标题。
+      字重档位到 400 就到头了（系统字体没有比 normal 更细的一档），
+      所以 L5–L7 同为 400 是物理下限，不是没做。 */
+:root{
+  /* 三个标题档位整体上调：她说"一级标题要更粗更大，各级标题都要突出"。
+     调的是档位本身，不是某一处 —— 否则页面里同类标题又会大小不一。 */
+  --fs-1:24px;   --fw-1:800;      /* 页面主标题 */
+  --fs-2:20px;   --fw-2:700;      /* 区块标题 */
+  --fs-3:17px;   --fw-3:650;      /* 卡片 / 分组标题 */
+  --fs-4:14px;   --fw-4:400;      /* 正文与输入值 */
+  --fs-5:12.5px; --fw-5:400;      /* 说明与标签 */
+  --fs-6:11.5px; --fw-6:400;      /* 徽标 / 计数 */
+  --fs-7:11px;   --fw-7:400;      /* 导航分组等微标签 */
+  --fs-glyph:10px; --fw-glyph:700;/* 圆形图标里的问号：图形里的字，不参与层级 */
+  --fs-code:.88em;                /* 代码字样：相对字号，跟着所在层等比缩放，不占层级 */
+  --fw-strong:500;                /* 同层强调档，只允许用在 L4，禁止下放到 L5 及以下 */
+
+  /* ---------- 字体栈：只允许这两个 ----------
+     为什么收成两个：这个文件里原来散着 20 处 font-family，
+     等宽字体写成过「ui-monospace,Consolas,Menlo」和「ui-monospace,Menlo,Consolas」
+     两种顺序 —— 同一个页面里路径的等宽字形在不同位置不一样，看起来就是「字体不统一」。
+     以后只允许写 var(--font-sans) / var(--font-mono)，或 inherit（表单控件跟随正文）。 */
+  --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+              "Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+  --font-mono:ui-monospace,SFMono-Regular,Consolas,Menlo,"Courier New",monospace;
+}
+
+/* <b>/<strong> 浏览器默认 700。散在各处的 <b> 不加约束就会把低层文字顶到标题之上，
+   这正是「低层更显眼」的来源之一。这里先关掉自动加粗，
+   谁需要强调，由它所在层的规则显式给字重。 */
+b,strong{font-weight:inherit}
+
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);
+  font-family:var(--font-sans);
+  font-size:var(--fs-4);font-weight:var(--fw-4);line-height:1.7;
+  -webkit-font-smoothing:antialiased}
+h1,h2,h3,h4{margin:0;font-weight:var(--fw-3);line-height:1.4}
+button{font-family:var(--font-sans);font-size:inherit;font-weight:inherit}
+code{font-family:var(--font-mono);font-size:var(--fs-code);background:#eef1ee;padding:1px 6px;border-radius:5px;color:var(--ink2)}
+.spacer{flex:1}
+
+/* ---------- 服务器信息：一个字段一行 ----------
+   路径很长，必须允许换行；字段名固定宽度好对齐，值占剩下的宽度。 */
+.whereshow{border:1px solid #cbe7d4;background:var(--done-soft);border-radius:10px;padding:12px 14px}
+.wr{display:grid;grid-template-columns:96px 1fr;gap:6px 12px;padding:4px 0;font-size:var(--fs-4)}
+.wr + .wr{border-top:1px solid rgba(21,128,61,.12)}
+/* 字段名是标签（L5），比它指向的值小一号，才不会出现「说明比内容抢眼」 */
+.wk{color:var(--ink3);white-space:nowrap;font-size:var(--fs-5);font-weight:var(--fw-5)}
+.wv{min-width:0;overflow-wrap:anywhere;word-break:break-word;
+  font-family:var(--font-sans);font-size:var(--fs-5);line-height:1.6}
+/* 第一行是这一步的主值，允许升到 L4 并给 500 强调，但不再越过 L4 */
+.wr:first-child .wv{font-family:var(--font-sans);font-size:var(--fs-4);font-weight:var(--fw-strong)}
+@media(max-width:640px){.wr{grid-template-columns:1fr;gap:2px}
+  .wk{font-size:var(--fs-5)}}
+
+/* ---------- 左侧导航 ----------
+   导航文字永远显示。
+   之前按视口宽度分档，中等宽度就把文字藏成圆点 —— 结果是用户看不懂
+   那些点是什么（实际反馈原话：「怎么就只有这个红点啊」）。
+   导航的意义就是让人知道有什么，藏掉文字等于把它的用途取消。
+   所以改成：不藏文字，只让它在空间不够时收紧宽度。
+   空间不足直接改成贴底横条（见下方媒体查询），也不隐藏。
+   宽屏用 calc 把导航贴在正文左边，不然在 1920 上它会飘到很远的角落。 */
+.sidenav{position:fixed;left:max(14px, calc(50% - 730px));top:calc(50% + 10px);
+  transform:translateY(-50%);z-index:45;
+  display:none;flex-direction:column;gap:2px;padding:9px 6px;border-radius:14px;
+  background:rgba(255,255,255,.94);backdrop-filter:blur(10px);
+  border:1px solid var(--line);box-shadow:0 4px 20px rgba(16,24,20,.09);max-width:176px}
+.sidenav.on{display:flex}
+.snavitem{display:flex;align-items:center;gap:8px;padding:6px 10px;border-radius:9px;
+  cursor:pointer;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);border:none;background:none;
+  text-align:left;white-space:nowrap;transition:background .12s,color .12s}
+.snavitem:hover{background:var(--brand-soft);color:var(--brand)}
+/* 选中态靠底色和品牌色，不加粗：导航项是 L5，加粗就会盖过它上面的标题 */
+.snavitem.active{background:var(--brand-soft);color:var(--brand);font-weight:var(--fw-5)}
+.snavitem .dot{flex:0 0 7px;height:7px;border-radius:50%;background:#c9d2cc}
+.snavitem.active .dot{background:var(--brand)}
+.snavitem.s-done .dot{background:var(--done)}
+.snavitem.s-warn .dot{background:var(--wait)}
+.snavitem.s-err .dot{background:var(--err)}
+.snavsep{height:1px;background:var(--line-soft);margin:5px 8px}
+/* 分组名是比导航项更小的微标签（L7），所以字重也必须更轻，
+   靠字距和大写区分层级，不靠加粗。 */
+.snavgroup{font-size:var(--fs-7);font-weight:var(--fw-7);letter-spacing:.09em;color:var(--ink3);
+  padding:7px 10px 3px;text-transform:uppercase}
+/* 空间收窄时只压缩宽度和内边距，**不隐藏文字**。
+   之前在这一档把文字 display:none 掉，就成了用户看到的一排红点。 */
+@media(max-width:1559px){
+  .sidenav{left:14px;max-width:150px;padding:8px 5px}
+  /* 窄屏不再单独降字号 —— 以前这里悄悄降到 12px/10px，
+     正是「同一个层级在不同地方字号不同」的来源。字号一律走层级变量。 */
+  .snavitem{padding:6px 8px;font-size:var(--fs-5);gap:6px}
+  .snavgroup{padding:6px 8px 2px;font-size:var(--fs-7)}
+}
+/* 再窄就没有放侧栏的地方了（正文居中，左边只剩不到 200px）。
+   不要直接藏掉 —— 藏了就等于导航消失，用户会觉得功能没了。
+   改成贴底的横向条，能滑，全部入口仍然够得着，文字照样显示。 */
+@media(max-width:1239px){
+  .sidenav{left:0;right:0;top:auto;bottom:0;transform:none;max-width:none;
+    flex-direction:row;gap:4px;padding:6px 8px;border-radius:0;
+    border-left:none;border-right:none;border-bottom:none;
+    overflow-x:auto;-webkit-overflow-scrolling:touch;
+    box-shadow:0 -2px 14px rgba(16,24,20,.10)}
+  .snavgroup,.snavsep{display:none}
+  .snavitem{flex:0 0 auto;padding:6px 11px;font-size:var(--fs-5)}
+  .snavitem span.tx{display:inline}
+  .wrap{padding-bottom:78px}
+}
+
+/* ---------- 历史记录 ---------- */
+.histrow{display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border-top:1px solid var(--line-soft)}
+.histrow:first-child{border-top:none}
+.histwhen{flex:0 0 132px;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);font-variant-numeric:tabular-nums}
+.histmain{flex:1;min-width:0}
+.histsteps{display:flex;flex-wrap:wrap;gap:5px;margin-top:5px}
+.hstep{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px;background:#f2f4f2;color:var(--ink2)}
+.hstep.done{background:var(--done-soft);color:var(--done)}
+.hstep.failed{background:var(--err-soft);color:var(--err)}
+.hstep.stale{background:var(--wait-soft);color:var(--wait)}
+.histact{flex:0 0 auto;display:flex;flex-direction:column;gap:5px;align-items:flex-end}
+.histtag{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px;background:#f2f4f2;color:var(--ink3);white-space:nowrap}
+
+/* ---------- 步骤条（可回退） ---------- */
+.chainbar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;padding:14px 0 2px;
+  border-top:1px solid var(--line-soft);margin-top:14px}
+.chainitem{display:flex;align-items:center;gap:6px;font-size:var(--fs-5);font-weight:var(--fw-5);padding:5px 11px;
+  border-radius:999px;border:1.5px solid var(--line);background:#fff;cursor:pointer;color:var(--ink2)}
+.chainitem:hover{border-color:#c3d4cb}
+.chainitem.done{border-color:#cbe7d4;background:var(--done-soft);color:var(--done)}
+.chainitem.failed{border-color:#f3c9c6;background:var(--err-soft);color:var(--err)}
+.chainitem.stale{border-color:#f0d3bd;background:var(--wait-soft);color:var(--wait)}
+/* 胶囊里的序号是徽标级，比胶囊文字小，且不再加粗 */
+.chainitem .n{font-size:var(--fs-6);font-weight:var(--fw-6)}
+.chainer{color:#bcc5bf;font-size:var(--fs-6);font-weight:var(--fw-6)}
+
+/* ---------- 脚本工作台 ---------- */
+.swtabs{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px}
+.swtab{padding:7px 14px;border-radius:9px;border:1.5px solid var(--line);background:#fff;
+  cursor:pointer;font-size:var(--fs-4);font-weight:var(--fw-4);color:var(--ink2)}
+.swtab.on{border-color:var(--brand);background:var(--brand-soft);color:var(--brand);font-weight:var(--fw-strong)}
+.scriptview{margin-top:12px;border:1px solid var(--line);border-radius:10px;overflow:hidden}
+.scriptview .sh{display:flex;align-items:center;gap:10px;padding:10px 14px;background:#f7f9f7;
+  border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+.scriptview .sh .pth2{font-family:var(--font-sans);font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);word-break:break-all}
+pre.code{margin:0;padding:14px 16px;max-height:460px;overflow:auto;background:#fbfcfb;
+  font-family:var(--font-mono);font-size:var(--fs-5);font-weight:var(--fw-5);line-height:1.6;
+  white-space:pre;color:#26302b}
+textarea.editor{width:100%;min-height:420px;padding:14px 16px;font-family:var(--font-mono);
+  font-size:var(--fs-5);line-height:1.6;border:1.5px solid var(--line);border-radius:10px;
+  background:#fbfcfb;color:#26302b;resize:vertical}
+textarea.editor:focus{outline:none;border-color:var(--brand);background:#fff}
+textarea.idea{width:100%;min-height:96px;padding:11px 14px;font-size:var(--fs-4);font-weight:var(--fw-4);font-family:var(--font-sans);
+  border:1.5px solid var(--line);border-radius:10px;resize:vertical}
+textarea.idea:focus{outline:none;border-color:var(--brand)}
+.chklist{display:flex;flex-direction:column;gap:6px;margin:10px 0}
+.chk{display:flex;align-items:flex-start;gap:9px;font-size:var(--fs-4);font-weight:var(--fw-4);padding:8px 12px;
+  border-radius:8px;background:#fafbfa;border:1px solid var(--line-soft)}
+/* ✓ ! × 是状态符号（图形），给同层强调档，颜色才是它的语义 */
+.chk .mk{flex:0 0 16px;font-weight:var(--fw-strong);text-align:center}
+.chk.pass .mk{color:var(--done)}
+.chk.warn{background:#fffdf8;border-color:#f0e2c4}
+.chk.warn .mk{color:var(--wait)}
+.chk.fail{background:#fdf6f5;border-color:#f3d3d0}
+.chk.fail .mk{color:var(--err)}
+.chk.skip{opacity:.6}
+/* 证据文本是 L5 里的注解：可以小、比行文字轻，但绝不允许加粗 */
+.chk .ev{color:var(--ink3);font-size:var(--fs-5);font-weight:var(--fw-5);font-family:var(--font-sans);word-break:break-all}
+
+/* ---------- 术语解释 ---------- */
+.term{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;
+  border-radius:50%;background:#e5eae6;color:var(--ink2);font-size:var(--fs-glyph);font-weight:var(--fw-glyph);
+  cursor:help;vertical-align:1px;margin-left:4px;flex:0 0 auto}
+.jargon{border:1px solid var(--line);border-radius:10px;background:#fcfdfc;padding:14px 16px;margin:14px 0}
+/* 这个盒子的小标题属于 L3，和卡片标题同号同重 */
+.jargon h5{margin:0 0 8px;font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink2)}
+.jargon dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:7px 14px;font-size:var(--fs-4)}
+.jargon dt{font-weight:var(--fw-strong);white-space:nowrap}
+.jargon dd{margin:0;color:var(--ink2)}
+
+/* ---------- 顶栏 ---------- */
+.topbar{position:sticky;top:0;z-index:40;background:rgba(255,255,255,.96);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+/* 顶栏宽度放给整条工具行：页签三枚 + 右侧两个动作，1040 装不下就换行，
+   而换行后"最右"就变成了第二行的最右。这里加宽并收紧间距，保证同一行。 */
+/* 顶栏两行：第一行放"在哪一页 + 能做什么"，第二行放状态。
+   为什么分两行：全塞一行时，窗口一窄就自动换行 ——
+   页签飘到半空、右侧按钮被顶到别处，看起来就是"错乱"。
+   分两行后每行各管一件事，窄了也只会各自内部收缩，不会互相插队。 */
+/* 顶栏纵向三段：大标题 / 页签+动作 / 状态。
+   她说"当前分析那一串按钮都在大标题下方"，横向混排做不到这一点。 */
+.topbar-in{max-width:1240px;margin:0 auto;padding:12px 22px;
+  display:flex;flex-direction:column;align-items:stretch;gap:8px}
+.brand{display:flex;align-items:baseline;gap:10px;min-width:0}
+/* 页签与动作同一行：页签靠左，三个动作整组靠右 */
+.tabline{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.tabline .tabacts{margin-left:auto}
+/* 状态行独占一整行，靠左排；不参与第一行的水平分配 */
+.topstat{display:flex;align-items:center;gap:18px;flex-wrap:wrap;
+  border-top:1px solid var(--line-soft);padding-top:3px;
+  font-size:var(--fs-5);color:var(--ink3);font-weight:var(--fw-5)}
+.topstat #subline{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+/* 品牌名是页面主标题（L1），必须是整页最大最重的一处 */
+.brand b{font-size:var(--fs-1);font-weight:var(--fw-1)}
+.brand span{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+/* ---------- 顶部三个页签 ---------- */
+.tabs{display:flex;gap:5px;align-items:center;flex:0 0 auto}
+.tab{border:1.5px solid transparent;background:#fff;cursor:pointer;border-radius:999px;
+  padding:6px 13px;font-size:var(--fs-4);font-weight:var(--fw-4);font-family:inherit;
+  transition:background .14s,border-color .14s,color .14s,box-shadow .14s}
+/* 未选中：浅底 + 本色字，看得出它是哪一页，但不抢当前页 */
+.tab-cur{color:var(--tab-cur);background:var(--tab-cur-soft);border-color:#cfe4da}
+.tab-hist{color:var(--tab-hist);background:var(--tab-hist-soft);border-color:#d3e0ee}
+.tab-lib{color:var(--tab-lib);background:var(--tab-lib-soft);border-color:#ddd3ee}
+.tab:hover{filter:brightness(.985)}
+/* 选中：实心填色 + 白字 + 一点投影，按下去是"亮着"的感觉 */
+.tab.on{color:#fff;box-shadow:0 4px 12px rgba(16,24,20,.14)}
+.tab-cur.on{background:var(--tab-cur);border-color:var(--tab-cur)}
+.tab-hist.on{background:var(--tab-hist);border-color:var(--tab-hist)}
+.tab-lib.on{background:var(--tab-lib);border-color:var(--tab-lib)}
+/* 右上两个动作：默认中性（白底灰边深字），不预先上色。
+   为什么："新建分析"原来是固定绿底，和"存档与步骤回滚"并排放着像
+   一个已选中、一个没选中；两个都是动作，不该有主次假象。
+   只有悬停、按下时才出现当前页的颜色。 */
+.tabacts{gap:8px;margin-left:auto;flex:0 0 auto}
+/* 三个动作统一"淡绿底、悬停加深"：
+   她说不要一个固定色、一个没颜色；并排时权重一致，才看得出是三个并列动作。 */
+.btn.act-arc{background:#eef7f2;border-color:#cfe4da;color:#14503f}
+.btn.act-arc:hover{background:#dcefe6;border-color:#a9cfbe;color:#0c4436}
+.btn.act-arc:active{background:#cbe6da;border-color:#8ec0aa}
+.btn.act-arc:focus-visible{outline:2px solid var(--tab-cur);outline-offset:1px}
+
+.tally{display:flex;gap:8px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;
+  font-size:var(--fs-5);font-weight:var(--fw-5);border:1px solid transparent;white-space:nowrap}
+.pill.wait{background:var(--wait-soft);color:var(--wait);border-color:#f0d3bd}
+.pill.ok{background:var(--done-soft);color:var(--done);border-color:#c8e6d2}
+.pill.plain{background:#f2f4f2;color:var(--ink2);border-color:var(--line)}
+.pill.err{background:var(--err-soft);color:var(--err);border-color:#f3c9c6}
+/* 计数比胶囊文字大一号（L4），但仍然低于任何标题 */
+.pill .n{font-size:var(--fs-4);font-weight:var(--fw-strong)}
+.btn{border:1px solid var(--line);background:#fff;color:var(--ink);
+  padding:7px 14px;border-radius:9px;cursor:pointer;font-size:var(--fs-4);font-weight:var(--fw-strong);
+  transition:background .12s,border-color .12s;
+  /* 按钮里的字不许折行：窗口一窄，「切换」会被挤成竖排三行，
+     看起来像多了好几个回车。按钮要么整行放下，要么让表格横向滚动。 */
+  white-space:nowrap}
+.btn:hover{background:#fafbfa;border-color:#ccd4ce}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+.btn.primary:hover{background:#0c5a48}
+/* 「大按钮」只放大内边距，不放字号 —— 字号到 L4 封顶，
+   原来的 14.5px 已经和 L3 的卡片标题一样大，属于越级。 */
+.btn.big{padding:11px 22px;font-size:var(--fs-4);border-radius:10px}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--brand);padding:6px 8px;font-weight:var(--fw-strong)}
+.btn.ghost:hover{background:var(--brand-soft)}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+
+/* ---------- 布局 ---------- */
+.wrap{max-width:1040px;margin:0 auto;padding:22px}
+.sec{margin-bottom:26px}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin:0 0 12px;flex-wrap:wrap}
+.sec-h h2{font-size:var(--fs-2);font-weight:var(--fw-2);letter-spacing:.2px;
+  /* 只要左侧一道色条，不要渐变底：她要的是"清单点"式的干净标记。
+     渐变铺开会让标题看着像一块色块，和下面正文抢注意力。 */
+  padding-left:11px;border-left:4px solid var(--brand)}
+.sec-h .note{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh)}
+.card-pad{padding:20px 22px}
+/* 卡片标题行：标题在左，动作跟在整行最右。
+   为什么不把按钮留在标题下面：它属于这张卡的动作，不是正文的一部分，
+   单独一行会把日志正文往下推一截。 */
+.panel-h{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 10px}
+.panel-h h3{margin:0;font-size:var(--fs-3);font-weight:var(--fw-3)}
+/* index.html 里那条「连不上本地服务。」是个裸 <b>。关掉默认加粗后它会掉成正文；
+   它是这张卡片的标题，按 L3 给。选择器只限定这一处，不影响其他裸 <b>。 */
+#bootErr b{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.small{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+
+/* ---------- 空态 ---------- */
+.empty{max-width:680px;margin:44px auto;text-align:center}
+/* 空态标题就是此时页面的主标题，所以跟品牌名同层（L1） */
+.empty h2{font-size:var(--fs-1);font-weight:var(--fw-1);margin-bottom:8px}
+.empty p{color:var(--ink2);margin:0 0 22px}
+.guide{display:grid;gap:12px;text-align:left}
+.gitem{display:flex;gap:14px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;box-shadow:var(--sh)}
+/* 圆内序号算标签级（L5）：要比标题小，圆和底色负责显眼 */
+.gitem .n{flex:0 0 26px;height:26px;border-radius:50%;background:var(--brand-soft);color:var(--brand);
+  font-weight:var(--fw-5);display:flex;align-items:center;justify-content:center;font-size:var(--fs-5);margin-top:1px}
+.gitem h4{font-size:var(--fs-3);font-weight:var(--fw-3);margin-bottom:2px}
+.gitem p{font-size:var(--fs-4);color:var(--ink2);margin:0}
+
+/* ---------- 统一节标题 ----------
+   这一页上有三处「节」：识别结论的四段、脚本明细、待你决定的事。
+   以前它们各用各的标题（有的 15px 带圆点、有的 14px 带序号、有的只有一行灰字），
+   看起来像三个不相干的页面拼在一起。现在全部走这一个类：
+   同一字号、同一字重、同一左侧色条、同一间距。
+   任何新加的小节都用它，不要再另造一套。 */
+.sech{display:flex;align-items:center;gap:9px;margin:0 0 10px;
+  font-size:var(--fs-2);font-weight:var(--fw-2);color:var(--ink);line-height:1.4;letter-spacing:.2px}
+.sech::before{content:"";flex:0 0 4px;height:18px;border-radius:2px;background:var(--brand)}
+.sech .n{flex:0 0 auto;color:var(--brand);font-weight:var(--fw-2)}
+.sech .aside{margin-left:auto;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3)}
+/* 节与节之间只用一条细线分隔，不再用大色块卡片把它包起来 */
+.secblk{padding-top:16px;margin-top:16px;border-top:1px solid var(--line-soft)}
+.secblk:first-child{padding-top:0;margin-top:0;border-top:none}
+
+/* ---------- 可折叠小节（识别结论的四段） ----------
+   用原生 details/summary，只为它补三件事：
+   1) 去默认三角、换成一个能跟着开合转的箭头
+   2) 标题整行可点（原生 summary 已是），给出手型与悬停底色
+   3) 收起时不要那条分隔线，否则留一道孤零零的横线 */
+details.secfold{display:block}
+details.secfold > summary.sech{cursor:pointer;list-style:none;user-select:none;
+  margin:0 0 10px;padding:2px 4px 2px 0;border-radius:6px}
+details.secfold > summary.sech::-webkit-details-marker{display:none}
+details.secfold > summary.sech:hover{background:#f7f9f7}
+details.secfold > summary.sech:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+details.secfold > summary.sech .fmk{flex:0 0 auto;width:12px;color:var(--ink3);
+  font-size:var(--fs-5);line-height:1;transition:transform .12s ease}
+details.secfold > summary.sech .fmk::before{content:"▸"}
+details.secfold[open] > summary.sech .fmk{transform:rotate(90deg)}
+details.secfold:not([open]){padding-bottom:2px}
+/* 收起时标题右侧那行灰字仍在（它说明这节管什么），
+   但把「补充脚本 12 个」这类计数淡一档，视觉上让位给"已收起"这件事 */
+details.secfold:not([open]) > summary.sech .aside{opacity:.75}
+
+/* ---------- 闸门卡片 ---------- */
+.gcard{background:#fff;border:1px solid var(--line);border-left:3px solid var(--wait);
+  border-radius:var(--r);box-shadow:var(--sh);margin-bottom:10px;overflow:hidden}
+.gcard.answered{border-left-color:var(--done)}
+.gcard.auto{border-left-color:#b8c2bb}
+/* 标题行收窄：原来 16/20 内边距 + 30px 大圆，一条简单的提问占掉半屏。
+   现在序号改成行内小方块，标题行压到 12/16，问题一行读完。 */
+.ghead{padding:12px 16px 0;display:flex;gap:10px;align-items:baseline}
+.gnum{flex:0 0 auto;min-width:18px;height:18px;padding:0 5px;border-radius:5px;
+  background:var(--wait-soft);color:var(--wait);display:inline-flex;align-items:center;justify-content:center;
+  font-weight:var(--fw-5);font-size:var(--fs-6)}
+.gcard.answered .gnum{background:var(--done-soft);color:var(--done)}
+.gcard.auto .gnum{background:#f2f4f2;color:var(--ink3)}
+.gtit{flex:1;min-width:0}
+.gtit h3{font-size:var(--fs-4);font-weight:var(--fw-3);margin:0 0 2px;line-height:1.45}
+.gwhy{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);line-height:1.55}
+.tag{display:inline-block;font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px;white-space:nowrap}
+.tag.wait{background:var(--wait-soft);color:var(--wait)}
+.tag.done{background:var(--done-soft);color:var(--done)}
+.tag.auto{background:#f2f4f2;color:var(--ink3)}
+.gbody{padding:10px 16px 14px 44px}
+.blocklabel{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin:0 0 6px}
+.evbox{border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fcfdfc}
+.evcap{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);padding:9px 14px;background:#f7f9f7;border-bottom:1px solid var(--line-soft)}
+table.ev{width:100%;border-collapse:collapse;font-size:var(--fs-4)}
+table.ev th{background:#f7f9f7;text-align:left;padding:9px 14px;font-weight:var(--fw-5);color:var(--ink2);
+  border-bottom:1px solid var(--line-soft);white-space:nowrap;font-size:var(--fs-5)}
+table.ev td{padding:9px 14px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+table.ev tr:last-child td{border-bottom:none}
+table.ev td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.minibar{display:inline-block;height:9px;border-radius:3px;background:#cfe0d8;vertical-align:middle;min-width:2px}
+.minibar.hi{background:#8fb8a8}
+.morewrap{padding:10px 14px;border-top:1px solid var(--line-soft)}
+.kvlist{display:grid;grid-template-columns:auto 1fr;gap:8px 18px;padding:13px 15px;font-size:var(--fs-4);margin:0}
+.kvlist dt{color:var(--ink3)}
+.kvlist dd{margin:0;font-weight:var(--fw-strong)}
+.opts{display:flex;flex-direction:column;gap:7px}
+.opt{display:flex;gap:10px;align-items:flex-start;padding:10px 13px;border:1.5px solid var(--line);
+  border-radius:10px;cursor:pointer;background:#fff;transition:border-color .12s,background .12s}
+.opt:hover{border-color:#c3d4cb;background:#fbfdfc}
+.opt.sel{border-color:var(--brand);background:var(--brand-soft)}
+.dot{flex:0 0 15px;height:15px;border-radius:50%;border:2px solid #c2ccc5;margin-top:3px;position:relative}
+.opt.sel .dot{border-color:var(--brand)}
+.opt.sel .dot::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--brand)}
+.optmain{flex:1;min-width:0}
+.optlab{font-weight:var(--fw-strong);font-size:var(--fs-4);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.optdesc{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);margin-top:2px;display:block}
+.badge-sug{background:var(--done-soft);color:var(--done);font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px}
+.detail{margin-top:12px}
+.detail input[type=text]{width:100%;padding:10px 13px;border:1.5px solid var(--line);border-radius:9px;font-size:var(--fs-4);font-weight:var(--fw-4);font-family:var(--font-sans)}
+.detail input[type=text]:focus{outline:none;border-color:var(--brand)}
+.hintline{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin-top:6px}
+.warnbox{background:var(--wait-soft);border:1px solid #f0d3bd;border-radius:9px;padding:11px 14px;font-size:var(--fs-4);font-weight:var(--fw-4);color:#8a3a0e;margin-top:10px}
+.warnbox b{font-weight:var(--fw-strong)}
+.notebox{background:#fffbf3;border:1px solid #efe0bd;border-radius:9px;padding:11px 14px;font-size:var(--fs-4);font-weight:var(--fw-4);color:#7a5a12;margin-top:12px}
+.sampgrid{display:flex;flex-wrap:wrap;gap:8px}
+.sampchk{display:inline-flex;align-items:center;gap:7px;padding:8px 13px;border:1.5px solid var(--line);
+  border-radius:9px;cursor:pointer;font-size:var(--fs-4);font-weight:var(--fw-4);background:#fff}
+.sampchk.on{border-color:var(--brand);background:var(--brand-soft);font-weight:var(--fw-strong)}
+.gfoot{padding:10px 16px 12px 44px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;
+  border-top:1px solid var(--line-soft);background:#fcfdfc}
+.answerline{padding:10px 16px 12px 44px;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2)}
+
+/* ---------- 步骤 ---------- */
+/* 环节卡一行三个。
+   为什么不再一行一个：一行一个时每张卡横跨整页，内容少的那几张显得空。
+   三列之后卡变窄，卡片内不再摊开细节，改由卡片里的「展开细节」点开。
+   同一行三张卡等高：她要"三列的卡片大小保持一致"。
+   内容少的卡不会被拉长成怪样子 —— 细节都收在「展开细节」里，
+   收起来后各卡高度本来就接近，等高只是把边缘对齐。 */
+.stepgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));
+  gap:10px;align-items:stretch}
+.stcard{border:1px solid var(--line);border-radius:10px;padding:15px 16px;background:#fff;
+  display:flex;flex-direction:column;gap:10px}
+.stcard.running{border-color:#c9dcf0;background:var(--info-soft)}
+.stcard.done{border-color:#cbe7d4;background:var(--done-soft)}
+.stcard.failed{border-color:#f3c9c6;background:var(--err-soft)}
+.stcard h4{font-size:var(--fs-3);font-weight:var(--fw-3);display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stnum{flex:0 0 22px;height:22px;border-radius:50%;background:#f2f4f2;color:var(--ink2);
+  font-size:var(--fs-5);font-weight:var(--fw-5);display:flex;align-items:center;justify-content:center}
+.stcard p{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin:0;flex:1}
+.stgate{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--wait)}
+.stmeta{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);min-height:16px;
+  overflow-wrap:anywhere}
+.runbar{display:flex;align-items:center;gap:12px;margin-top:16px;padding-top:14px;border-top:1px solid var(--line-soft)}
+.runstate{font-size:var(--fs-4);font-weight:var(--fw-strong);color:var(--ink2)}
+.runstate.running{color:var(--info)}
+.runstate.done{color:var(--done)}
+.runstate.failed{color:var(--err)}
+.logfold{margin-top:12px;border:1px solid var(--line);border-radius:10px;background:#fcfdfc}
+/* hidden 要按隐藏处理：logfold 自带边框，忽略 hidden 会留下一个空框。 */
+.logfold[hidden],#monitorTimes[hidden],#logFailNote[hidden]{display:none}
+.logfold>summary{padding:11px 15px;cursor:pointer;font-size:var(--fs-3);font-weight:var(--fw-3);list-style:none}
+.logfold>summary::-webkit-details-marker{display:none}
+.logfold>summary .sm{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin-left:8px}
+pre.log{margin:0;padding:0 15px 15px;max-height:420px;overflow:auto;
+  font-family:var(--font-mono);font-size:var(--fs-5);font-weight:var(--fw-5);line-height:1.6;color:var(--ink2);white-space:pre-wrap;word-break:break-all}
+
+/* ---------- 产物 ---------- */
+.artlist{display:flex;flex-direction:column}
+.artrow{display:flex;align-items:center;gap:12px;padding:11px 18px;border-top:1px solid var(--line-soft)}
+.artrow:first-child{border-top:none}
+.artkind{flex:0 0 auto;font-size:var(--fs-6);font-weight:var(--fw-6);padding:3px 9px;border-radius:999px;background:#f2f4f2;color:var(--ink2)}
+.artkind.PPT{background:#fdf3ec;color:#9d3c0d}
+.artkind.打包{background:var(--done-soft);color:var(--done)}
+.artkind.图{background:var(--info-soft);color:var(--info)}
+.artname{flex:1;min-width:0;font-size:var(--fs-4);font-weight:var(--fw-4);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.artsize{flex:0 0 auto;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);font-variant-numeric:tabular-nums}
+.emptyart{padding:22px 18px;color:var(--ink3);font-size:var(--fs-5);font-weight:var(--fw-5)}
+
+/* ---------- 设置 ---------- */
+details.fold{border:1px solid var(--line);border-radius:var(--r);background:#fff;box-shadow:var(--sh)}
+details.fold>summary{padding:15px 20px;cursor:pointer;font-weight:var(--fw-3);font-size:var(--fs-3);list-style:none;
+  display:flex;align-items:center;gap:10px}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary::after{content:"▾";margin-left:auto;color:var(--ink3);font-size:var(--fs-6)}
+details.fold>summary .sm{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+.pbody{padding:0 20px 20px}
+table.pt{width:100%;border-collapse:collapse;font-size:var(--fs-4)}
+table.pt th{text-align:left;padding:10px 12px;background:#f7f9f7;font-size:var(--fs-5);color:var(--ink2);
+  font-weight:var(--fw-5);border-bottom:1px solid var(--line);white-space:nowrap}
+table.pt td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
+table.pt tr:last-child td{border-bottom:none}
+table.pt tr.changed{background:#fbfdf9}
+.pname{font-weight:var(--fw-strong)}
+.pname small{display:block;font-size:var(--fs-6);color:var(--ink3);font-weight:var(--fw-6)}
+.pval input{width:100%;max-width:240px;padding:7px 11px;border:1.5px solid var(--line);border-radius:8px;
+  font-size:var(--fs-4);font-weight:var(--fw-4);font-family:var(--font-sans);background:#fff}
+.pval input:focus{outline:none;border-color:var(--brand)}
+.pval input:disabled{background:#f4f6f4;color:var(--ink3)}
+.srctag{display:inline-block;font-size:var(--fs-6);padding:3px 9px;border-radius:999px;white-space:nowrap;font-weight:var(--fw-6)}
+.src-official{background:var(--info-soft);color:var(--info)}
+.src-instance{background:#f1ecfa;color:#6a3fa0}
+.src-user{background:var(--done-soft);color:var(--done)}
+.src-gate{background:var(--wait-soft);color:var(--wait)}
+.src-unspecified{background:#f2f4f2;color:var(--ink3)}
+.lockbtn{border:1px solid var(--line);background:#fff;border-radius:7px;padding:5px 10px;font-size:var(--fs-5);font-weight:var(--fw-5);cursor:pointer;color:var(--ink2)}
+.lockbtn.on{background:#f2f4f2;color:var(--ink3)}
+.goto{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--wait);cursor:pointer;background:none;border:none;padding:0;text-decoration:underline}
+
+/* ---------- 弹窗 ---------- */
+.modal{position:fixed;inset:0;background:rgba(20,28,24,.44);z-index:80;display:flex;align-items:center;justify-content:center;padding:24px}
+.modal-box{background:#fff;border-radius:14px;width:min(720px,100%);max-height:82vh;display:flex;flex-direction:column;
+  box-shadow:0 20px 60px rgba(16,24,20,.24);overflow:hidden}
+.modal-box.wide{width:min(940px,100%)}
+.modal-body{flex:1;overflow:auto;padding:16px 20px}
+.modal-body pre.scriptcode{margin:0;padding:14px 16px;background:#fbfcfb;border:1px solid var(--line-soft);
+  border-radius:10px;font-family:var(--font-mono);font-size:var(--fs-5);font-weight:var(--fw-5);line-height:1.6;
+  white-space:pre;overflow:auto;max-height:56vh;color:#26302b}
+
+/* ---------- 识别结论（保存并识别之后的那四段） ----------
+   层级从大到小：标题 15/600 → 段标题 14/600 → 结论句 14/500 →
+   说明 12.5/400 → 芯片 11.5/400。上层永远更大更粗。 */
+.idhead{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:6px}
+.idtitle{margin:0;font-size:var(--fs-2);font-weight:var(--fw-2);color:var(--ink)}
+.idbadge{font-size:var(--fs-6);font-weight:var(--fw-6);padding:3px 10px;border-radius:20px;white-space:nowrap}
+.idbadge.ok{background:var(--done-soft);color:var(--done)}
+.idbadge.warn{background:var(--wait-soft);color:var(--wait)}
+.idbadge.bad{background:var(--err-soft);color:var(--err)}
+.idwhere{margin-left:auto;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3)}
+.idsum{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);line-height:1.7}
+
+.idsec{margin-top:18px;padding-top:14px;border-top:1px solid var(--line-soft)}
+.idh{display:flex;align-items:baseline;gap:7px;margin-bottom:7px;
+  font-size:var(--fs-4);font-weight:var(--fw-3);color:var(--ink)}
+.idn{color:var(--brand);font-weight:var(--fw-3)}
+.idmeta{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);line-height:1.65;margin:4px 0}
+/* 结论句比说明更重一档，但不越过段标题 */
+.idpick{font-size:var(--fs-4);font-weight:var(--fw-5);color:var(--ink);line-height:1.65;margin:4px 0 6px}
+
+.idchips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0 6px}
+.idchip{font-size:var(--fs-6);font-weight:var(--fw-6);background:#f2f4f2;
+  color:var(--ink2);border-radius:20px;padding:3px 10px}
+.idchip em{font-style:normal;color:var(--ink3);margin-left:6px}
+
+/* ---------- 分析记录条（当前看的是哪一次） ----------
+   它常驻在标题栏下面一行：刷新之后这一行还在，
+   人就一眼知道自己停在哪一份，不用去翻历史。 */
+.sessbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+  padding:8px 22px;background:#f7f9f7;border-bottom:1px solid var(--line-soft);
+  font-size:var(--fs-5);color:var(--ink2)}
+.sessbar .sesscur b{color:var(--ink)}
+.sessbar .sesspath{font-family:var(--font-mono);
+  font-size:var(--fs-6);color:var(--ink3);max-width:46ch;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.sessbar .sessempty{color:var(--ink3)}
+.sessbar .spacer{flex:1}
+.sessrow-cur{background:#f6faf6}
+
+/* ---------- 识别结论里的「这一趟走到哪」条 ----------
+   环境体检 / 自动判定 / 容量预检 这三步的进展。
+   它们和识别是同一趟事，所以显示在识别结论里，
+   不再摆成「跑分析」里三个点了没用的按钮。 */
+.stepstrip{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px}
+.stepstrip .stp{display:inline-flex;align-items:center;gap:6px;
+  font-size:var(--fs-6);padding:3px 10px;border-radius:20px;background:#f2f4f2;color:var(--ink2)}
+.stepstrip .stp b{font-weight:var(--fw-6);color:var(--ink)}
+.stepstrip .stp .mk{font-weight:var(--fw-6)}
+.stepstrip .stp .dt{color:var(--ink3)}
+.stepstrip .stp.done{background:var(--done-soft);color:var(--done)}
+.stepstrip .stp.done b{color:var(--done)}
+.stepstrip .stp.done .dt{color:var(--done)}
+.stepstrip .stp.warn{background:var(--wait-soft);color:var(--wait)}
+.stepstrip .stp.warn b,.stepstrip .stp.warn .dt{color:var(--wait)}
+.stepstrip .stp.fail{background:var(--err-soft);color:var(--err)}
+.stepstrip .stp.fail b,.stepstrip .stp.fail .dt{color:var(--err)}
+.stepstrip .stp.wait{opacity:.8}
+
+.pl-card{background:#fff;border:1px solid var(--line);border-radius:var(--r);
+  box-shadow:var(--sh);padding:20px 22px;margin-bottom:16px}
+/* 这一步现在靠 app.js 的内联 15px 撑着，而内联正好等于 L3 的值，
+   所以眼下的显示是对的。但那份内联随时可能被改掉（文件另有人在动），
+   这里显式补上卡片内 h3 = L3，内联在不在都落在同一层。 */
+.pl-card h3{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.pl-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.pl-modes{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:16px}
+.pl-mode{flex:1 1 220px;display:flex;gap:10px;align-items:flex-start;padding:14px 16px;
+  border:1.5px solid var(--line);border-radius:11px;cursor:pointer;background:#fff}
+.pl-mode:hover{border-color:#c3d4cb;background:#fbfdfc}
+.pl-mode.sel{border-color:var(--brand);background:var(--brand-soft)}
+.pl-mode .mk{flex:0 0 18px;height:18px;border-radius:50%;border:2px solid #c2ccc5;margin-top:2px;position:relative}
+.pl-mode.sel .mk{border-color:var(--brand)}
+.pl-mode.sel .mk::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--brand)}
+
+/* 注释依据的四个单选块（先不定 / 给路径 / 上传 / 查文献）。
+   为什么做成块而不是下拉：这四个是四种不同的后续动作，选错的代价不一样
+   —— 选"给路径"要填路径、选"上传"要给文件、选"查文献"要到注释时才动。
+   块上带一句说明，人能直接看出选了之后会发生什么。 */
+.pl-refopts{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
+.pl-refopt{flex:1 1 168px;text-align:left;cursor:pointer;background:#fff;
+  border:1px solid #dde4ec;border-radius:6px;padding:10px 12px;font:inherit;
+  transition:border-color .12s,background .12s}
+.pl-refopt:hover{border-color:#c3d4cb;background:#fbfdfc}
+.pl-refopt.sel{border-color:var(--brand);background:var(--brand-soft)}
+.pl-refopt b{display:block;font-size:var(--fs-4);font-weight:var(--fw-strong);line-height:1.4}
+.pl-refopt span{display:block;font-size:var(--fs-5);color:var(--ink3);margin-top:2px;line-height:1.45;font-weight:var(--fw-5)}
+.pl-mode b{display:block;font-size:var(--fs-4);font-weight:var(--fw-strong);margin-bottom:2px}
+.pl-mode span{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+.pl-field{display:grid;grid-template-columns:118px 1fr;gap:8px 14px;align-items:center;margin:9px 0}
+.pl-field label{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+/* 带整段说明的字段块（注释依据那一栏）：标题是分节名，不是单个输入框的名字。
+   所以它跟 .sh-h2 同级（L5 加粗），不是 .pl-field label 那个 L5 常规。 */
+.pl-field-hd>label{font-size:var(--fs-5);font-weight:var(--fw-strong);color:var(--ink2)}
+.pl-field input{width:100%;padding:9px 12px;border:1.5px solid var(--line);border-radius:9px;
+  font-size:var(--fs-4);font-weight:var(--fw-4);font-family:var(--font-sans);background:#fff}
+.pl-field input:focus{outline:none;border-color:var(--brand)}
+.pl-field input.mono{font-family:var(--font-sans);font-size:var(--fs-4)}
+.pl-field .withbtn{display:flex;gap:8px;align-items:center}
+.pl-field .withbtn input{flex:1;min-width:0}
+.pl-path{font-family:var(--font-sans);font-size:var(--fs-5);font-weight:var(--fw-5);
+  overflow-wrap:anywhere;word-break:break-word}
+.pl-actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  margin-top:18px;padding-top:16px;border-top:1px solid var(--line-soft)}
+@media(max-width:640px){.pl-field{grid-template-columns:1fr;gap:3px}}
+
+/* ---------- 结果条目（体检 / 判定） ---------- */
+.rz{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;border-radius:8px;
+  background:#fafbfa;border:1px solid var(--line-soft);font-size:var(--fs-4);font-weight:var(--fw-4)}
+.rz .mk{flex:0 0 16px;font-weight:var(--fw-strong);text-align:center}
+/* 条目名是 L4 正文，只给同层强调档（500）。
+   原来靠 <b> 默认的 700 撑着，那比它上面的标题（600）还重，
+   正是要修掉的「低层比上层显眼」。 */
+.rz b{font-weight:var(--fw-strong)}
+.rz.ok .mk{color:var(--done)}
+.rz.warn{background:#fffdf8;border-color:#f0e2c4}
+.rz.warn .mk{color:var(--wait)}
+.rz.fail{background:#fdf6f5;border-color:#f3d3d0}
+.rz.fail .mk{color:var(--err)}
+.rz .dt{color:var(--ink3);font-size:var(--fs-5);font-weight:var(--fw-5)}
+.rzlist{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.rzgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:7px}
+
+/* ---------- 脚本列表：可折叠 ---------- */
+.stgfold{border:1px solid var(--line);border-radius:10px;background:#fff;margin-bottom:10px;overflow:hidden}
+.stgfold>summary{padding:12px 16px;cursor:pointer;font-size:var(--fs-3);font-weight:var(--fw-3);list-style:none;
+  display:flex;align-items:center;gap:10px;background:#fbfcfb}
+.stgfold>summary::-webkit-details-marker{display:none}
+.stgfold>summary::after{content:"▾";margin-left:auto;color:var(--ink3);font-size:var(--fs-6)}
+.stgfold[open]>summary{border-bottom:1px solid var(--line-soft)}
+.stgfold .cnt{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3)}
+
+/* 折叠条里的三件事，按层级排：环节名最重，skill 标签与数量是辅助。
+   字号严格递减，不能出现「数量比环节名还醒目」。 */
+.stgname{font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink)}
+.skilltag{font-size:var(--fs-6);font-weight:var(--fw-6);color:#3d5a4c;
+  background:#e8eeea;border-radius:20px;padding:2px 9px;white-space:nowrap}
+
+/* 环节说明：一句话说清这一步在流程里干什么。比脚本名小，比标签大。 */
+.stgdesc{padding:10px 16px;font-size:var(--fs-5);font-weight:var(--fw-5);
+  color:var(--ink2);line-height:1.65;background:#fbfcfb;
+  border-bottom:1px solid var(--line-soft)}
+.stgempty{padding:12px 16px;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+
+/* 脚本角色：总调度 / 主流程 / 子模块 / 配置。
+   它回答「这行脚本到底是干什么的」，不能和文件名一样大。 */
+.srole{display:block;margin-top:2px;font-size:var(--fs-6);font-weight:var(--fw-6);
+  color:var(--ink3);line-height:1.5}
+
+/* 「已识别过」这种状态提示比主说明更弱，只用颜色区分，不加粗。 */
+.pl-done{color:var(--done)}
+.scriptrow{display:flex;gap:12px;align-items:center;padding:10px 16px;
+  border-top:1px solid var(--line-soft);flex-wrap:wrap}
+.scriptrow:first-child{border-top:none}
+.scriptrow .sn{flex:1;min-width:180px}
+.scriptrow .sn b{display:block;font-size:var(--fs-4);font-weight:var(--fw-strong)}
+.scriptrow .sn .p{font-family:var(--font-sans);font-size:var(--fs-6);font-weight:var(--fw-6);
+  color:var(--ink3);overflow-wrap:anywhere;word-break:break-word}
+.scriptrow .acts{display:flex;gap:6px;flex-wrap:wrap}
+/* 行内小按钮比标准按钮小一号（L5），字重也跟着降，别在大按钮旁边抢戏 */
+.scriptrow .acts .btn{font-size:var(--fs-5);font-weight:var(--fw-5);padding:4px 11px}
+/* ---------- 脚本汇总：一个环节一行 ---------- */
+/* 一行装下三件事：序号、环节名、这一步跑的那个脚本。
+   不要做成表格：表格会让人以为每格都要读，而这一栏只是"这一步用什么"。 */
+.stgline{display:flex;align-items:center;gap:10px;padding:9px 2px;
+  border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+.stgline:last-child{border-bottom:none}
+.stgnum{flex:0 0 auto;min-width:20px;height:20px;line-height:20px;text-align:center;border-radius:6px;
+  background:var(--tab-cur-soft);color:var(--tab-cur);font-size:var(--fs-6);font-weight:var(--fw-1)}
+.stgname{flex:0 0 auto;font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink)}
+/* 脚本名与标签靠右对齐成一个视觉块，扫一眼就能对上 */
+.stgscr{flex:1 1 auto;display:flex;align-items:center;justify-content:flex-end;
+  gap:7px;min-width:0;flex-wrap:wrap}
+.scrtag{flex:0 0 auto;font-size:var(--fs-6);font-weight:var(--fw-6);
+  padding:2px 8px;border-radius:5px;white-space:nowrap;border:1px solid transparent}
+.scrtag.srvt{background:#eef3f0;color:#3d5a4c;border-color:#dbe6e0}
+.scrtag.libt{background:#eef1f7;color:#3c4a63;border-color:#dfe4ee}
+.scrtag.aiot{background:#f3eff8;color:#54406e;border-color:#e6ddf0}
+.scrtag.aisu{background:var(--warn-soft);color:#7a5b18;border-color:#efe0bd}
+/* 脚本名做成按钮：能点开看内容。看着像链接，不是大按钮 —— 一列按钮会糊成一片 */
+.scrname{border:none;background:none;padding:0;cursor:pointer;text-align:left;
+  font-family:var(--font-sans);font-size:var(--fs-4);font-weight:var(--fw-strong);color:var(--brand)}
+.scrname:hover{text-decoration:underline}
+.scrname.off{color:var(--ink2);font-weight:var(--fw-4);cursor:default}
+.scrname.off:hover{text-decoration:none}
+/* 「服务器版优化而来」这种一行备注：比标签还弱，只做说明 */
+.scrfrom{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);white-space:nowrap}
+/* 环节那一行的 skill 标注：比来源标签更弱，只在真有这个 skill 时出现 */
+/* 来源 skill 的名字本身也是一个标签：和「AI skill」并排，
+   两者都要看得出形状 —— 只写灰字，扫一眼根本注意不到。 */
+.scrskill{font-size:var(--fs-6);font-weight:var(--fw-6);white-space:nowrap;
+  background:#eef4fb;color:#2f5b86;border:1px solid #d8e5f2;border-radius:5px;padding:2px 8px}
+/* 「AI skill」这一档要压过其他来源标签：她说原来的效果不明显。
+   用品牌绿底白字，形状与配色都跟灰底标签拉开。 */
+.scrtag.aski{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:var(--fw-strong)}
+
+/* ---------- 脚本数据库 ---------- */
+/* 三层用可折叠的文件夹形式：折起来只看三层，展开才看里面的脚本。
+   这是她说"做成文件夹路径打开的形式"的直接落法。 */
+/* L1 / L2 / L3 这三张大卡片保持中性色，不上彩。
+   她说"这三个卡片不要加颜色"——分层靠编号与标题就够，
+   再给整张卡上色反而和下面带颜色的条目打架。 */
+.libfold{--acc:var(--tab-cur);--acc-soft:var(--tab-cur-soft);
+  border:1px solid var(--line);border-radius:10px;background:#fff;
+  margin-bottom:10px;overflow:hidden;box-shadow:0 1px 3px rgba(16,24,20,.04)}
+/* 每层一个色变量：大卡片本身不上色（她说这三张卡不要颜色），
+   颜色只往下传给"条目卡片"。 */
+.libfold:nth-of-type(2){--acc:var(--tab-hist);--acc-soft:var(--tab-hist-soft)}
+.libfold:nth-of-type(3){--acc:var(--tab-lib);--acc-soft:var(--tab-lib-soft)}
+.libfold>summary{padding:11px 14px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:9px;
+  background:#fbfcfb}
+.libfold>summary::-webkit-details-marker{display:none}
+.libfold>summary::after{content:"▾";margin-left:auto;color:var(--ink3);font-size:var(--fs-6)}
+.libfold[open]>summary{border-bottom:1px solid var(--line-soft)}
+/* 层号与标题用深灰，不用层色：这三张卡不参与配色 */
+.libfold-n{flex:0 0 auto;min-width:30px;height:20px;line-height:20px;text-align:center;border-radius:5px;
+  font-size:var(--fs-6);font-weight:var(--fw-6);color:#4a5f54;background:#eef2ef}
+.libfold>summary>b{font-size:var(--fs-3);font-weight:var(--fw-3);letter-spacing:.2px;color:var(--ink)}
+.libfold-c{margin-left:auto;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);white-space:nowrap}
+.libfold-b{padding:10px 14px 12px;background:#fff}
+/* 一层里面的条目也各有折叠：skill、环节、记录都用它 */
+/* 层内条目（skill / 环节 / 记录）各做成一张浅色条：
+   颜色跟随所在层，所以同层条目是一个色系、跨层一眼能分开。 */
+/* 条目卡片：左侧一道层色、标题行浅色底。
+   她要求"这些条目卡片都要有一些颜色" —— 上色的是条目，不是外面那三张大卡。 */
+.libsub{border:1px solid #e4ebe7;border-left:3px solid var(--acc,var(--brand));
+  border-radius:8px;margin-bottom:7px;background:#fff;overflow:hidden}
+.libsub>summary{padding:8px 11px 8px 10px;cursor:pointer;list-style:none;
+  display:flex;align-items:center;gap:8px;
+  background:#f7faf8;   /* 兜底：不支持 color-mix 的浏览器用这个 */
+  background:color-mix(in srgb,var(--acc-soft,var(--brand-soft)) 60%,#fff)}
+.libsub>summary::-webkit-details-marker{display:none}
+.libsub>summary::after{content:"▸";margin-left:auto;color:var(--acc,var(--ink3));font-size:var(--fs-6)}
+.libsub[open]>summary::after{content:"▾"}
+/* 条目层标题：与 L1 小层名同字号同字重同颜色。
+   同一层级的标题不该有大有小 —— 大小差异会被读成"这个不重要"。 */
+.libsub-n{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink);letter-spacing:.2px}
+.libsub-c{font-size:var(--fs-6);font-weight:var(--fw-6);white-space:nowrap;
+  color:var(--acc,var(--ink3))}
+/* 层级标记改用"清单点"：一个小圆点 + 细线，不用色块与渐变。
+   她说"做清单点就可以了"——点状标记能看出层级，又不给卡片上颜色。 */
+.l1h::before,.libsub>summary::before{content:"";flex:0 0 6px;height:6px;border-radius:50%;
+  background:var(--c,var(--acc,var(--ink3)));opacity:.9}
+/* 只有 L1 里那几个 skill 条目跟着所在小层的颜色走：
+   它们嵌在带色的小层里，纯灰反而像没接上。 */
+/* 只改其余三边的颜色，左侧那道层色必须留着 —— 写 border-color 会连左边一起盖掉。 */
+.l1box .libsub{border-top-color:#e4eae7;border-right-color:#e4eae7;border-bottom-color:#e4eae7}
+.l1box .libsub>summary{padding-left:14px;border-left:3px solid var(--c)}
+.l1box .libsub>summary::after{color:var(--c)}
+.libsub-b{padding:4px 11px 10px;display:flex;flex-wrap:wrap;gap:6px}
+.libhint{flex:1 1 100%;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);line-height:1.6;margin:2px 0 4px}
+/* ---------- L1 的三小层 ---------- */
+/* 每一小层一个盒子，标题左对齐、数量右对齐，和上面的大层区分开层级 */
+/* 每一小层本身是一个可折叠框：summary 就是标题行。
+   折叠后只剩标题＋数量，三层并排一眼能看完；要用哪层再点开。 */
+/* L1 里三小层各给一种颜色：绿 / 靛 / 琥珀。
+   父层已经是绿，所以第二、三层换成别的色，避免父子同色分不清层级。 */
+.l1box{--c:var(--tab-cur);--c-soft:var(--tab-cur-soft);
+  border:1px solid #dee8e2;border-left:3px solid var(--c);
+  border-color:color-mix(in srgb,var(--c) 20%,#fff);
+  border-radius:9px;margin-bottom:9px;background:#fff;overflow:hidden}
+.l1box:nth-of-type(2){--c:var(--tab-hist);--c-soft:var(--tab-hist-soft)}
+.l1box:nth-of-type(3){--c:#8a5a12;--c-soft:#fdf3e4}
+.l1h{display:flex;align-items:baseline;gap:9px;padding:10px 13px;cursor:pointer;
+  list-style:none;background:#fcfdfc}
+.l1h::-webkit-details-marker{display:none}
+.l1h::after{content:"▸";margin-left:auto;order:9;color:var(--c);font-size:var(--fs-6)}
+.l1box[open]>.l1h::after{content:"▾"}
+.l1box[open]>.l1h{border-bottom:1px solid #e8efeb;
+  border-bottom-color:color-mix(in srgb,var(--c) 16%,#fff)}
+.l1h b{font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink);letter-spacing:.2px}
+.l1body{padding:10px 13px 12px}
+.l1c{margin-left:auto;font-size:var(--fs-6);font-weight:var(--fw-6);white-space:nowrap;
+  color:var(--ink3)}
+.l1files{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+/* 「列不全 + 去调研」：底色轻、边框虚，说明这是提示不是报错 */
+.l1gap-a{display:flex;align-items:center;gap:9px;margin-top:9px;flex-wrap:wrap}
+/* 调研面板唯一的输入框：高度够写两三句就行，不要撑成编辑器 */
+.l1ask{width:100%;min-height:88px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;
+  font-family:var(--font-sans);font-size:var(--fs-4);font-weight:var(--fw-4);line-height:1.7;
+  color:var(--ink);background:#fff;resize:vertical}
+.l1ask::placeholder{color:var(--ink3)}
+.l1ask:focus{outline:none;border-color:var(--brand)}
+
+/* 一行：左边标环节，中间能点的脚本名，右边是次数说明 */
+.librow{flex:1 1 100%;display:flex;align-items:center;gap:9px;padding:5px 0;flex-wrap:wrap}
+.librow-k{flex:0 0 auto;min-width:96px;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink2)}
+.librow-m{font-size:var(--fs-6);font-weight:var(--fw-5);color:var(--ink3)}
+
+.libstruct{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin:4px 0 6px}
+.liblayer{border:1px solid var(--line);border-radius:10px;padding:11px 13px;background:#fbfcfb}
+.libl-h{display:flex;align-items:center;gap:8px;margin-bottom:5px}
+.libl-h b{font-size:var(--fs-4);font-weight:var(--fw-strong)}
+.libl-h .cnt{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);margin-left:auto}
+.libl-n{font-size:var(--fs-6);font-weight:var(--fw-5);color:var(--ink2);line-height:1.6}
+.libl-w{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);margin-top:4px}
+/* 一个条目：标题 + 状态 + 位置 + 文件清单。
+   不做折叠：她要的是"一眼看到里面有什么"，折叠等于还要再点一次。 */
+.libentry{border:1px solid var(--line);border-radius:9px;padding:10px 12px;margin-bottom:8px;background:#fff}
+.libe-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.libe-h b{font-size:var(--fs-4);font-weight:var(--fw-strong)}
+.libtag{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:5px;white-space:nowrap}
+.libtag.done{background:var(--done-soft);color:var(--done)}
+.libtag.warn{background:var(--warn-soft);color:#7a5b18}
+.libtag.wait{background:#f2f4f2;color:var(--ink3)}
+.libcap{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);
+  background:#f2f4f2;border-radius:20px;padding:2px 8px;white-space:nowrap}
+.libe-p{font-family:var(--font-sans);font-size:var(--fs-6);font-weight:var(--fw-6);
+  color:var(--ink3);margin-top:3px;overflow-wrap:anywhere}
+.libe-why{font-size:var(--fs-6);font-weight:var(--fw-5);color:#7a5b18;margin-top:4px;line-height:1.6}
+/* 文件清单：文件名本身就是能点的按钮 */
+.libfiles{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+.libfile{border:1px solid var(--line);background:#fbfcfb;border-radius:6px;cursor:pointer;
+  padding:3px 9px;font-family:var(--font-sans);font-size:var(--fs-6);font-weight:var(--fw-6);
+  color:var(--brand);display:inline-flex;align-items:center;gap:6px}
+.libfile:hover{background:#f2f9f6;border-color:#ccd4ce}
+.libfile.off{color:var(--ink3);border-style:dashed;cursor:default;background:#fafafa}
+.libfile-n{color:var(--ink3);font-weight:var(--fw-5)}
+/* 点开脚本后，内容上方那段说明（是什么、从哪来） */
+.scrmeta{display:flex;flex-wrap:wrap;gap:6px 16px;padding:10px 12px;margin-bottom:12px;
+  background:#fbfcfb;border:1px solid var(--line-soft);border-radius:9px;
+  font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2)}
+.scrmeta b{font-weight:var(--fw-strong);color:var(--ink)}
+.scrmeta .k{color:var(--ink3)}
+.flagline{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 9px;border-radius:20px;white-space:nowrap}
+.flagline.ok{background:var(--done-soft);color:var(--done)}
+.flagline.no{background:var(--wait-soft);color:var(--wait)}
+.modal-h{display:flex;align-items:center;padding:16px 20px;border-bottom:1px solid var(--line);font-size:var(--fs-3);font-weight:var(--fw-3)}
+.modal-h .btn{margin-left:auto}
+.crumb{padding:10px 20px;font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2);background:#f7f9f7;border-bottom:1px solid var(--line-soft);
+  font-family:var(--font-sans);word-break:break-all}
+.listing{flex:1;overflow:auto;padding:6px 0}
+.lrow{display:flex;align-items:center;gap:10px;padding:9px 20px;cursor:pointer;font-size:var(--fs-4);font-weight:var(--fw-4)}
+.lrow:hover{background:#f7f9f7}
+.lrow .ic{flex:0 0 20px;text-align:center;color:var(--ink3)}
+.lrow .sz{margin-left:auto;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);font-variant-numeric:tabular-nums}
+.lrow.file{cursor:default;color:var(--ink2)}
+.lrow.file:hover{background:transparent}
+.modal-f{display:flex;align-items:center;gap:10px;padding:14px 20px;border-top:1px solid var(--line);background:#fcfdfc}
+
+/* ---------- 环境体检 ---------- */
+.envsum{display:flex;flex-direction:column;gap:3px;padding:13px 16px;border-radius:10px;margin-bottom:16px;
+  border:1px solid var(--line)}
+.envsum.good{background:var(--done-soft);border-color:#c8e6d2}
+.envsum.mid{background:#fffbf3;border-color:#efe0bd}
+.envsum.bad{background:var(--err-soft);border-color:#f3c9c6}
+.envsum b{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.envsum .small{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+.envgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:7px}
+.envitem{display:flex;align-items:baseline;gap:8px;padding:8px 11px;border-radius:8px;background:#fafbfa;
+  border:1px solid var(--line-soft);font-size:var(--fs-4);font-weight:var(--fw-4)}
+.envitem .em{flex:0 0 14px;text-align:center;font-weight:var(--fw-strong)}
+.envitem .el{flex:0 0 auto;font-weight:var(--fw-strong);white-space:nowrap}
+.envitem .ed{flex:1;min-width:0;color:var(--ink2);font-size:var(--fs-5);font-weight:var(--fw-5);overflow-wrap:anywhere}
+.envitem .es{flex:0 0 auto;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);background:#f0f2f0;padding:1px 7px;border-radius:999px}
+.envitem.env-ok .em{color:var(--done)}
+.envitem.env-warn{background:#fffdf8;border-color:#f0e2c4}
+.envitem.env-warn .em{color:var(--wait)}
+.envitem.env-fail{background:#fdf6f5;border-color:#f3d3d0}
+.envitem.env-fail .em{color:var(--err)}
+
+/* ---------- 脚本库 ---------- */
+.libenv{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;padding:13px 16px;border-radius:10px;
+  background:var(--brand-soft);border:1px solid #cfe3dc;margin-bottom:16px}
+.libenv b{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.libenv .mem{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink2)}
+.libenv .why{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);flex:1;min-width:200px}
+.libpick{margin-bottom:18px}
+.libpick h4{margin:0 0 8px;font-size:var(--fs-3);font-weight:var(--fw-3);display:flex;align-items:center;gap:8px}
+.pickbox{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border-radius:10px;
+  border:1px solid var(--line);background:#fbfdfc;font-size:var(--fs-4);font-weight:var(--fw-4)}
+.pickbox.ok{border-color:#cbe7d4;background:var(--done-soft)}
+.pickbox.no{border-color:#f3c9c6;background:var(--err-soft)}
+.pickbox.warn{border-color:#f0e2c4;background:#fffdf8}
+.pickbox .ic{flex:0 0 18px;font-weight:var(--fw-strong)}
+.pickbox .tx{flex:1;min-width:0}
+.pickbox .tx b{display:block;margin-bottom:2px;font-weight:var(--fw-strong)}
+/* 每个字段各占一行，不要连成一整段。
+   span 默认是行内元素 —— 一行里连着写几个 span，浏览器会把它们
+   首尾相连排成一句话，几个长路径连起来就是「一大坨」。
+   这里统一定成块级，顺带允许长路径在任意位置断行。 */
+.pickbox .tx span{display:block;color:var(--ink2);font-size:var(--fs-4);font-weight:var(--fw-4);
+  overflow-wrap:anywhere;word-break:break-word}
+.pickbox .tx span + span{margin-top:2px}
+.libtbl{width:100%;border-collapse:collapse;font-size:var(--fs-4);margin-top:6px;
+  /* 六列挤在窄弹窗里时，每格都被压成两三行 —— 日期断成「2026-11-」+「03 08:58:2」+「0」。
+     给一个下限，窄了就让它横向滚动，字保持一整行。 */
+  min-width:820px}
+.libtbl td.nw{white-space:nowrap}
+/* 长文本（服务器绝对路径）在表格里只占一行，超出省略，完整内容看 title。
+   不加这条时它会把整行撑成三四行高。 */
+.libtbl .ellip{max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.libtbl th{text-align:left;background:var(--tab-hist-soft);padding:8px 11px;font-size:var(--fs-5);color:var(--tab-hist);
+  font-weight:var(--fw-5);border-bottom:1px solid var(--line);white-space:nowrap}
+.libtbl td{padding:9px 11px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+.libtbl tr:last-child td{border-bottom:none}
+.libtbl .id{font-family:var(--font-sans);font-size:var(--fs-5);font-weight:var(--fw-5);color:#26443a}
+.libtbl .ttl{font-weight:var(--fw-strong)}
+.libtbl .pth{font-family:var(--font-sans);font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);
+  /* 只在必要时断，且优先在 / 和空格处断；不再逐字符硬切。 */
+  word-break:normal;overflow-wrap:anywhere}
+.libtbl .note{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin-top:3px}
+.cathead{display:flex;align-items:baseline;gap:10px;margin:20px 0 8px}
+.cathead h3{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.cathead span{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3)}
+.gapbox{margin-top:14px;padding:13px 16px;border-radius:10px;background:var(--warn-soft);
+  border:1px solid #efe0bd;font-size:var(--fs-4);font-weight:var(--fw-4)}
+.gapbox b{display:block;margin-bottom:6px;font-weight:var(--fw-strong)}
+.gapbox ul{margin:0;padding-left:20px}
+.gapbox li{margin:3px 0}
+
+/* ---------- 轻提示 ---------- */
+#toast{position:fixed;left:50%;bottom:28px;transform:translateX(-50%);z-index:90;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.toastmsg{background:#191d1b;color:#fff;font-size:var(--fs-4);font-weight:var(--fw-4);padding:10px 18px;border-radius:10px;max-width:80vw;
+  box-shadow:0 8px 24px rgba(0,0,0,.2)}
+.toastmsg.bad{background:#a32b22}
+.toastmsg.good{background:#15803d}
+
+/* 平板与窄窗（≤900px）：三列放不下 —— 每列不到 220px，
+   卡片标题会折成两三行。降成两列，仍比一行一个紧凑。 */
+@media (max-width:1199px){
+  /* 保持三列：她说"保持三列，只是希望三张卡大小一致"。
+     窄一点时靠卡片内部断行吸收，不再降列。 */
+  .stepgrid{grid-template-columns:repeat(3,minmax(0,1fr))}
+}
+
+@media (max-width:720px){
+  .wrap{padding:16px}
+  .gbody,.gfoot,.answerline{padding-left:20px}
+  .ghead{padding-left:16px}
+  .topbar-in{padding:10px 16px}
+  .evbox{overflow-x:auto}
+  table.ev{min-width:520px}
+  table.pt thead{display:none}
+  table.pt,table.pt tbody,table.pt tr,table.pt td{display:block;width:100%}
+  table.pt tr{border-bottom:1px solid var(--line);padding:12px 0}
+  table.pt td{border:none;padding:3px 0}
+  table.pt td.pval input{max-width:100%}
+  .stepgrid{grid-template-columns:1fr}
+}
+
+/* ---------- 压制 app.js 里的内联字号 ----------
+   app.js 里还有 8 处写死的内联 font-size（改不了那个文件，另一个人在动它）。
+   内联样式的优先级高于任何选择器，所以想统一层级只能用 !important ——
+   这是这里唯一需要 !important 的原因，不是为了图省事。
+   选择器一律用 [style*="font-size:..."] 限定，只命中那几处，不波及同名的其他元素。
+   只有「偏离层级」的那几处需要压：
+     b[style*=14px]  两个小标题（环境体检 / 脚本库该用哪一套）和一个已定闸门标题
+                     —— 14px 加 <b> 默认 700，会盖过 15px 的卡片标题，必须提到 L3
+     那几处内联字号现在已经全部换成类（.btn-sm / .filein / .idraw），
+   字号只从层级变量来，不再需要任何 !important 去压。 */
+/* 这里原来有四条 !important，专门去压 app.js 里写死的内联 px（12px 按钮、
+   13px 文件框、14px 标题）。2026-10-22 把内联 px 全部换成类之后，
+   这四条就没有对象了 —— 留着反而误导下一个人以为还有内联字号要压，故删除。 */
+
+/* ===== 处理过程（环节清单 · 进度 · 耗时） ===== */
+.flowwrap{border:1px solid var(--line);border-radius:10px;background:#fff;padding:12px 14px}
+.flowhead{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.flowhead b{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.flowstage{border-top:1px solid var(--line-soft);padding:9px 0}
+.flowstage:first-of-type{border-top:none}
+/* 阶段现在是一个 <details>：标题行就是它的 summary。
+   要做三件事：去掉原生三角、抹掉 summary 的默认标记、给个可点的光标。 */
+.flowstage > summary.fsh{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  cursor:pointer;list-style:none;padding:1px 0}
+.flowstage > summary.fsh::-webkit-details-marker{display:none}
+.flowstage > summary.fsh::marker{content:""}
+.fsh .fmk{flex:0 0 auto;width:12px;color:var(--ink3);transition:transform .12s ease;
+  font-size:var(--fs-5)}
+.fsh .fmk::before{content:"▸"}
+.flowstage[open] > summary.fsh .fmk{transform:rotate(90deg)}
+/* 展开后的正文：左边让出箭头那一格，跟标题对齐 */
+.flowbody{padding:2px 0 0 20px}
+.flowbody .fsskill{display:inline-block;margin-bottom:6px}
+.flowstage.running,.flowstage.delegated{background:var(--info-soft);border-radius:8px;
+  padding-left:8px;padding-right:8px}
+.fsname{font-weight:var(--fw-5);font-size:var(--fs-4)}
+.fsbadge{font-size:var(--fs-6);padding:1px 7px;border-radius:20px;background:var(--wait-soft);color:var(--wait)}
+.fsbadge.ok{background:var(--done-soft);color:var(--done)}
+.fsbadge.run{background:var(--info-soft);color:var(--info)}
+.fsbadge.bad{background:var(--err-soft);color:var(--err)}
+.fsskill{font-size:var(--fs-6);color:var(--ink3);border:1px solid var(--line);border-radius:20px;padding:1px 7px}
+.fsdur{font-size:var(--fs-6);color:var(--ink2);font-weight:var(--fw-5)}
+.flowsubs{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:7px}
+.fsub{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-6);
+  border:1px solid var(--line);border-radius:6px;padding:2px 7px;background:#fbfcfb;color:var(--ink3)}
+.fsub b{font-weight:var(--fw-5)}
+.fsub .fdt{opacity:.8}
+.fsub.ok{border-color:#cbe7d4;background:var(--done-soft);color:var(--done)}
+.fsub.run{border-color:#c9dcf0;background:var(--info-soft);color:var(--info)}
+.fsub.bad{border-color:#f3c9c6;background:var(--err-soft);color:var(--err)}
+.fsub.warn{border-color:#f0d3bd;background:var(--wait-soft);color:var(--wait)}
+.farrow{color:var(--ink4,#b9c0bb);font-size:var(--fs-6)}
+.flowrev{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;
+  font-size:var(--fs-6);padding:5px 8px;border-radius:6px;background:#fbfcfb;border:1px solid var(--line-soft)}
+.flowrev.ok{background:var(--done-soft);border-color:#cbe7d4}
+.flowrev.bad{background:var(--err-soft);border-color:#f3c9c6}
+.rvgate{border-radius:20px;padding:1px 7px;background:#fff;border:1px solid var(--line);color:var(--ink3)}
+.rvgate.ok{color:var(--done);border-color:#cbe7d4}
+.rvgate.bad{color:var(--err);border-color:#f3c9c6}
+.rvgate.warn{color:var(--wait);border-color:#f0d3bd}
+.flowgates{display:flex;align-items:center;gap:6px;flex-wrap:wrap;
+  margin-top:10px;padding-top:10px;border-top:1px solid var(--line-soft)}
+.fgtag{font-size:var(--fs-6);border:1px dashed var(--line);border-radius:20px;padding:1px 8px;color:var(--ink3)}
+
+/* ===== 由内联 style 收编过来的三个类 =====
+   原来这三处是直接写在 JS 里的 font-size/font-family，属于"散在规则外的字号"。
+   收成类之后，字号只从层级变量来，改层级不用再去翻 app.js。 */
+.btn.btn-sm{font-size:var(--fs-5);font-weight:var(--fw-5);padding:3px 10px}
+textarea.idraw{width:100%;font-family:var(--font-mono);font-size:var(--fs-5);
+  font-weight:var(--fw-5);line-height:1.6;padding:10px 12px;border:1px solid var(--line);
+  border-radius:8px;background:#fbfcfb;color:var(--ink2)}
+input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px}
+.pl-card > h3{font-size:var(--fs-3);font-weight:var(--fw-3);margin:0 0 8px}
+
+/* ===== 产物面板：按目录分组 ===== */
+.artsum{font-size:var(--fs-5);font-weight:var(--fw-5);color:var(--ink3);margin:0 0 8px}
+.artsum b{font-weight:var(--fw-strong);color:var(--wait)}
+.artdir{border-top:1px solid var(--line-soft)}
+.artdir:first-child{border-top:none}
+.artdir > summary{display:flex;align-items:center;gap:8px;cursor:pointer;
+  list-style:none;padding:7px 0;font-size:var(--fs-4);font-weight:var(--fw-4)}
+.artdir > summary::-webkit-details-marker{display:none}
+.artdir > summary::marker{content:""}
+.artdir > summary::before{content:"▸";color:var(--ink3);font-size:var(--fs-5);
+  transition:transform .12s ease;display:inline-block;width:12px}
+.artdir[open] > summary::before{transform:rotate(90deg)}
+.artdirn{font-weight:var(--fw-5)}
+.artdir .cnt{font-size:var(--fs-6);color:var(--ink3)}
+
+/* ===== 环节卡片内的处理过程（原「处理过程」并到每个步骤下面） =====
+   为什么并进来：同一件事在一屏上出现在两个地方，人要在两处对着看
+   "上面说跑完了、下面说还在跑"到底信哪个。并在一起之后，
+   每个步骤下面就是它自己的环节与耗时，只有一处说法。 */
+.stsubs{display:flex;flex-wrap:wrap;align-items:center;gap:5px;margin-top:2px}
+/* 标签上限宽度：三列时卡片很窄，长名字（dotplot / violin / feature）会在
+   标签内部硬折成两三截，看着像竖排字。给个上限并允许在斜杠处断开，
+   超出部分收敛在标签内，不撑破卡片。 */
+.stsub{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-6);
+  font-weight:var(--fw-6);padding:2px 7px;border:1px solid var(--line);
+  border-radius:999px;background:#fbfcfb;color:var(--ink2);
+  max-width:100%;overflow-wrap:anywhere;line-height:1.5}
+.stsub .mk{font-size:var(--fs-glyph);line-height:1;font-weight:var(--fw-glyph)}
+.stsub.ok{border-color:#cbe7d4;background:var(--done-soft);color:var(--done)}
+.stsub.run{border-color:#c9dcf0;background:var(--info-soft);color:var(--info)}
+.stsub.bad{border-color:#f3c9c6;background:var(--err-soft);color:var(--err)}
+.stsub.warn{border-color:#f0d3bd;background:var(--wait-soft);color:var(--wait)}
+.stdur{font-size:var(--fs-6);color:var(--ink3);margin-top:2px}
+.stdur .gap{color:var(--wait)}
+
+/* 完成详情：收起时只占一行，展开才给全部依据 */
+.stdone{margin-top:2px;border-top:1px dashed var(--line-soft);padding-top:8px}
+.stdone > summary{cursor:pointer;font-size:var(--fs-6);font-weight:var(--fw-5);
+  color:var(--brand);list-style:none;display:flex;align-items:center;gap:6px}
+.stdone > summary::-webkit-details-marker{display:none}
+.stdone > summary::before{content:"▸";transition:transform .12s ease;display:inline-block}
+.stdone[open] > summary::before{transform:rotate(90deg)}
+.stdone .sdbody{margin-top:8px;display:flex;flex-direction:column;gap:7px}
+.sdrow{display:flex;gap:8px;font-size:var(--fs-6);line-height:1.6}
+.sdrow .k{flex:0 0 62px;color:var(--ink3)}
+.sdrow .v{flex:1;word-break:break-word}
+.sdrow .v code{font-family:var(--font-mono);font-size:var(--fs-5);background:#f2f4f2;
+  padding:1px 5px;border-radius:4px;font-weight:var(--fw-5)}
+.sdarts{display:flex;flex-direction:column;gap:3px}
+.sdarts .a{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink2);font-weight:var(--fw-5)}
+.sdlog{margin:0;padding:9px 11px;background:#fbfcfb;border:1px solid var(--line-soft);
+  border-radius:7px;font-size:var(--fs-6);line-height:1.6;white-space:pre-wrap;
+  max-height:180px;overflow:auto;font-family:var(--font-mono)}
+
+/* 再次交给助手：简单表单，不另开一堆字段 */
+.rrlab{display:block;font-size:var(--fs-5);color:var(--ink2);margin-bottom:6px}
+.rrhint{font-size:var(--fs-6);color:var(--ink3);margin-top:6px;line-height:1.6}
+
+/* ---------- 指令队列按钮与面板 ---------- */
+.qbtn{display:inline-flex;align-items:center;gap:6px;color:var(--err);
+  border-color:#f0d3d0;background:var(--err-soft)}
+.qbtn:hover{background:#fbe0de;border-color:#e7bdb8}
+.qbtn-bad{color:#fff;background:var(--err);border-color:var(--err)}
+.qdot{display:inline-block;min-width:16px;padding:0 5px;border-radius:999px;
+  background:var(--err);color:#fff;font-size:var(--fs-glyph);font-weight:var(--fw-glyph);text-align:center}
+.qbtn-bad .qdot{background:#fff;color:var(--err)}
+#whoamiHint{font-size:var(--fs-6);color:var(--ink3);max-width:180px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.qp{position:fixed;right:16px;top:58px;z-index:200;width:400px;max-height:74vh;
+  display:flex;flex-direction:column;background:var(--surface);
+  border:1px solid var(--line);border-radius:var(--r);box-shadow:0 16px 40px rgba(16,24,20,.18);
+  font-family:var(--font-sans);font-size:var(--fs-4);color:var(--ink)}
+.qp-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line-soft)}
+.qp-h b{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.qp-h-r{margin-left:auto;display:flex;gap:6px}
+.qp-tabs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;
+  padding:9px 14px;border-bottom:1px solid var(--line-soft);background:#fafbfa}
+.qp-tag{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px;background:#eef1ee;color:var(--ink2)}
+.qp-wait{background:var(--wait-soft);color:var(--wait)}
+.qp-sent{background:var(--info-soft);color:var(--info)}
+.qp-run{background:var(--info-soft);color:var(--info)}
+.qp-dead{background:var(--err-soft);color:var(--err)}
+.qp-done{background:var(--done-soft);color:var(--done)}
+.qp-toggle{margin-left:auto;display:flex;align-items:center;gap:4px;
+  font-size:var(--fs-6);color:var(--ink3);cursor:pointer}
+.qp-list{flex:1 1 auto;overflow:auto;padding:6px 14px 10px}
+.qp-empty{padding:26px 0;text-align:center;color:var(--ink3);font-size:var(--fs-5)}
+.qp-item{padding:10px 0;border-bottom:1px solid var(--line-soft)}
+.qp-item:last-child{border-bottom:none}
+.qp-r1{display:flex;align-items:baseline;gap:8px}
+.qp-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--fs-4);font-weight:var(--fw-strong);color:var(--ink)}
+.qp-st{flex:0 0 auto;font-size:var(--fs-6);font-weight:var(--fw-6);
+  padding:1px 7px;border-radius:999px;background:#eef1ee;color:var(--ink2)}
+.qp-wait .qp-st{background:var(--wait-soft);color:var(--wait)}
+.qp-sent .qp-st{background:var(--info-soft);color:var(--info)}
+.qp-run .qp-st{background:var(--info-soft);color:var(--info)}
+.qp-dead .qp-st{background:var(--err-soft);color:var(--err)}
+.qp-done .qp-st{background:var(--done-soft);color:var(--done)}
+.qp-drop{opacity:.5}
+.qp-r2{font-size:var(--fs-6);color:var(--ink3);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qp-r3{font-size:var(--fs-6);color:var(--err);margin-top:2px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qp-ops{display:flex;gap:6px;margin-top:6px}
+.qp-op{border:1px solid var(--line);background:#fff;color:var(--ink2);
+  border-radius:7px;padding:2px 10px;font-size:var(--fs-6);font-weight:var(--fw-6);
+  cursor:pointer;font-family:var(--font-sans)}
+.qp-op:hover{background:#fafbfa;border-color:#ccd4ce}
+.qp-op:disabled{opacity:.45;cursor:not-allowed}
+.qp-del{color:var(--err);border-color:#f0d3d0}
+.qp-del:hover{background:var(--err-soft)}
+.qp-f{padding:8px 14px;border-top:1px solid var(--line-soft);
+  font-size:var(--fs-6);color:var(--ink3);background:#fafbfa}
+@media (max-width:520px){.qp{right:8px;left:8px;width:auto}}
+
+/* ---------- 步骤卡片里的产物 ---------- */
+.starts{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:8px 0 2px;
+  padding:7px 9px;border-radius:8px;background:#f6f8f6;border:1px solid var(--line-soft)}
+.startsk{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);
+  white-space:nowrap;margin-right:2px}
+.start{font-size:var(--fs-6);font-family:var(--font-mono);color:var(--ink2);
+  background:#fff;border:1px solid var(--line);border-radius:6px;padding:1px 7px;
+  max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.starts .start:last-child{color:var(--ink3);border-style:dashed}
+
+/* 回写与推进：常驻在跑分析区顶部，不藏在弹窗里 */
+.runctl{display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+  padding:10px 12px;margin-bottom:12px;border-radius:10px;
+  background:var(--info-soft);border:1px solid #cfe0f2}
+.runctl .rctext{font-size:var(--fs-5);color:var(--info);font-weight:var(--fw-5)}
+.runctl .rcsp{margin-left:auto}
+
+/* ---------- 步骤卡：按钮并排 / 失败说明 / 环节图例 ---------- */
+/* 三个按钮等宽并排，主按钮不被挤成一条。
+   以前只有一个按钮，加上"查询结果"和"再报一次"之后如果还走默认行内流，
+   长标题会把它们挤到下一行、或者把文字压成两行。 */
+/* 卡片里的细节折叠：三列布局下必须能收起来，否则一张卡能顶一屏 */
+.stextra{margin:6px 0 2px;border-top:1px dashed var(--line-soft);padding-top:6px}
+.stextra>summary{cursor:pointer;list-style:none;font-size:var(--fs-6);font-weight:var(--fw-6);
+  color:var(--ink3);padding:2px 0}
+.stextra>summary::-webkit-details-marker{display:none}
+.stextra>summary::before{content:"▸ "}
+.stextra[open]>summary::before{content:"▾ "}
+.stextra>summary:hover{color:var(--brand)}
+.stextra-b{margin-top:5px}
+/* 输入依赖：说明这一步吃的是上游哪份东西。
+   放折叠区里，因为平时不需要看；一旦怀疑"顺序不对"，打开就能看到依据。 */
+.stdeps{font-size:var(--fs-6);color:var(--ink3);line-height:1.6;margin-bottom:6px;
+  padding:4px 7px;background:#f7f9f8;border-radius:6px;overflow-wrap:anywhere;font-weight:var(--fw-6)}
+.stdeps code{font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink2);font-weight:var(--fw-6)}
+/* 三列布局下卡片内的动作按钮改成整行：窄卡里并排两个按钮会互相挤 */
+.stcard .stbtns{flex-wrap:wrap;margin-top:auto}
+.stcard .stbtns .btn{flex:1 1 100%;min-width:0}
+
+.stbtns{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-top:2px}
+.stbtns .btn{flex:1 1 0;min-width:92px;justify-content:center;white-space:nowrap}
+.stbtns .btn.stq{flex:0 0 auto;min-width:0;color:var(--ink2);border-color:var(--line);
+  background:#fff}
+.stbtns .btn.stq:hover{background:#f6f8fa;border-color:#c9d2da;color:var(--ink)}
+.stbtns .btn[disabled]{opacity:.5;cursor:not-allowed}
+
+/* 查询结论：查完必须有一句话说出来，不能只有一个时间。
+   底色用中性灰蓝，不复用失败红 —— 查询本身没有失败。 */
+.stqmsg{font-size:var(--fs-6);line-height:1.65;color:var(--ink2)}
+.stqmsg:empty{display:none}
+.qbox{background:#f5f8fb;border:1px solid #dde7f0;border-radius:7px;
+  padding:7px 9px;margin-top:2px}
+.qline{font-size:var(--fs-6);color:var(--ink)}
+.qline b{font-weight:var(--fw-strong)}
+.qnote{margin-top:3px;color:var(--ink3)}
+.qat{display:inline-block;margin-left:6px;font-size:var(--fs-6);color:var(--ink3);
+  font-variant-numeric:tabular-nums;font-weight:var(--fw-6)}
+.qwait{color:var(--ink3)}
+.qok{color:var(--done)}
+.qbad{color:var(--err)}
+
+/* 失败说明：不是折叠的。失败时最该被读到的那句不该要点开。 */
+.stfail{margin-top:2px;padding:9px 11px;border-radius:8px;
+  background:#fff;border:1px solid #f3c9c6;border-left:3px solid var(--err)}
+.stfail-h{font-size:var(--fs-5);font-weight:var(--fw-strong);color:var(--err)}
+.stfail-k{margin:6px 0 0;padding-left:16px;font-size:var(--fs-6);
+  line-height:1.7;color:var(--ink)}
+.stfail-k li{margin-bottom:2px;word-break:break-word;overflow-wrap:anywhere}
+.stfail-p{margin-top:6px;font-size:var(--fs-6);color:var(--ink3);line-height:1.65}
+
+/* 环节图例与"卡在哪一环"：把符号解释放在符号旁边，
+   不再只挂在 title 上 —— 触屏没有悬停。 */
+.stleg{font-size:var(--fs-6);color:var(--ink3);margin-top:3px;line-height:1.6;font-weight:var(--fw-6)}
+.stblame{font-size:var(--fs-6);color:#8a3a30;margin-top:3px;line-height:1.6}
+.stblame b{font-weight:var(--fw-strong)}
+
+/* 产物标签：状态不同，措辞不同。失败态的标签给一点提醒色。 */
+.startsk.warn{color:#8a5a00}
+
+/* 队列徽标：把"待发"和"已停"分开。
+   红色只表示真的送不进去了；还在排队的用中性蓝，不再和"跑失败"抢同一个颜色。 */
+.qbtn-wait{color:var(--info);border-color:#cfe0f2;background:var(--info-soft)}
+.qbtn-wait:hover{background:#e6f0fa;border-color:#b7d0e8}
+.qbtn-wait .qdot{background:var(--info);color:#fff}
+.qtag{font-size:var(--fs-6);opacity:.85;margin-left:2px;white-space:nowrap;font-weight:var(--fw-6)}
+
+/* ---------- 步骤卡 v2：信息分层、按钮统一、环节两态 ---------- */
+/* 卡片只留四行。原来从上往下堆着：说明句、状态、环节、产物清单、折叠详情。
+   现在说明与产物都进「任务完成详情」浮层，卡片上只剩判断与动作。 */
+.stcard{gap:9px}
+.stcard h4{font-size:var(--fs-3);font-weight:var(--fw-3)}
+.stmeta{font-size:var(--fs-6);color:var(--ink3);min-height:0}
+
+/* 环节格：只有两种可见状态。
+   完成 = 绿勾且不可点；失败 = 红叉且可点（点开看原因）。
+   其余状态不挂符号，也不解释 —— 解释符号这件事本身就是设计没做好。 */
+.stsubs{display:flex;flex-wrap:wrap;align-items:center;gap:5px}
+.stsub{display:inline-flex;align-items:center;gap:4px;font-size:var(--fs-6);
+  padding:2px 8px;border-radius:999px;border:1px solid var(--line);
+  background:#fbfcfb;color:var(--ink2);line-height:1.7;font-family:inherit}
+.stsub i{font-style:normal;color:var(--ink3);font-variant-numeric:tabular-nums}
+.stsub.plain{border-color:transparent;background:transparent;color:var(--ink3);padding-left:0}
+.stsub.ok{border-color:#cbe7d4;background:var(--done-soft);color:var(--done)}
+.stsub.bad{border-color:#f3c9c6;background:#fff;color:var(--err);cursor:pointer;
+  font-weight:var(--fw-4);text-decoration:underline;text-decoration-color:#f0c0bb;
+  text-underline-offset:3px}
+.stsub.bad:hover{background:var(--err-soft);border-color:#e7b3ad}
+
+/* 按钮组：四个动作同一套外形，只有主行动上色。
+   上一版主按钮是 btn、另两个是 btn-sm，并排时高度、边框、圆角全不一样。 */
+.stbtns{display:flex;flex-wrap:wrap;gap:6px;margin-top:2px}
+.stbtn{flex:1 1 0;min-width:88px;justify-content:center;white-space:nowrap;
+  font-size:var(--fs-6);padding:7px 8px;text-align:center}
+.stmore{flex:1 1 100%;color:var(--ink2);background:#fff;border-color:var(--line)}
+.stmore:hover{background:#f6f8fa;border-color:#c9d2da;color:var(--ink)}
+
+/* ---------- 通用浮层（任务完成详情 / 失败原因） ---------- */
+/* ---------- 通用浮层（任务完成详情 / 失败原因 / 大图） ---------- */
+/* 这一层是所有"点开看细节"的地方：卡片要立得住，才看得出层次。
+   以前只有白底 + 一条分隔线，"输入/参数/处理/结果"四段挤在一起，
+   她说"太简朴了，都看不出来具体的细节"。 */
+.sheet{position:fixed;inset:0;z-index:210;display:flex;align-items:center;justify-content:center;
+  padding:24px;background:rgba(18,26,22,.5);backdrop-filter:blur(2px)}
+/* 第二层盖在第一层上：加一道更深的底，让人知道现在看的是"更里面一层" */
+.sheet-lv2{background:rgba(12,18,15,.62);z-index:220}
+.sheet-box{background:#fff;border-radius:16px;width:min(820px,100%);max-height:84vh;
+  display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 24px 60px rgba(16,24,20,.28), 0 2px 0 rgba(255,255,255,.6) inset;
+  border:1px solid rgba(255,255,255,.5)}
+.sheet-wide .sheet-box,.sheet-wide{width:min(1000px,100%)}
+.sheet-h{display:flex;align-items:center;gap:10px;padding:15px 20px;
+  background:linear-gradient(180deg,#fbfdfc,#f4f8f6);border-bottom:1px solid var(--line)}
+.sheet-h b{font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink);letter-spacing:.2px}
+.sheet-h .btn{margin-left:auto}
+.sheet-b{flex:1;overflow:auto;padding:18px 20px 22px}
+.sheet-f{display:flex;gap:8px;padding:12px 20px;border-top:1px solid var(--line);background:#fafcfb}
+/* 大图：图占满可用高度，工具条固定在底部一行 */
+.sheet-big{width:min(1180px,100%)}
+.bigwrap{display:flex;align-items:center;justify-content:center;background:#f4f7f5;
+  border:1px solid var(--line-soft);border-radius:10px;padding:10px;min-height:220px}
+.bigwrap img{max-width:100%;max-height:64vh;border-radius:6px;display:block}
+.bigbar{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.bigpath{flex:1;min-width:0;font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink3);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* 大图左右翻：按钮压在图上，不占布局宽度 */
+.bigwrap{position:relative}
+.bignav{position:absolute;top:50%;transform:translateY(-50%);width:40px;height:64px;
+  border:1px solid var(--line);background:rgba(255,255,255,.9);border-radius:10px;
+  font-size:var(--fs-glyph);line-height:1;color:var(--ink2);cursor:pointer;display:flex;
+  align-items:center;justify-content:center;transition:background .12s,color .12s;font-weight:var(--fw-glyph)}
+.bignav:hover{background:#fff;color:var(--brand)}
+.bignav.prev{left:10px}
+.bignav.next{right:10px}
+.bigcount{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);white-space:nowrap}
+/* 「提问」展开的输入区：淡绿底，和三个顶栏动作同一色系 */
+.askbox{margin-top:12px;padding:12px 13px;border:1px solid #cfe4da;border-radius:10px;
+  background:#f4faf7}
+.askbox .l1ask{background:#fff}
+.sheet-tbl{width:min(1000px,100%)}
+
+/* ---------- 失败原因弹窗 ---------- */
+/* 失败要能一眼看出「哪一环、什么原因」，所以第一段用红系底色把它顶出来，
+   报错原文单独一段用等宽字，日志放最后可折叠。 */
+.dtsec-bad{background:#fdf5f4 !important;border-color:#f0d8d5 !important}
+.dtsec-bad .dtsec-t{border-left-color:var(--err);color:var(--err)}
+.failhead{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.failhead b{font-size:var(--fs-4);font-weight:var(--fw-2);color:var(--ink)}
+.failtag{font-size:var(--fs-6);font-weight:var(--fw-1);color:#fff;background:var(--err);
+  border-radius:5px;padding:2px 8px}
+.failtime{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);white-space:nowrap}
+/* 报错原文：等宽、深红字、浅底，和普通日志区分开 */
+.fail-log{background:#fff;border-color:#f0d8d5;color:#8a2a22;max-height:36vh;overflow:auto}
+/* 整步日志默认收起，点开才看 */
+.faillogmore{margin-top:4px}
+.faillogmore>summary{cursor:pointer;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);
+  padding:6px 0;list-style:none}
+.faillogmore>summary::-webkit-details-marker{display:none}
+.faillogmore>summary::before{content:"▸ "}
+.faillogmore[open]>summary::before{content:"▾ "}
+.sh-t{width:100%;border-collapse:collapse;font-size:var(--fs-6);margin-bottom:6px}
+.sh-t th{text-align:left;width:76px;padding:5px 8px 5px 0;color:var(--ink3);font-weight:var(--fw-5);
+  vertical-align:top;white-space:nowrap;font-size:var(--fs-5)}
+.sh-t td{padding:5px 0;color:var(--ink);word-break:break-word}
+.sh-h2{font-size:var(--fs-6);font-weight:var(--fw-4);color:var(--ink2);
+  margin:14px 0 6px;padding-top:10px;border-top:1px solid var(--line2)}
+.sh-dir{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink3);margin:8px 0 3px;font-weight:var(--fw-5)}
+.sh-art{display:flex;align-items:baseline;gap:8px;padding:2px 0;font-size:var(--fs-6)}
+.sh-art .n{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink);word-break:break-all;font-weight:var(--fw-5)}
+.sh-art .m{margin-left:auto;color:var(--ink3);font-size:var(--fs-6);white-space:nowrap;font-variant-numeric:tabular-nums;font-weight:var(--fw-6)}
+/* ---------- 任务完成详情：四段结构 ---------- */
+/* 每一段自带标题与间距：她说这张卡要能按"输入→参数→处理→结果"读下来，
+   四段混排会让人不知道自己在看哪一段。 */
+/* 四段：每段一张浅底小卡，段标题带色条与序号。
+   以前四段只有一行小标题，段与段之间贴在一起，看不出"一段结束了"。
+   现在每段自带边框和间距，长内容也不会糊成一片。 */
+.dtsec{margin-bottom:14px;padding:13px 15px;border:1px solid var(--line-soft);
+  border-radius:11px;background:#fff}
+.dtsec:last-child{margin-bottom:0}
+.dtsec-t{font-size:var(--fs-3);font-weight:var(--fw-3);color:var(--ink);
+  padding:0 0 8px 10px;margin-bottom:10px;border-bottom:1px dashed var(--line-soft);
+  border-left:3px solid var(--brand);letter-spacing:.2px}
+/* 四段各一种色：输入/参数/处理/结果，扫一眼就知道读到第几段 */
+.dtsec:nth-of-type(1){background:#fbfdfc}
+.dtsec:nth-of-type(2){background:#fafcfe}
+.dtsec:nth-of-type(3){background:#fffdf9}
+.dtsec:nth-of-type(4){background:#fcfbfe}
+.dtsec:nth-of-type(1) .dtsec-t{border-left-color:#0f6b56}
+.dtsec:nth-of-type(2) .dtsec-t{border-left-color:#2f5b86}
+.dtsec:nth-of-type(3) .dtsec-t{border-left-color:#b4701a}
+.dtsec:nth-of-type(4) .dtsec-t{border-left-color:#6b4f9e}
+.dtsec-c{font-weight:var(--fw-6);color:var(--ink3);font-size:var(--fs-6)}
+/* 输入文件：一行一个，长路径可断 */
+.depfiles{display:flex;flex-wrap:wrap;gap:6px}
+.depf{font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink2);
+  background:#f6f8f7;border:1px solid var(--line-soft);border-radius:6px;padding:3px 8px;
+  overflow-wrap:anywhere}
+/* 分组小标题：图片 / 表格 / 其它 */
+.dtgrp{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3);margin:10px 0 6px}
+/* 缩略图：小图排成一行一行，点开放大。尺寸固定，图多了也不会把弹窗撑变形。 */
+.thumbs{display:flex;flex-wrap:wrap;gap:9px}
+.thumb{width:140px;border:1px solid var(--line);border-radius:9px;background:#fff;padding:6px;
+  cursor:pointer;display:flex;flex-direction:column;gap:5px;text-align:left;
+  transition:border-color .12s,box-shadow .12s,transform .12s}
+.thumb:hover{border-color:#b9c9c1;box-shadow:0 4px 14px rgba(16,24,20,.10);transform:translateY(-1px)}
+.thumb img{width:100%;height:92px;object-fit:contain;background:#f6f8f7;border-radius:6px}
+.thumb-n{font-size:var(--fs-6);color:var(--ink3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:var(--fw-6)}
+/* 还没取回：不装成能看图，明说要点一下取回 */
+.thumb.empty{cursor:pointer;border-style:dashed}
+.thumb-wait{display:flex;align-items:center;justify-content:center;height:88px;
+  font-size:var(--fs-6);color:var(--ink3);background:#fafafa;border-radius:5px}
+/* 文件行：名字在左，动作在右 */
+.dtlist{display:flex;flex-direction:column;gap:5px}
+.dtrow{display:flex;align-items:center;gap:9px;padding:5px 0;border-bottom:1px solid var(--line-soft)}
+.dtrow:last-child{border-bottom:none}
+.dtrow-n{flex:1;min-width:0;font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sh-log{margin:0;padding:10px 12px;background:#fbfcfb;border:1px solid var(--line-soft);
+  border-radius:7px;font-size:var(--fs-6);line-height:1.65;white-space:pre-wrap;word-break:break-word;
+  max-height:320px;overflow:auto;font-family:var(--font-mono);font-weight:var(--fw-6)}
+.sh-p{font-size:var(--fs-6);color:var(--ink3);line-height:1.7}
+
+/* ---------- 决策卡：到点生成的问题 ---------- */
+.decwhy{font-size:var(--fs-6);color:var(--ink2);line-height:1.7;margin-bottom:10px;
+  padding:8px 11px;background:#f7f9fb;border-radius:7px;border-left:3px solid #cfe0f2}
+.decopts{display:flex;flex-direction:column;gap:6px}
+.decopt{display:flex;align-items:flex-start;gap:8px;padding:8px 11px;border:1px solid var(--line);
+  border-radius:8px;background:#fff;cursor:pointer;font-size:var(--fs-6);line-height:1.6}
+.decopt:hover{border-color:#c8d4de;background:#fafcfd}
+.decopt input{margin-top:2px;flex:none}
+.decopt span{flex:1;min-width:0}
+.decopt i{font-style:normal;margin-left:6px;font-size:var(--fs-glyph);color:var(--done);
+  border:1px solid #cbe7d4;background:var(--done-soft);border-radius:999px;padding:0 6px;font-weight:var(--fw-glyph)}
+.decin{width:100%;margin-top:8px;padding:7px 10px;border:1px solid var(--line);border-radius:7px;
+  font-size:var(--fs-6);font-family:inherit}
+
+/* 记录自相矛盾：状态字段说完成、正文说没跑。
+   不能用绿（那是"跑成了"），也不该用红（那不是"失败"）——
+   这是一条"不能采信"的记录，用琥珀色，并在状态行直接写明矛盾。 */
+.stcard.warnc{border-color:#f0e2c2;background:var(--amber-bg,#fdf9ed)}
+.stcard.warnc .stmeta{color:#8a5a00}
+
+/* 应用自带脚本：文件名、干什么、改于何时 */
+.supList{display:flex;flex-direction:column;gap:8px}
+.supRow{padding:10px 12px;background:#fff;border:1px solid var(--line);border-radius:9px}
+.supHead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.supHead b{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink);word-break:break-all;font-weight:var(--fw-5)}
+.supWhy{font-size:var(--fs-5);color:var(--ink2);margin-top:3px;line-height:1.5;font-weight:var(--fw-5)}
+.supMeta{display:flex;gap:12px;flex-wrap:wrap;font-size:var(--fs-6);color:var(--ink3);margin-top:4px;font-weight:var(--fw-6)}
+.supMeta .ok{color:var(--ok)}
+.supMeta .no{color:var(--fail)}
+
+/* 流程进度：有结果 / 真正跑完 / 上游覆盖，三个数分开写 */
+.progline{font-size:var(--fs-4);color:var(--ink2);padding:11px 14px;margin:0 0 12px;
+  background:#fff;border:1px solid var(--line);border-radius:10px;line-height:1.6;font-weight:var(--fw-4)}
+.progline b{font-size:var(--fs-3);color:var(--ink);font-weight:var(--fw-3);margin-right:4px}
+.progline .dt{color:var(--ink3);font-size:var(--fs-5);font-weight:var(--fw-5)}
+.progmiss{margin-top:5px;font-size:var(--fs-5);color:var(--ink3);font-weight:var(--fw-5)}
+
+/* 表格预览：产物里的 xls/tsv 直接看前几百行 */
+.tblwrap{overflow:auto;max-height:62vh;border:1px solid var(--line);border-radius:9px;background:#fff}
+.dtbl{border-collapse:collapse;font-size:var(--fs-4);white-space:nowrap;font-weight:var(--fw-4)}
+.dtbl th{position:sticky;top:0;background:#f6f8f6;text-align:left;font-weight:var(--fw-strong);
+  color:var(--ink2);padding:7px 10px;border-bottom:1px solid var(--line);z-index:1;font-size:var(--fs-4)}
+.dtbl td{padding:6px 10px;border-bottom:1px solid var(--line2);color:var(--ink)}
+.dtbl tr:hover td{background:#fbfdfb}
+.artrow .btn-sm{padding:2px 9px;font-size:var(--fs-5);font-weight:var(--fw-5)}
+
+/* 适用性标记：这份依据能不能用在这批数据上 */
+.aptag{display:inline-block;font-size:var(--fs-6);padding:1px 7px;border-radius:20px;
+  border:1px solid var(--line);color:var(--ink3);background:#fff;white-space:nowrap;font-weight:var(--fw-6)}
+.aptag.ok{border-color:#cbe7d4;color:var(--ok);background:#f3faf6}
+.aptag.no{border-color:#f2d6d2;color:var(--fail);background:#fdf6f5}
+.apwhy{font-size:var(--fs-5);color:var(--fail);line-height:1.5;font-weight:var(--fw-5)}
+
+/* ---------- 定义对账：同一件事写了几份，差在哪 ---------- */
+.ctbox{display:flex;flex-direction:column;gap:10px}
+/* 对账没有不一致、只有"还没核到"的时候用这一行。
+   它不是告警：没有红底、没有图标，只有一句灰色事实。
+   为什么不用原来那个框：框一出现，人就以为"有问题没修好"——
+   而这条的实际意思是"这件事还不知道"，性质完全不同。 */
+.ctnote{margin:8px 0;padding:6px 10px;border-left:2px solid var(--line-soft);
+        font-size:var(--fs-5);line-height:1.6;font-weight:var(--fw-5)}
+.ctnote .dt{color:var(--ink3)}
+.ctlist{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+.ctrow{padding:9px 11px;border-radius:8px;background:#fff;border:1px solid var(--line-soft)}
+.ctrow.fail{border-color:#f2d6d2;background:#fdf7f6}
+.ctrow.unknown{border-color:#f0e2c2;background:#fdf9ed}
+.ctwhere{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink3);margin-bottom:2px;font-weight:var(--fw-5)}
+.ctwhat{font-size:var(--fs-4);color:var(--ink);line-height:1.55;font-weight:var(--fw-4)}
+.ctfix{font-size:var(--fs-5);color:var(--ink2);line-height:1.55;margin-top:3px;font-weight:var(--fw-5)}
+
+/* ---------- 选择注释依据：整行可点，不用找小按钮 ---------- */
+/* 三页签：同一件事（依据从哪来）的三个答案，切换不跳走。 */
+.reftabs{display:flex;gap:6px;border-bottom:1px solid var(--line2);padding-bottom:0}
+.reftab{flex:1;padding:9px 8px;border:none;border-bottom:2px solid transparent;
+  background:none;color:var(--ink3);font-size:var(--fs-4);font-family:inherit;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;gap:5px;transition:color .12s,border-color .12s;font-weight:var(--fw-4)}
+.reftab:hover{color:var(--ink)}
+.reftab.on{color:var(--brand);border-bottom-color:var(--brand);font-weight:var(--fw-strong);font-size:var(--fs-4)}
+.reftab-n{min-width:17px;height:17px;line-height:17px;text-align:center;border-radius:9px;
+  background:var(--line-soft,#eef1ef);color:var(--ink3);font-size:var(--fs-6);padding:0 5px;font-weight:var(--fw-6)}
+.reftab.on .reftab-n{background:var(--brand);color:#fff}
+.refpick-item.on{border-color:var(--brand);background:#f2f9f6}
+.refpick-list{display:flex;flex-direction:column;gap:8px;margin-bottom:14px}
+.refpick-item{display:flex;align-items:center;gap:14px;width:100%;text-align:left;
+  padding:13px 15px;border:1px solid var(--line);border-radius:10px;background:#fff;
+  cursor:pointer;font-family:inherit;transition:border-color .12s,background .12s}
+.refpick-item:hover{border-color:var(--brand);background:#f7fbf9}
+.refpick-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.refpick-main b{font-size:var(--fs-4);font-weight:var(--fw-strong);color:var(--ink);word-break:break-all;line-height:1.4}
+.refpick-main .mut{font-size:var(--fs-5);color:var(--ink3);font-weight:var(--fw-5)}
+.refpick-path{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink3);word-break:break-all;font-weight:var(--fw-5)}
+.refpick-go{flex:none;padding:6px 14px;border-radius:8px;background:var(--brand);color:#fff;
+  font-size:var(--fs-4);font-weight:var(--fw-strong);white-space:nowrap}
+.refpick-item:hover .refpick-go{background:#0c5a48}
+.refpick-alt{display:flex;gap:8px;flex-wrap:wrap;padding-top:12px;border-top:1px solid var(--line2)}
+.refpick-altbtn{padding:6px 12px;border:1px solid var(--line);border-radius:8px;background:#fff;
+  color:var(--ink2);font-size:var(--fs-5);cursor:pointer;font-family:inherit;font-weight:var(--fw-5)}
+.refpick-altbtn:hover{border-color:var(--brand);color:var(--brand)}
+
+/* ---------- 注释依据（参考表） ---------- */
+.reflist{display:flex;flex-direction:column;gap:8px;margin-bottom:16px}
+.refitem{display:flex;align-items:flex-start;gap:12px;padding:11px 13px;
+  border:1px solid var(--line);border-radius:9px;background:#fff}
+.refitem.on{border-color:#cbe7d4;background:var(--done-soft)}
+.refmain{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.refmain b{font-size:var(--fs-5);font-weight:var(--fw-4);word-break:break-all}
+.refnote{font-size:var(--fs-6);color:var(--ink2);line-height:1.6}
+.refup{border-top:1px solid var(--line-soft);padding-top:12px}
+.refrow{display:flex;gap:8px;margin-top:8px}
+.refrow input{flex:1;min-width:0;padding:7px 10px;border:1px solid var(--line);
+  border-radius:7px;font-size:var(--fs-6);font-family:inherit}
+.filein{width:100%;margin-top:6px;font-size:var(--fs-6)}
+
+/* =====================================================================
+   判定与返工面板（judge.20261102a.js 专用）
+   ---------------------------------------------------------------------
+   命名统一 j 前缀：这些类只属于这一块，和主样式不共享，
+   以后要删这一块，删这一整段就干净了。
+   ===================================================================== */
+.jbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:11px 15px;
+  border-radius:9px;margin-bottom:12px;font-size:var(--fs-6)}
+.jbar b{font-weight:var(--fw-7)}
+.jbar span{color:var(--ink2);font-size:var(--fs-5)}
+.jbar-warn{background:#fdf3e0;border-left:4px solid #b9770e;color:#6b4708}
+.jbar-off{background:#eef0f4;border-left:4px solid #8a8f99;color:#525862}
+.jcard{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
+  padding:8px 16px;margin-bottom:12px}
+.jrow{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;padding:9px 0;
+  border-bottom:1px solid var(--line-soft)}
+.jrow:last-child{border-bottom:none}
+.jk{flex:0 0 88px;font-size:var(--fs-5);color:var(--ink3)}
+.jv{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink)}
+.jnote{font-size:var(--fs-5);color:var(--ink3);font-weight:var(--fw-4)}
+.jacts{margin-left:auto;display:flex;gap:6px}
+.jok{color:#1e7d4f}.jbad{color:#c0392b}
+.jsec-t{font-size:var(--fs-5);font-weight:var(--fw-7);letter-spacing:.06em;
+  color:var(--ink3);margin:18px 0 8px;text-transform:uppercase}
+.jsteps{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:8px}
+.jstep{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid var(--line);
+  border-radius:8px;background:var(--surface);font-size:var(--fs-5)}
+.jstep .jsn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.jstep .jsb{font-weight:var(--fw-6);padding:1px 7px;border-radius:999px;font-size:var(--fs-7)}
+.jstep .jsr{color:var(--ink3);font-size:var(--fs-7);font-variant-numeric:tabular-nums}
+.jstep.ok{border-left:4px solid #1e7d4f}.jstep.ok .jsb{background:#e6f4ec;color:#1e7d4f}
+.jstep.bad{border-left:4px solid #c0392b}.jstep.bad .jsb{background:#fdecea;color:#c0392b}
+.jstep.warn{border-left:4px solid #b9770e}.jstep.warn .jsb{background:#fdf3e0;color:#b9770e}
+.jstep.wait{border-left:4px solid #2c6fb5}.jstep.wait .jsb{background:#eef4fb;color:#2c6fb5}
+.jstep.rel{border-left:4px solid #6b4fa0}.jstep.rel .jsb{background:#f0ecfa;color:#6b4fa0}
+.jstep.idle{opacity:.72}.jstep.idle .jsb{background:#f2f4f2;color:var(--ink3)}
+.jreason{display:flex;flex-wrap:wrap;align-items:baseline;gap:9px;padding:7px 0;
+  border-bottom:1px solid var(--line-soft);font-size:var(--fs-6)}
+.jreason:last-child{border-bottom:none}
+.jtag{font-size:var(--fs-7);font-weight:var(--fw-6);padding:1px 8px;border-radius:999px;
+  background:#f2f4f2;color:var(--ink2)}
+.jtag.ok{background:#e6f4ec;color:#1e7d4f}.jtag.bad{background:#fdecea;color:#c0392b}
+.jtag.warn{background:#fdf3e0;color:#b9770e}.jtag.wait{background:#eef4fb;color:#2c6fb5}
+.jtag.rel{background:#f0ecfa;color:#6b4fa0}
+.jtk{border:1px solid var(--line);border-radius:9px;margin-bottom:9px;background:var(--surface)}
+.jtk-h{display:flex;flex-wrap:wrap;align-items:baseline;gap:9px;padding:11px 14px;cursor:pointer}
+.jtk-h:hover{background:#fafbfa}
+.jid{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:var(--fs-7);color:var(--ink3)}
+.jname{font-weight:var(--fw-6);font-size:var(--fs-6)}
+.jmore{margin-left:auto;color:var(--ink3);font-size:var(--fs-5)}
+.jtk-b{padding:0 14px 13px;border-top:1px solid var(--line-soft)}
+.jsub{font-size:var(--fs-5);font-weight:var(--fw-7);color:var(--ink2);margin:11px 0 5px}
+.jlist{margin:0;padding-left:19px;font-size:var(--fs-6)}
+.jlist li{margin:4px 0}
+.jcmd{background:#f6f7f6;border:1px solid var(--line-soft);border-radius:7px;
+  padding:9px 12px;font-size:var(--fs-7);white-space:pre-wrap;word-break:break-all;
+  max-height:220px;overflow:auto;margin:0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.jtk-acts{display:flex;gap:8px;margin-top:11px;flex-wrap:wrap}
+#judgeRel{border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-family:inherit;
+  font-size:var(--fs-6);background:#fff;color:var(--ink)}
+
+/* =====================================================================
+   手机端适配（≤640px）
+   ---------------------------------------------------------------------
+   之前只有一条 720px 的规则，只管了几个表格；顶栏、弹窗、缩略图、
+   文件行在手机上都会溢出或挤成一团。这一段按"手机上真正会点的东西"
+   逐块收紧：字号不降、只改布局与内边距，保证可读与可点。
+   ===================================================================== */
+@media (max-width:640px){
+  /* --- 页面骨架 --- */
+  .wrap{padding:12px 12px 88px}
+  .sec-h{margin:0 0 10px;gap:6px}
+  .sec-h h2{font-size:var(--fs-2);padding-left:9px;border-left-width:3px}
+  .sec-h .note{font-size:var(--fs-5)}
+
+  /* --- 顶栏：大标题、页签、动作、状态四段各自换行，不并排 --- */
+  .topbar-in{padding:10px 12px;gap:7px}
+  .brand b{font-size:var(--fs-1)}
+  /* 页签与动作各自占满一行：三个页签可以并排，三个动作也能并排；
+     一行放不下时靠 flex-wrap 自然换行，不会挤到屏幕外。 */
+  .tabline{flex-direction:column;align-items:stretch;gap:7px}
+  .tabline .tabs{justify-content:flex-start;overflow-x:auto;-webkit-overflow-scrolling:touch;
+    padding-bottom:2px}
+  .tab{padding:6px 12px;font-size:var(--fs-4)}
+  .tabline .tabacts{margin-left:0;justify-content:stretch}
+  .tabacts{flex-wrap:wrap}
+  .tabacts .btn{flex:1 1 auto;text-align:center;padding:8px 10px;font-size:var(--fs-4)}
+  .topstat{gap:8px 14px;font-size:var(--fs-5);padding-top:6px}
+
+  /* --- 弹窗：贴边留白，占满可用高度；标题栏按钮不挤压标题 --- */
+  .sheet{padding:8px;align-items:flex-start}
+  .sheet-box,.sheet-wide .sheet-box,.sheet-big,.sheet-tbl{width:100%;max-height:94vh;
+    border-radius:12px;margin-top:4px}
+  .sheet-h{padding:11px 13px;flex-wrap:wrap;gap:7px}
+  .sheet-h b{font-size:var(--fs-3);flex:1 1 100%}
+  .sheet-h .btn{margin-left:0}
+  .sheet-b{padding:12px 13px 16px}
+
+  /* --- 任务完成详情四段 --- */
+  .dtsec{padding:10px 11px;border-radius:9px;margin-bottom:11px}
+  .dtsec-t{font-size:var(--fs-3);padding-left:8px}
+  .sh-t th{width:66px;font-size:var(--fs-5)}
+
+  /* --- 缩略图：手机上两列，图不拉满屏 --- */
+  .thumbs{gap:7px}
+  .thumb{width:calc(50% - 4px)}
+  .thumb img{height:82px}
+
+  /* --- 大图：图占满宽度，翻页按钮缩小、贴近边缘 --- */
+  .bigwrap{padding:6px;min-height:auto}
+  .bigwrap img{max-height:58vh}
+  .bignav{width:32px;height:52px;font-size:var(--fs-glyph)}
+  .bignav.prev{left:2px}
+  .bignav.next{right:2px}
+  .bigbar{gap:7px}
+  .bigpath{flex:1 1 100%;order:9}
+  .bigbar .btn{flex:1 1 auto;text-align:center}
+
+  /* --- 文件行：名字换行显示，动作按钮不挤出屏幕 --- */
+  .dtrow{flex-wrap:wrap;gap:6px}
+  .dtrow-n{flex:1 1 100%;white-space:normal;overflow-wrap:anywhere}
+  .file{padding:8px 9px}
+  .file-main{gap:6px}
+  .fn{font-size:var(--fs-4);overflow-wrap:anywhere}
+  .fm{margin-left:0}
+  .fp{font-size:var(--fs-7)}
+
+  /* --- 脚本数据库：三层与小层全部贴满宽度 --- */
+  .libfold-b{padding:8px 9px 10px}
+  .libfold>summary{padding:9px 11px;gap:7px}
+  .libfold>summary>b{font-size:var(--fs-3)}
+  .libsub>summary{padding:8px 9px}
+  .libsub-n{font-size:var(--fs-6)}
+  .l1body{padding:8px 9px 10px}
+  .l1h{padding:9px 11px}
+  .l1h b{font-size:var(--fs-3)}
+  .libhint{font-size:var(--fs-5)}
+
+  /* --- 跑分析：环节卡内边距收紧，按钮可点但不巨大 --- */
+  .stcard{padding:12px 12px}
+  .stcard h4{font-size:var(--fs-3)}
+  .stcard .acts,.stbtns{flex-wrap:wrap}
+  .stcard .btn{flex:1 1 auto;text-align:center}
+
+  /* --- 设置与表单：两列并排的表单在手机上改成一列 --- */
+  .wr{grid-template-columns:1fr}
+  .refrow{flex-direction:column;align-items:stretch}
+  .refrow input{width:100%}
+
+  /* --- 历史分析表格：手机上横向滑动，不压成竖排字 --- */
+  #sessionsHost,#artHost{overflow-x:auto;-webkit-overflow-scrolling:touch}
+
+  /* --- 提问输入框：手机上高度够写两三句 --- */
+  .l1ask{min-height:78px;font-size:var(--fs-4)}
+  .askbox{padding:10px 11px}
+}
+
+/* 更窄（≤380px）：三个动作按钮改成整行，避免字被压成两行 */
+@media (max-width:380px){
+  .tabacts .btn{flex:1 1 100%}
+  .thumb{width:100%}
+}
+
+/* =====================================================================
+   环节参数与候选结果（筛群多参数 / 注释多版本）
+   ---------------------------------------------------------------------
+   这两个环节要"跑几套 → 人挑一套"，所以卡片里需要一块专门放参数与候选。
+   样式跟其它面板分开命名（vpanel / vitem），避免与脚本库那些混用。
+   ===================================================================== */
+.vpanel{margin-top:8px;padding:9px 10px;border:1px solid var(--line-soft);border-radius:9px;
+  background:#fbfdfc}
+.vpanel-t{font-size:var(--fs-6);font-weight:var(--fw-2);color:var(--ink2);margin-bottom:7px;
+  display:flex;align-items:baseline;gap:7px}
+.vpanel-t .vcount{font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3)}
+.vrow{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:6px}
+.vrow label{flex:0 0 62px;font-size:var(--fs-6);font-weight:var(--fw-6);color:var(--ink3)}
+.vinput{flex:1 1 90px;min-width:0;padding:5px 8px;border:1px solid var(--line);border-radius:6px;
+  font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink);background:#fff}
+.vinput:focus{outline:none;border-color:var(--brand)}
+.vhint{font-size:var(--fs-5);color:var(--ink3);line-height:1.55;font-weight:var(--fw-5)}
+/* resolution 多选：一颗颗可点的圆角按钮，选中的填实 */
+.rchips{display:flex;flex-wrap:wrap;gap:5px}
+.rchip{border:1px solid var(--line);background:#fff;border-radius:999px;padding:3px 10px;
+  font-family:var(--font-mono);font-size:var(--fs-6);color:var(--ink2);cursor:pointer;
+  transition:background .12s,border-color .12s,color .12s}
+.rchip:hover{border-color:#a9cfbe;color:var(--brand)}
+.rchip.on{background:var(--brand);border-color:var(--brand);color:#fff;font-weight:var(--fw-2)}
+/* 候选列表：一套一张小卡，选中的描边加粗 */
+.vlist{display:flex;flex-direction:column;gap:6px}
+.vitem{border:1px solid var(--line-soft);border-radius:8px;padding:7px 9px;background:#fff}
+.vitem.on{border-color:var(--brand);background:var(--brand-soft)}
+.vtop{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.vtop b{font-size:var(--fs-6);font-weight:var(--fw-2);color:var(--ink)}
+.vtag{font-size:var(--fs-6);padding:1px 7px;border-radius:999px;white-space:nowrap;
+  border:1px solid transparent;background:#f2f4f2;color:var(--ink3);font-weight:var(--fw-6)}
+.vtag.ok{background:var(--done-soft);color:var(--done);border-color:#cbe7d4}
+.vtag.bad{background:var(--err-soft);color:var(--err);border-color:#f3c9c6}
+.vtag.wait{background:var(--wait-soft);color:var(--wait);border-color:#f0d3bd}
+.vtag.on{background:var(--brand);color:#fff;border-color:var(--brand);font-weight:var(--fw-6)}
+.vpath{font-family:var(--font-mono);font-size:var(--fs-5);color:var(--ink3);margin-top:3px;
+  overflow-wrap:anywhere;font-weight:var(--fw-5)}
+.vnote{font-size:var(--fs-5);color:var(--ink3);margin-top:3px;line-height:1.55;font-weight:var(--fw-5)}
+
+@media (max-width:640px){
+  .vrow label{flex:0 0 100%}
+  .vitem{padding:8px 9px}
+}
+
+/* Runtime overview uses the existing card palette and responsive flow. */
+.monitor-title { margin:0 0 10px; font-size:15px; }
+#flowHost .progmiss { overflow-wrap:anywhere; }
+#logBox { white-space:pre-wrap; overflow-wrap:anywhere; }

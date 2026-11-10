@@ -1,0 +1,1735 @@
+#!/usr/bin/env Rscript
+# =====================================================================
+#  serve.R -- 个性化分析助手的本地服务
+#
+#  为什么用 R 写服务：这套分析本来就只需要 R。
+#  机器上有 R 就能开这个页面，不用再装 Node / Python / 任何东西。
+#
+#  启动：
+#    Rscript serve.R [--port 18980] [--no-open]
+#
+#  它做的事：
+#    1. 在 127.0.0.1 上开一个小网页（只本机可见，不对外）
+#    2. 把 public/ 下的界面发给浏览器
+#    3. 浏览器点按钮 -> 它去启动 engine/run_chain.R 跑分析脚本
+#    4. 把产物列出来，供下载
+#
+#  分工（不要混）：
+#    step_plan.R   「每一步跑哪条命令」的唯一出处
+#    run_chain.R   「跑起来、登记状态、失败即停」的执行器
+#    env_check.R   环境体检
+#    serve.R       只负责 网页 + 收发 JSON + 点按钮 -> 起执行器
+#
+#  本文件刻意只用 ASCII：Windows 中文控制台编码不一，
+#  一旦出现乱码会让人以为程序坏了。中文都在网页与 JSON 里。
+# =====================================================================
+
+suppressWarnings(options(stringsAsFactors = FALSE, scipen = 999, warn = -1))
+
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+
+# ---- 找自己的位置 ----
+APP_DIR <- tryCatch({
+  a <- commandArgs(trailingOnly = FALSE)
+  f <- sub("^--file=", "", a[grep("^--file=", a)])
+  if (length(f)) normalizePath(dirname(f[1]), winslash = "/") else normalizePath(getwd(), winslash = "/")
+}, error = function(e) normalizePath(getwd(), winslash = "/"))
+
+PUBLIC_DIR <- file.path(APP_DIR, "public")
+ENGINE_DIR <- file.path(APP_DIR, "engine")
+STATE_DIR  <- file.path(APP_DIR, "state")
+dir.create(STATE_DIR, showWarnings = FALSE, recursive = TRUE)
+STATE_FILE <- file.path(STATE_DIR, "state.json")
+
+argv <- commandArgs(trailingOnly = TRUE)
+get_opt <- function(k, d = NULL) {
+  i <- match(k, argv)
+  if (is.na(i)) return(d)
+  if (i == length(argv) || grepl("^--", argv[i + 1])) return(d)
+  argv[i + 1]
+}
+has_flag <- function(k) k %in% argv
+
+PORT     <- suppressWarnings(as.integer(get_opt("--port", "18980")))
+if (is.na(PORT)) PORT <- 18980L
+AUTOOPEN <- !has_flag("--no-open")
+HOST     <- "127.0.0.1"
+IS_WIN   <- .Platform$OS.type == "windows"
+
+say <- function(...) { cat(enc2native(paste0(...)), "\n", sep = ""); flush(stdout()) }
+
+if (!requireNamespace("jsonlite", quietly = TRUE)) {
+  say("")
+  say("[!] 缺少 jsonlite 包，这个助手依赖它读写配置。")
+  say("    先装：  install.packages('jsonlite')")
+  say("")
+  quit(save = "no", status = 1)
+}
+
+PLAN_FILE <- file.path(ENGINE_DIR, "step_plan.R")
+CHAIN_FILE <- file.path(ENGINE_DIR, "run_chain.R")
+ENTRY_FILE <- file.path(ENGINE_DIR, "sc_workflow.R")
+PICK_FILE <- file.path(ENGINE_DIR, "pick.R")
+GUARD_DIR <- file.path(ENGINE_DIR, "workflow")
+for (f in c(PLAN_FILE, CHAIN_FILE, ENTRY_FILE, PICK_FILE, file.path(GUARD_DIR, "guard.R"))) {
+  if (!file.exists(f)) {
+    say("")
+    say("[!] 缺少运行文件：", f)
+    say("    这个文件夹可能没拷完整，请重新解压一份。")
+    say("")
+    quit(save = "no", status = 1)
+  }
+}
+# 载入「每一步跑什么」的唯一出处（同时拿到 read_cfg / cfg_val / pjoin 等）
+source(PLAN_FILE, local = TRUE)
+# 载入查表：网页上的「脚本库」页签与自动判定都用它，不另写一份
+source(PICK_FILE, local = TRUE)
+ENTRY_RUNNER <- ENTRY_FILE
+
+# ---- 位置：本机 / 服务器 -------------------------------------------
+#   place.R 是「在哪台机器上跑」的唯一出处：页面读它、页面写它、
+#   点「保存选择」时按它决定去建哪个目录、连哪台机器。
+#   分开写两份的后果是页面以为在跑 A、实际在跑 B，而这种错查起来很贵。
+PLACE_FILE <- file.path(ENGINE_DIR, "place.R")
+HAS_PLACE <- file.exists(PLACE_FILE)
+if (HAS_PLACE) source(PLACE_FILE, local = TRUE)
+
+# 历史 / 回退，脚本存取与审阅 -----------------------------------
+#   这两个文件是可选的：老版本整包里没有它们。
+#   缺了就降级（接口少一块），不能让整个服务起不来 ——
+#   服务起不来，用户连"为什么"都看不到。
+HISTORY_FILE <- file.path(ENGINE_DIR, "history.R")
+SCRIPTS_FILE <- file.path(ENGINE_DIR, "script_ops.R")
+HAS_HISTORY <- file.exists(HISTORY_FILE)
+HAS_SCRIPT_OPS <- file.exists(SCRIPTS_FILE)
+if (HAS_HISTORY) source(HISTORY_FILE, local = TRUE)
+if (HAS_SCRIPT_OPS) source(SCRIPTS_FILE, local = TRUE)
+
+# 步骤顺序（用于判断"从哪一步往后要重跑"）。
+#   取现成的 CHAIN_ORDER，不在服务端另抄一份，避免两处不一致。
+STEP_ORDER <- tryCatch(CHAIN_ORDER, error = function(e) c(
+  "env", "decide", "precheck", "pipeline1", "pipeline2", "plots", "ppt", "pack"))
+
+# =====================================================================
+# 状态（只记运行目录；其余都在 run-dir 下的文件里）
+# =====================================================================
+write_json_file <- function(path, obj) {
+  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
+  con <- file(path, open = "wb")
+  writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null", digits = NA))), con)
+  close(con)
+}
+read_state <- function() {
+  if (!file.exists(STATE_FILE)) return(list(runDir = NULL))
+  st <- tryCatch(jsonlite::fromJSON(read_text_any(STATE_FILE), simplifyVector = FALSE),
+                 error = function(e) list(runDir = NULL))
+  if (is.null(st$runDir) || !length(st$runDir) || !nzchar(as.character(st$runDir))) st$runDir <- NULL
+  st
+}
+save_state <- function(st) write_json_file(STATE_FILE, st)
+
+# =====================================================================
+# 步骤状态与日志（读 run_chain.R 写下的文件；不在内存里另建一套）
+# =====================================================================
+status_dir  <- function(runDir) file.path(runDir, "status")
+step_state_file <- function(runDir) file.path(status_dir(runDir), "step_state.json")
+step_log_file   <- function(runDir) file.path(status_dir(runDir), "run.log")
+
+read_step_state <- function(runDir) {
+  f <- step_state_file(runDir)
+  if (!file.exists(f)) return(list(status = "idle", step = NULL, code = NULL))
+  st <- tryCatch(jsonlite::fromJSON(read_text_any(f), simplifyVector = FALSE),
+                 error = function(e) list(status = "idle", step = NULL, code = NULL))
+  if (is.null(st$status) || !nzchar(as.character(st$status))) st$status <- "idle"
+  if (is.null(st$code) || !length(st$code)) st$code <- NULL
+  st
+}
+
+# 判断「还在跑」不能只看状态文件：进程可能被强杀，文件来不及更新。
+# 拿 pid 探一下，进程没了就把状态回落，避免界面一直卡在「运行中」。
+step_is_running <- function(runDir) {
+  st <- read_step_state(runDir)
+  if (!identical(as.character(st$status), "running")) return(FALSE)
+  pid <- suppressWarnings(as.integer(st$pid %||% NA))
+  if (is.na(pid)) return(FALSE)
+  alive <- if (IS_WIN) {
+    out <- tryCatch(suppressWarnings(system2("tasklist", c("/FI", paste0("PID eq ", pid), "/NH"),
+                                            stdout = TRUE, stderr = FALSE)), error = function(e) character(0))
+    any(grepl(as.character(pid), out))
+  } else {
+    file.exists(file.path("/proc", as.character(pid)))
+  }
+  if (!alive) {
+    write_json_file(step_state_file(runDir),
+                    list(status = "stopped", step = st$step, code = NULL,
+                         started = st$started, ended = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")))
+    return(FALSE)
+  }
+  TRUE
+}
+
+# =====================================================================
+# 起一个执行器进程（后台，不等待）
+# =====================================================================
+launch_step <- function(stepId, runDir) {
+  if (is.null(runDir) || !dir.exists(runDir))
+    return(list(ok = FALSE, error = "还没选运行目录"))
+  cfg <- read_cfg(runDir)
+  if (is.null(cfg))
+    return(list(ok = FALSE, error = "这个运行目录里还没有 pipeline.json。先点「生成一份默认设置」。"))
+
+  valid <- CHAIN_ORDER
+  if (!identical(stepId, "all") && !stepId %in% valid)
+    return(list(ok = FALSE, error = paste0("未知步骤：", stepId)))
+
+  if (step_is_running(runDir))
+    return(list(ok = FALSE, error = "上一步还在跑。等它结束，或者点「停止」。"))
+
+  # ---- 闸门检查：在这里同步做掉，别等启动器起来再说 ----
+  # 为什么：如果只在 run_chain.R 里查，页面会先收到「已开始」，几秒后才变成
+  #   「被拦住」。使用者看到的是「点了按钮、提示成功、然后失败」，很困惑。
+  #   在这一步先查，页面当场就能给出「还差哪几件事」，不产生假成功。
+  #
+  # 按段位查，不笼统查：
+  #   上段（pipeline1）要 A 段（数据在哪、注释依据、质控门槛、读入前剔样本）
+  #   下段（pipeline2）要 B 段（筛群、剔样本、低置信门槛）
+  #   B 段那几条的依据只有跑到一次聚类才产生。笼统查会让上段被还没到该问的
+  #   问题挡住 —— 永远跑不到能产生依据的那一步，卡死。
+  gatesWanted <- if (identical(stepId, "all")) {
+    # 一键全流程：从头跑到尾，两段的要求都要满足
+    c("A", "B")
+  } else {
+    hit0 <- Filter(function(s) identical(s$id, stepId), build_steps(cfg, runDir, ENGINE_DIR))
+    if (length(hit0) > 0 && isTRUE(hit0[[1]]$needGate)) {
+      ph <- step_gate_phase(stepId)
+      if (is.null(ph)) character(0) else ph
+    } else character(0)
+  }
+  for (ph in gatesWanted) {
+    pend <- pending_gate_names(runDir, ph)
+    if (!is.null(pend) && length(pend)) {
+      where <- if (identical(ph, "A")) "跑主流程之前" else "一次聚类之后、继续往下之前"
+      return(list(ok = FALSE, blocked = TRUE,
+                  error = sprintf("%s要定 %d 件事：%s。请先在上面答完并保存。",
+                                  where, length(pend), paste(pend, collapse = "；"))))
+    }
+  }
+
+  dir.create(status_dir(runDir), showWarnings = FALSE, recursive = TRUE)
+  rs <- rscript_bin(cfg)
+
+  # ---- 一律走统一入口 ----
+  #   网页也是入口之一，但它同样必须经过 sc_workflow.R。
+  #   只有入口会写台账、设守卫环境变量。绕过它，
+  #   用了哪些参数、什么时候跑的、产物指纹是什么，事后就查不到 ——
+  #   而这三件事正是「能不能复现」的全部依据。
+  #
+  #   参数顺序必须是「命令在前」：sc_workflow.R <cmd> --dir <目录>。
+  #   把 --dir 放前面，入口会把第一个参数当成子命令，行为变得莫名其妙。
+  a <- c("--vanilla", ENTRY_FILE)
+  if (identical(stepId, "all")) {
+    a <- c(a, "run-all")
+  } else {
+    a <- c(a, "run", "--step", stepId, "--force")
+  }
+  a <- c(a, "--dir", runDir)
+
+  logf <- step_log_file(runDir)
+
+  # 先把状态置成 running。入口/执行器起来后会用真实 pid 覆盖它，
+  # 避免界面在这几秒里显示成空闲。
+  write_json_file(step_state_file(runDir),
+                  list(status = "running", step = if (identical(stepId, "all")) "all" else stepId,
+                       code = NULL, started = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), pid = NULL))
+
+  # 后台启动，输出直接落到 run.log。
+  #   这里传的是文件名而不是连接：R 在把「连接」交给子进程当 stdout 时，
+  #   多数平台会静默丢掉子进程输出 —— 日志里只剩自己写的头尾，报错一个字看不到。
+  ok <- tryCatch({
+    system2(rs, a, stdout = logf, stderr = logf, wait = FALSE)
+    TRUE
+  }, error = function(e) FALSE)
+
+  if (!ok) {
+    write_json_file(step_state_file(runDir),
+                    list(status = "failed", step = stepId, code = 127L,
+                         started = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), ended = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")))
+    return(list(ok = FALSE, error = "执行器起不来。检查一下 R 路径是否正确。"))
+  }
+
+  list(ok = TRUE, started = stepId)
+}
+
+# ---- 停止：连子进程一起收拾，不然分析脚本还在后台吃内存 ----
+stop_step <- function(runDir) {
+  st <- read_step_state(runDir)
+  if (!identical(as.character(st$status), "running"))
+    return(list(ok = TRUE, msg = "当前没有在跑的步骤。"))
+  pid <- suppressWarnings(as.integer(st$pid %||% NA))
+  if (is.na(pid)) {
+    write_json_file(step_state_file(runDir),
+                    list(status = "stopped", step = st$step, code = NULL,
+                         started = st$started, ended = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")))
+    return(list(ok = TRUE, msg = "已标记为停止。"))
+  }
+  if (IS_WIN) {
+    system2("taskkill", c("/PID", as.character(pid), "/T", "/F"),
+            stdout = FALSE, stderr = FALSE, wait = TRUE)
+  } else {
+    # 先收子进程，再收自己
+    kids <- tryCatch(suppressWarnings(system2("pgrep", c("-P", as.character(pid)),
+                                              stdout = TRUE, stderr = FALSE)), error = function(e) character(0))
+    for (k in kids) {
+      kk <- suppressWarnings(as.integer(k))
+      if (!is.na(kk)) try(system2("kill", c("-TERM", as.character(kk)), stdout = FALSE, stderr = FALSE), silent = TRUE)
+    }
+    try(system2("kill", c("-TERM", as.character(pid)), stdout = FALSE, stderr = FALSE), silent = TRUE)
+  }
+  write_json_file(step_state_file(runDir),
+                  list(status = "stopped", step = st$step, code = NULL,
+                       started = st$started, ended = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")))
+  list(ok = TRUE, msg = "已停止。已经算出来的中间结果不会删，下次可以从这一步继续。")
+}
+
+# =====================================================================
+# 注意：init_config / autofill_environment / detect_memory_gb 都定义在
+#   engine/step_plan.R 里，不在这里重复一份。
+#
+#   为什么：网页入口和命令行入口必须生成一模一样的配置文件。
+#   两处各写一份，早晚会不一致 —— 而不一致的配置会让「同样的参数跑出
+#   不同结果」这种最难查的问题出现。所以只留一个出处。
+# =====================================================================
+# 产物清单
+# =====================================================================
+ARTIFACT_KINDS <- list(".pptx" = "PPT", ".zip" = "打包", ".html" = "报告", ".md" = "报告",
+                       ".png" = "图", ".pdf" = "图", ".xls" = "表", ".csv" = "表",
+                       ".tsv" = "表", ".txt" = "报告")
+SKIP_EXT <- c(".rds", ".rdata", ".rdata")
+
+list_artifacts <- function(runDir) {
+  cfg <- read_cfg(runDir)
+  outdir <- cfg_val(cfg, "io", "outdir", NULL)
+  if (is.null(outdir) || !length(outdir) || !nzchar(as.character(outdir))) outdir <- runDir
+  outdir <- as.character(outdir)
+  if (!dir.exists(outdir)) return(list(ok = TRUE, outdir = outdir, items = list()))
+  files <- list.files(outdir, recursive = TRUE, full.names = TRUE, all.files = FALSE)
+  items <- list()
+  out_norm <- gsub("\\\\", "/", outdir)
+  for (f in files) {
+    if (dir.exists(f)) next
+    fn <- gsub("\\\\", "/", f)
+    # status 目录里放的是运行状态，不是给使用者下载的产物
+    if (grepl("/status/", fn)) next
+    ext <- paste0(".", tolower(tools::file_ext(f)))
+    if (ext %in% SKIP_EXT) next
+    kind <- ARTIFACT_KINDS[[ext]]
+    if (is.null(kind)) next
+    info <- file.info(f)
+    rel <- sub(paste0("^", out_norm, "/?"), "", fn)
+    items[[length(items) + 1L]] <- list(
+      rel = rel, name = basename(f), kind = kind,
+      size = as.numeric(info$size),
+      mtime = format(info$mtime, "%Y-%m-%dT%H:%M:%S"), full = f
+    )
+  }
+  if (length(items)) {
+    ord <- order(vapply(items, function(x) x$mtime, character(1)), decreasing = TRUE)
+    items <- items[ord]
+  }
+  list(ok = TRUE, outdir = outdir, items = items)
+}
+
+# =====================================================================
+# 目录浏览
+# =====================================================================
+pct_decode <- function(s) {
+  if (is.null(s) || !nzchar(s)) return(s)
+  out <- raw(0); i <- 1L; n <- nchar(s, type = "chars")
+  while (i <= n) {
+    ch <- substr(s, i, i)
+    if (ch == "%" && i + 2L <= n) {
+      v <- suppressWarnings(strtoi(substr(s, i + 1L, i + 2L), 16L))
+      if (!is.na(v)) { out <- c(out, as.raw(v)); i <- i + 3L; next }
+    }
+    out <- c(out, charToRaw(enc2utf8(ch))); i <- i + 1L
+  }
+  tryCatch(rawToChar(out), error = function(e) s)
+}
+
+list_dir <- function(dir) {
+  entries <- list.files(dir, all.files = FALSE, full.names = TRUE, no.. = TRUE)
+  dirs <- list(); files <- list()
+  for (e in entries) {
+    info <- tryCatch(file.info(e), error = function(x) NULL)
+    if (is.null(info) || is.na(info$isdir)) next
+    nm <- enc2utf8(basename(e))
+    if (startsWith(nm, ".")) next
+    if (isTRUE(info$isdir)) {
+      dirs[[length(dirs) + 1L]] <- list(name = nm, mtime = format(info$mtime, "%Y-%m-%dT%H:%M:%S"))
+    } else {
+      files[[length(files) + 1L]] <- list(name = nm, size = as.numeric(info$size))
+    }
+  }
+  if (length(dirs)) dirs <- dirs[order(vapply(dirs, function(x) x$name, character(1)))]
+  if (length(files)) files <- files[order(vapply(files, function(x) x$name, character(1)))]
+  list(dirs = dirs, files = files)
+}
+
+drives <- function() {
+  if (!IS_WIN) return(list("/"))
+  out <- list()
+  for (L in LETTERS) { d <- paste0(L, ":/"); if (dir.exists(d)) out[[length(out) + 1L]] <- d }
+  out
+}
+default_browse_dir <- function() {
+  if (IS_WIN) { d <- drives(); if (length(d)) return(d[[1]]); return("C:/") }
+  path.expand("~")
+}
+
+# =====================================================================
+# HTTP
+# =====================================================================
+STATUS_TEXT <- c(`200` = "OK", `400` = "Bad Request", `404` = "Not Found",
+                 `405` = "Method Not Allowed", `500` = "Internal Server Error")
+
+send_raw <- function(con, code, ctype, payload_raw) {
+  hdr <- paste0("HTTP/1.1 ", code, " ", STATUS_TEXT[[as.character(code)]], "\r\n",
+                "Content-Type: ", ctype, "\r\n",
+                "Content-Length: ", length(payload_raw), "\r\n",
+                "Cache-Control: no-store\r\n",
+                "Connection: close\r\n\r\n")
+  writeBin(c(charToRaw(hdr), payload_raw), con)
+  flush(con)
+}
+send_text <- function(con, code, ctype, txt) send_raw(con, code, ctype, charToRaw(enc2utf8(txt)))
+send_json <- function(con, code, obj) send_text(con, code, "application/json; charset=utf-8",
+                                                jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null", digits = NA))
+
+read_request <- function(con) {
+  buf <- raw(0)
+  repeat {
+    b <- tryCatch(readBin(con, "raw", 1L), error = function(e) raw(0))
+    if (!length(b)) break
+    buf <- c(buf, b)
+    n <- length(buf)
+    if (n >= 4L) {
+      t4 <- as.integer(buf[(n - 3L):n])
+      if (identical(t4, c(13L, 10L, 13L, 10L))) break
+    }
+    if (n > 131072L) break
+  }
+  if (!length(buf)) return(NULL)
+  txt <- rawToChar(buf)
+  if (!validUTF8(txt)) txt <- iconv(txt, from = "GBK", to = "UTF-8", sub = "?")
+  parts <- strsplit(txt, "\r\n")[[1]]
+  if (!length(parts)) return(NULL)
+  first <- strsplit(parts[1], " ")[[1]]
+  method <- first[1]
+  target <- if (length(first) >= 2L) first[2] else "/"
+  headers <- list()
+  if (length(parts) > 1L) {
+    for (h in parts[-1]) {
+      if (!nzchar(h)) next
+      i <- regexpr(":", h, fixed = TRUE)
+      if (i < 1) next
+      headers[[tolower(trimws(substr(h, 1, i - 1)))]] <- trimws(substr(h, i + 1, nchar(h)))
+    }
+  }
+  body_raw <- raw(0)
+  clen <- 0L
+  ch <- headers[["content-length"]]
+  if (!is.null(ch) && length(ch) == 1L && !grepl(",", ch)) {
+    v <- suppressWarnings(as.integer(ch))
+    if (length(v) == 1L && !is.na(v) && v > 0L) clen <- v
+  }
+  if (clen > 0L) {
+    got <- raw(0)
+    while (length(got) < clen) {
+      chunk <- tryCatch(readBin(con, "raw", clen - length(got)), error = function(e) raw(0))
+      if (!length(chunk)) break
+      got <- c(got, chunk)
+    }
+    body_raw <- got
+  }
+  body <- if (length(body_raw)) rawToChar(body_raw) else ""
+  if (nzchar(body) && !validUTF8(body)) body <- iconv(body, from = "GBK", to = "UTF-8", sub = "?")
+  list(method = method, target = target, headers = headers, body = body)
+}
+
+parse_query <- function(target) {
+  i <- regexpr("?", target, fixed = TRUE)
+  if (i < 0) return(list(path = target, q = list()))
+  path <- substr(target, 1, i - 1)
+  qs <- substr(target, i + 1, nchar(target))
+  q <- list()
+  for (kv in strsplit(qs, "&")[[1]]) {
+    if (!nzchar(kv)) next
+    j <- regexpr("=", kv, fixed = TRUE)
+    k <- if (j > 0) substr(kv, 1, j - 1) else kv
+    v <- if (j > 0) substr(kv, j + 1, nchar(kv)) else ""
+    q[[pct_decode(k)]] <- pct_decode(v)
+  }
+  list(path = pct_decode(path), q = q)
+}
+
+MIME <- list(".html" = "text/html; charset=utf-8", ".js" = "text/javascript; charset=utf-8",
+             ".css" = "text/css; charset=utf-8", ".json" = "application/json; charset=utf-8",
+             ".svg" = "image/svg+xml", ".png" = "image/png", ".jpg" = "image/jpeg",
+             ".ico" = "image/x-icon", ".txt" = "text/plain; charset=utf-8")
+
+static_file <- function(rel) {
+  rel <- gsub("^/+", "", rel)
+  if (!nzchar(rel)) rel <- "index.html"
+  if (grepl("\\.\\.", rel)) return(NULL)
+  p <- file.path(PUBLIC_DIR, rel)
+  if (file.exists(p) && !dir.exists(p)) p else NULL
+}
+
+serve_request <- function(con, req) {
+  pr <- parse_query(req$target)
+  p <- pr$path; q <- pr$q
+  st <- read_state()
+  runDir <- st$runDir
+  body_json <- function(default = list()) {
+    if (!nzchar(req$body)) return(default)
+    tryCatch(jsonlite::fromJSON(req$body, simplifyVector = FALSE), error = function(e) default)
+  }
+
+  if (p == "/api/ping")
+    return(send_json(con, 200, list(ok = TRUE, platform = .Platform$OS.type, port = PORT)))
+
+  # ---- 位置：本机 / 服务器 ------------------------------------------
+  #   GET  /api/place    看当前选择（口令永不回传）
+  #   POST /api/place    只保存，不做别的（改一半走开也不会写脏）
+  #   POST /api/place/commit
+  #        「保存选择」真正的动作：落盘 -> 建配置 -> 跑环境体检与脚本识别
+  #   为什么保存和提交分成两个接口：
+  #        保存是「记住我填的」，提交是「按这个开始干活」。
+  #        合成一个的话，识别一旦失败，用户填的东西也一起回滚，
+  #        得重填一遍 —— 那是纯粹白费力气。
+  if (p == "/api/place") {
+    if (!HAS_PLACE) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/place.R")))
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      r <- tryCatch(place_write(APP_DIR, b), error = function(e) NULL)
+      if (is.null(r)) return(send_json(con, 400, list(ok = FALSE, error = "写入失败")))
+    }
+    pub <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
+    if (is.null(pub)) return(send_json(con, 200, list(ok = FALSE, error = "读不到位置配置")))
+    lp <- as.character(pub$local$path %||% "")
+    return(send_json(con, 200, c(list(ok = TRUE,
+                                     ready = isTRUE(tryCatch(place_ready(APP_DIR),
+                                                             error = function(e) FALSE)),
+                                     local_path = if (nzchar(lp)) enc2utf8(lp) else NULL,
+                                     local_ok = if (nzchar(lp)) dir.exists(lp) else NULL),
+                                 pub)))
+  }
+
+  if (p == "/api/place/commit" && identical(req$method, "POST")) {
+    if (!HAS_PLACE) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/place.R")))
+    b <- body_json()
+    warns <- character(0)
+
+    # 1) 先落盘。即使后面识别失败，用户填的也已经在文件里了。
+    tryCatch(place_write(APP_DIR, b),
+             error = function(e) warns <<- c(warns, paste0("保存位置配置失败：", conditionMessage(e))))
+
+    pub <- tryCatch(place_public(APP_DIR), error = function(e) list(mode = "local"))
+    pub_srv <- pub$server %||% list()
+    mode <- as.character(pub$mode %||% "local")
+
+    # 本次「保存并识别」的请求标记。
+    #   为什么要它：体检结果存在 state/remote_env.json 里，那是「上一次跑完的样子」。
+    #   没有请求标记，就没法回答「手上这份结果是这一次跑的吗」，
+    #   于是刚点完按钮、助手还没动，页面就已经拿着旧数据显示出结论。
+    #   标记落盘后，/api/envcheck 用它判新鲜度：旧结果只能当参考，不能当结论。
+    req_id <- paste0("req-", format(Sys.time(), "%Y%m%d%H%M%S"))
+    req_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+    try(write_json_file(file.path(STATE_DIR, "last_commit.json"),
+                        list(id = req_id, at = req_at, mode = mode,
+                             host = as.character(pub_srv$host %||% ""),
+                             work_root = as.character(pub_srv$work_root %||% ""))),
+        silent = TRUE)
+
+    # 2) 本机模式：把选好的目录设成运行目录。
+    #    服务器模式下运行目录是服务器上的绝对路径，本机拿不到，
+    #    所以这里只在 local 时落 state。
+    rd <- NULL
+    if (identical(mode, "local")) {
+      a <- tryCatch(place_apply_local(APP_DIR, STATE_DIR), error = function(e) NULL)
+      if (is.null(a) || !isTRUE(a$ok))
+        warns <- c(warns, "本机工作路径还没选，或者那个目录现在不存在。")
+      else rd <- a$runDir
+    } else {
+      # 服务器模式下「运行目录」就是服务器上的结果目录。
+      #   以前这里只取出来用、不落 state，于是页面永远写着「运行目录还没定」——
+      #   而服务器路径在本机当然不存在，拿 dir.exists 判永远是假。
+      #   记下来之后，页面才知道「跑在哪台机器、结果写哪里」，运行区才能进入就绪态。
+      rd <- as.character(pub_srv$work_root %||% "")
+      if (!nzchar(rd)) {
+        warns <- c(warns, "服务器上的结果目录没填 —— 产物写到哪里还没有着落。")
+      }
+    }
+    if (!is.null(rd) && nzchar(rd)) {
+      st$runDir <- rd
+      st$runDirRemote <- !identical(mode, "local")
+      try(save_state(st), silent = TRUE)
+    }
+
+    # 3) 生成默认配置（pipeline.json / gates.json）+ 登记守卫指纹。
+    #    顺序不能反：没有 pipeline.json，后面的体检和识别就没有依据可写。
+    if (!is.null(rd) && nzchar(rd) && dir.exists(rd)) {
+      tryCatch({
+        if (!file.exists(file.path(rd, "pipeline.json")))
+          init_config(rd, ENGINE_DIR, FALSE)
+        gl <- file.path(GUARD_DIR, "guard.R")
+        if (file.exists(gl)) {
+          dir.create(file.path(rd, "status"), showWarnings = FALSE, recursive = TRUE)
+          lk <- file.path(rd, "status", "guard.lock.json")
+          if (!file.exists(lk)) {
+            obj <- list(guard_version = "1.0", guard_md5 = unname(tools::md5sum(gl)),
+                        locked_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+                        note = "entry-guard fingerprint")
+            con2 <- file(lk, open = "wb")
+            writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE))), con2)
+            close(con2)
+          }
+        }
+      }, error = function(e) warns <<- c(warns, paste0("生成默认配置失败：", conditionMessage(e))))
+    }
+
+    # 4) 「原始数据在哪」这件事，在第一步已经定过了。
+    #    闸门里那条 data_indir 如果还挂着 pending，就把它写成已回答 ——
+    #    否则用户会在两个地方被问同一件事。
+    if (!is.null(rd) && nzchar(rd) && dir.exists(rd)) {
+      tryCatch({
+        gf <- file.path(rd, "gates.json")
+        if (file.exists(gf)) {
+          gj <- jsonlite::fromJSON(paste(readLines(gf, warn = FALSE, encoding = "UTF-8"),
+                                         collapse = "\n"), simplifyVector = FALSE)
+          data_path <- if (identical(mode, "local")) as.character(pub$local$path %||% "")
+                       else as.character(pub_srv$data_root %||% "")
+          changed <- FALSE
+          for (i in seq_along(gj$gates)) {
+            g <- gj$gates[[i]]
+            if (identical(as.character(g$id %||% ""), "data_indir") &&
+                identical(as.character(g$status %||% "pending"), "pending") && nzchar(data_path)) {
+              gj$gates[[i]]$status <- "answered"
+              gj$gates[[i]]$answer <- "auto"
+              gj$gates[[i]]$answer_detail <- data_path
+              gj$gates[[i]]$answered_by <- "place"
+              gj$gates[[i]]$answered_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+              changed <- TRUE
+            }
+          }
+          if (changed) {
+            gj$updated_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+            tmp <- paste0(gf, ".tmp")
+            con2 <- file(tmp, open = "wb")
+            writeBin(charToRaw(enc2utf8(jsonlite::toJSON(gj, auto_unbox = TRUE, pretty = TRUE,
+                                                         null = "null", digits = NA))), con2)
+            close(con2)
+            file.rename(tmp, gf)
+          }
+        }
+      }, error = function(e) warns <<- c(warns, paste0("更新闸门失败：", conditionMessage(e))))
+    }
+
+    # 5) 识别环境。
+    #
+    #    只在「本机」模式下做。服务器模式绝不在这里跑 ——
+    #    这个应用跑在一台容器里（2 核 / 3.6G 内存、没装 Seurat 那套包），
+    #    在这里执行 env_check.R 读到的是容器自己的环境。
+    #    之前就是这么错的：界面写着「内存 3.6G、缺 DoubletFinder / harmony / SoupX」，
+    #    而那是本机的数字，跟用户选的服务器毫无关系 —— 等于用假数据下结论。
+    #    服务器端的环境必须到服务器上跑，结果交回来才算数。
+    env_obj <- NULL; dec_obj <- NULL; scan_obj <- NULL
+    stale_env <- NULL
+    queued_check <- NULL
+    needs_remote <- identical(mode, "server")
+    # 本次请求标记：随任务一起下发，回写时带回来。
+    #   它是"这份结果属于这一次"的唯一凭据。
+    req_id <- if (exists("req_id")) req_id else NULL
+
+    # 服务器模式：现在就拿着配置里的 host/user/password 去连。
+    #   不是读上一次导入的文件 —— 那样换一台服务器就会拿旧结果冒充新的。
+    #   连得上就用它的体检结论；连不上就如实说连不上，不编。
+    if (needs_remote) {
+      rc <- file.path(ENGINE_DIR, "remote_check.R")
+      rf <- file.path(STATE_DIR, "remote_env.json")
+      tmp_chk <- file.path(STATE_DIR, ".remote_check_tmp.json")
+      if (file.exists(rc)) {
+        rs2 <- file.path(R.home("bin"), "Rscript")
+        oldp <- Sys.getenv("SC_REMOTE_PWD", unset = NA)
+        # 密码必须从完整配置里取。
+        #   pub_srv 是给浏览器看的脱敏视图，里面的 password 字段
+        #   在 place_public() 里就被删掉了 —— 拿它去连，永远拿到空密码，
+        #   于是报"配置里没有保存密码"，看着像没填，其实填了。
+        pwd_full <- tryCatch(
+          as.character(place_read(APP_DIR)$server$password %||% ""),
+          error = function(e) "")
+        Sys.setenv(SC_REMOTE_PWD = pwd_full)
+        o2 <- tryCatch(suppressWarnings(system2(rs2,
+          c("--vanilla", rc,
+            "--host", as.character(pub_srv$host %||% ""),
+            "--user", as.character(pub_srv$user %||% ""),
+            "--port", as.character(pub_srv$port %||% 22L),
+            "--data", as.character(pub_srv$data_root %||% ""),
+            "--script", as.character(pub_srv$script_root %||% ""),
+            "--out", tmp_chk), stdout = TRUE, stderr = TRUE)),
+          error = function(e) structure(conditionMessage(e), status = 1L))
+        if (is.na(oldp)) Sys.unsetenv("SC_REMOTE_PWD") else Sys.setenv(SC_REMOTE_PWD = oldp)
+        got <- if (file.exists(tmp_chk)) read_json_file(tmp_chk) else NULL
+        if (!is.null(got) && isTRUE(got$ok)) {
+          env_obj <- got
+          needs_remote <- FALSE
+          # 只有成功才落到正式文件，覆盖上一次的结果
+          try(file.copy(tmp_chk, rf, overwrite = TRUE), silent = TRUE)
+        } else if (file.exists(rf) &&
+                   local({
+                     # 回写文件存的是体检结论本体（verdict / items 在顶层），
+                     #   直连成功后写进去的才是带 ok 字段的那种。
+                     #   两种结构都得认，否则会误判成"还没体检"。
+                     p <- tryCatch(read_json_file(rf), error = function(e) NULL)
+                     if (is.null(p)) return(FALSE)
+                     has_items <- length(p$items %||% list()) > 0
+                     ok_verdict <- identical(as.character(p$verdict %||% ""), "ready")
+                     isTRUE(p$ok) || (has_items && ok_verdict) || has_items
+                   })) {
+          # 直连不通，但工作电脑以前回写过一份结果。
+          #   这一份是「上一次跑出来的」，不是这一次的。
+          #   以前的处理是把它当成结果直接显示 —— 那正是问题所在：
+          #   刚点完按钮、助手还没动，页面就摆出一份结论，
+          #   看起来像"这次已经识别完了"，实际什么也没发生。
+          #   现在只把它当参考带回去，本次结论仍然是"等助手执行"。
+          prev <- tryCatch(read_json_file(rf), error = function(e) NULL)
+          stale_env <- prev
+          g_at <- as.character(prev$generated_at %||% "")
+          via  <- as.character(prev$checked_via %||% prev$target %||% "")
+          warns <- c(warns, paste0(
+            "这台机器连不上服务器 ", as.character(pub_srv$host %||% ""),
+            "，这次还没拿到结果。以下是上一次由能连的电脑执行回来的那一份",
+            if (nzchar(g_at)) paste0("（", g_at, "）") else "",
+            if (nzchar(via)) paste0("，执行方：", via) else "",
+            "，仅供参考，不能当作这次识别出来的结论。",
+            "这次的结果要等助手去服务器上跑完写回来。"))
+          # 直连失败这件事仍然记一条任务，供执行端刷新
+          tq <- file.path(STATE_DIR, "tasks.jsonl")
+          dir.create(dirname(tq), showWarnings = FALSE, recursive = TRUE)
+          tid <- paste0("remote-check-", format(Sys.time(), "%Y%m%d%H%M%S"))
+          tk <- list(id = tid, kind = "remote_check",
+                     host = as.character(pub_srv$host %||% ""),
+                     port = as.integer(pub_srv$port %||% 22L),
+                     user = as.character(pub_srv$user %||% ""),
+                     data_root = as.character(pub_srv$data_root %||% ""),
+                     script_root = as.character(pub_srv$script_root %||% ""),
+                     reason = "stale_refresh",
+                     status = "pending",
+                     created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
+          cc <- file(tq, open = "a", encoding = "UTF-8")
+          writeLines(jsonlite::toJSON(tk, auto_unbox = TRUE, null = "null"), cc, useBytes = TRUE)
+          close(cc)
+          Sys.chmod(tq, mode = "0600")
+          queued_check <- tid
+        } else {
+          reason <- if (!is.null(got)) as.character(got$error %||% "") else ""
+          why <- switch(reason,
+            connection_refused = "连接被拒绝（这台机器连不到该服务器的 22 端口）",
+            timeout = "连接超时",
+            auth_failed = "账号或密码不对",
+            dns_failed = "域名解析失败",
+            no_sshpass = "这台机器没装 sshpass，无法用密码登录",
+            no_password = "配置里没有保存密码",
+            "SSH 连接失败")
+          warns <- c(warns, paste0("连不上服务器 ", as.character(pub_srv$host %||% ""),
+                                   "：", why, "。"))
+          # 直连不通不等于没法查：应用所在的机器连不到，但用户的工作电脑连得到。
+          #   把「查这台服务器」写成一条任务，由能连的那一端执行并把结果写回来。
+          #   这一步是链路的一环，不是人工临时跑脚本。
+          tq <- file.path(STATE_DIR, "tasks.jsonl")
+          dir.create(dirname(tq), showWarnings = FALSE, recursive = TRUE)
+          tid <- paste0("remote-check-", format(Sys.time(), "%Y%m%d%H%M%S"))
+          tk <- list(id = tid, kind = "remote_check",
+                     host = as.character(pub_srv$host %||% ""),
+                     port = as.integer(pub_srv$port %||% 22L),
+                     user = as.character(pub_srv$user %||% ""),
+                     data_root = as.character(pub_srv$data_root %||% ""),
+                     script_root = as.character(pub_srv$script_root %||% ""),
+                     reason = as.character(reason),
+                     status = "pending",
+                     created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
+          cc <- file(tq, open = "a", encoding = "UTF-8")
+          writeLines(jsonlite::toJSON(tk, auto_unbox = TRUE, null = "null"), cc, useBytes = TRUE)
+          close(cc)
+          Sys.chmod(tq, mode = "0600")  # 不吞失败：设不上要能被看见
+          queued_check <- tid
+        }
+      }
+    }
+
+    if (needs_remote) {
+      srv_host <- as.character(pub_srv$host %||% "")
+      warns <- c(warns, paste0(
+        "\u73af\u5883\u4f53\u68c0\u8fd8\u6ca1\u505a\uff1a\u9700\u8981\u5728\u670d\u52a1\u5668 ",
+        srv_host,
+        " \u4e0a\u6267\u884c\u3002\u8fd9\u4e2a\u5e94\u7528\u6240\u5728\u7684\u673a\u5668",
+        "\u770b\u4e0d\u5230\u670d\u52a1\u5668\u7684\u5185\u5b58\u548c R \u5305\uff0c",
+        "\u6240\u4ee5\u4e0d\u5728\u8fd9\u91cc\u4e0b\u7ed3\u8bba\u3002"))
+      # 本机残留的体检结果不能拿去冒充服务器：清掉，免得下次又被读进来
+      old_ec <- if (is.null(rd) || !nzchar(rd)) NULL else file.path(rd, "status", "env_check.json")
+      old_dc <- if (is.null(rd) || !nzchar(rd)) NULL else file.path(rd, "status", "decision.json")
+      if (!is.null(old_ec) && file.exists(old_ec)) try(unlink(old_ec), silent = TRUE)
+      if (!is.null(old_dc) && file.exists(old_dc)) try(unlink(old_dc), silent = TRUE)
+    } else if (isTRUE(st$runDirRemote)) {
+      # 服务器模式：本机不做体检，也不该说"运行目录还没定"——
+      #   运行目录是服务器上的结果目录，本机不存在是正常的。
+      #   这次的结果由执行端在服务器上跑完回写。
+    } else if (!is.null(rd) && nzchar(rd) && dir.exists(rd)) {
+      cfg <- tryCatch(read_cfg(rd), error = function(e) NULL)
+      rs <- rscript_bin(cfg)
+      sdir <- file.path(rd, "status")
+      dir.create(sdir, showWarnings = FALSE, recursive = TRUE)
+
+      ec <- file.path(ENGINE_DIR, "env_check.R")
+      if (file.exists(ec)) {
+        out_f <- file.path(sdir, "env_check.json")
+        o <- tryCatch(suppressWarnings(system2(rs, c("--vanilla", ec, "--out", out_f),
+                                              stdout = TRUE, stderr = TRUE)),
+                      error = function(e) structure(conditionMessage(e), status = 1L))
+        code <- attr(o, "status"); if (is.null(code)) code <- 0L
+        if (file.exists(out_f)) env_obj <- read_json_file(out_f)
+        if (!identical(as.integer(code), 0L) && is.null(env_obj))
+          warns <- c(warns, paste0("环境体检没跑成：", substr(paste(utils::tail(o, 2L), collapse = " "), 1, 120)))
+      }
+
+      dc <- file.path(ENGINE_DIR, "decide_cli.R")
+      if (file.exists(dc)) {
+        o <- tryCatch(suppressWarnings(system2(rs, c("--vanilla", dc, "--dir", rd, "--engine", ENGINE_DIR),
+                                              stdout = TRUE, stderr = TRUE)),
+                      error = function(e) structure(conditionMessage(e), status = 1L))
+        df <- file.path(sdir, "decision.json")
+        if (file.exists(df)) dec_obj <- read_json_file(df)
+      }
+      sf <- file.path(sdir, "scripts_scan.json")
+      if (file.exists(sf)) scan_obj <- read_json_file(sf)
+    } else {
+      # 已经有服务器执行回来的结果时，别再说"体检没跑" ——
+      #   那会和页面上那 15 项数据打架。这里只说缺的是运行目录。
+      if (is.null(env_obj)) {
+        warns <- c(warns, "还没有可用的运行目录，所以环境体检与脚本识别先没跑。")
+      } else {
+        warns <- c(warns, paste0(
+          "运行目录还没定。本机这次没做体检，上面显示的是服务器那台机器执行回来的结果。"))
+      }
+    }
+
+    # 6) 最近用过的目录：本机模式下方便切回来
+    if (!is.null(rd) && nzchar(rd) && HAS_HISTORY)
+      try(hist_recent_add(APP_DIR, rd), silent = TRUE)
+
+    return(send_json(con, 200, list(
+      ok = TRUE,
+      place = c(list(ready = isTRUE(tryCatch(place_ready(APP_DIR), error = function(e) FALSE))), pub),
+      run_dir = if (is.null(rd) || !nzchar(rd)) NULL else enc2utf8(rd),
+      run_dir_remote = isTRUE(st$runDirRemote),
+      env = env_obj, decision = dec_obj, scans = scan_obj,
+      # needs_remote=TRUE 表示"这一轮没有识别服务器"，
+      # 前端据此显示"还没检查过"，而不是拿空结果当成"检查完了没问题"。
+      needs_remote = needs_remote,
+      queued_check = queued_check,
+      # 本次请求标记：前端把它写进注入给助手的文本里，
+      #   执行端回写时原样带回，页面才能确认"这份结果就是这一次跑出来的"。
+      request_id = if (is.null(req_id) || !nzchar(req_id)) NULL else req_id,
+      # 参考用的旧结果（只在直连不通、但以前有人跑过时才有）。
+      #   单独一个字段，不混进 env —— 一旦混进 env，页面就会把它当成结论显示。
+      stale_env = stale_env,
+      stale_note = if (is.null(stale_env)) NULL else paste0(
+        "以下是上一次执行回来的结果，仅供参考；这次的结果要等助手跑完写回来。"),
+      warnings = as.list(warns))))
+  }
+
+  if (p == "/api/env") {
+    cfg <- if (!is.null(runDir)) read_cfg(runDir) else NULL
+    py <- find_python(cfg)
+    return(send_json(con, 200, list(
+      ok = TRUE, runDir = runDir %||% NULL,
+      host = enc2utf8(Sys.info()[["nodename"]]),
+      home = enc2utf8(path.expand("~")),
+      platform = .Platform$OS.type, isWin = IS_WIN,
+      tools = list(
+        rscript = enc2utf8(rscript_bin(cfg)),
+        rversion = paste(R.version$major, R.version$minor, sep = "."),
+        python = if (is.null(py)) NULL else enc2utf8(py))
+    )))
+  }
+
+  if (p == "/api/fs") {
+    dir <- if (!is.null(q$dir) && nzchar(q$dir)) q$dir else default_browse_dir()
+    dir <- gsub("\\\\", "/", dir)
+    if (!dir.exists(dir)) return(send_json(con, 404, list(ok = FALSE, error = paste0("目录不存在：", dir))))
+    listed <- list_dir(dir)
+    parent <- dirname(dir)
+    if (IS_WIN && grepl("^[A-Za-z]:/?$", dir)) parent <- NULL
+    if (!IS_WIN && identical(parent, dir)) parent <- NULL
+    return(send_json(con, 200, c(
+      list(ok = TRUE, dir = enc2utf8(dir),
+           parent = if (is.null(parent)) NULL else enc2utf8(gsub("\\\\", "/", parent)),
+           drives = if (IS_WIN) enc2utf8(unlist(drives())) else NULL),
+      listed)))
+  }
+
+  if (p == "/api/run-dir") {
+    if (identical(req$method, "GET")) {
+      if (is.null(runDir))
+        return(send_json(con, 200, list(ok = TRUE, runDir = NULL, steps = list())))
+      cfg <- read_cfg(runDir)
+      pipe <- read_json_file(file.path(runDir, "pipeline.json"))
+      gates <- read_json_file(file.path(runDir, "gates.json"))
+      return(send_json(con, 200, list(
+        ok = TRUE, runDir = enc2utf8(gsub("\\\\", "/", runDir)),
+        pipeline = pipe, gates = gates,
+        steps = step_titles(cfg, runDir, ENGINE_DIR),
+        stepState = read_step_state(runDir))))
+    }
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      dir <- gsub("\\\\", "/", as.character(b$dir %||% ""))
+      if (!nzchar(dir) || !dir.exists(dir) || !isTRUE(file.info(dir)$isdir))
+        return(send_json(con, 400, list(ok = FALSE, error = paste0("这个目录用不了：", dir))))
+      st$runDir <- normalizePath(dir, winslash = "/", mustWork = FALSE)
+      save_state(st)
+      # 同时记进「最近用过的目录」。
+      #   不记的话，用户点「切换运行目录」回到欢迎页会看不到刚才那个目录，
+      #   等于还是回不去 —— 那正是这次要修的问题。
+      if (HAS_HISTORY) hist_recent_add(APP_DIR, st$runDir)
+      return(send_json(con, 200, list(ok = TRUE, runDir = st$runDir)))
+    }
+  }
+
+  if (p == "/api/config" && identical(req$method, "POST")) {
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    # 服务器模式下运行目录在服务器上，本机这个路径根本不存在。
+    #   不拦的话，写文件会失败在半途，看起来像"保存了但没生效"。
+    #   这一步本来就该由助手在服务器上做，页面上不该给这个入口。
+    if (isTRUE(st$runDirRemote))
+      return(send_json(con, 400, list(ok = FALSE,
+        error = "当前是服务器模式，配置要写在服务器的结果目录里，本机写不了。这一步由助手在服务器上执行。")))
+    b <- body_json()
+    if (isTRUE(b$init)) {
+      # 注意参数顺序：init_config(runDir, engineDir, overwrite)
+      #   漏了 engineDir 会让布尔值跑到 engineDir 位置上，表现为「模板缺失」。
+      w <- init_config(runDir, ENGINE_DIR, isTRUE(b$overwrite))
+      # 顺手登记守卫指纹。没有这一步，之后所有运行都会被守卫拒掉
+      # （因为查不到 guard.lock.json）。网页入口和命令行入口必须做同样的事。
+      tryCatch({
+        gl <- file.path(GUARD_DIR, "guard.R")
+        if (file.exists(gl)) {
+          dir.create(file.path(runDir, "status"), showWarnings = FALSE, recursive = TRUE)
+          md5 <- unname(tools::md5sum(gl))
+          obj <- list(guard_version = "1.0", guard_md5 = md5,
+                      locked_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+                      note = "entry-guard fingerprint")
+          con2 <- file(file.path(runDir, "status", "guard.lock.json"), open = "wb")
+          writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE))), con2)
+          close(con2)
+        }
+      }, error = function(e) NULL)
+      return(send_json(con, 200, list(ok = TRUE, written = w, runDir = runDir)))
+    }
+    written <- character(0)
+    for (nm in c("pipeline.json", "gates.json")) {
+      if (is.null(b[[nm]])) next
+      con2 <- file(file.path(runDir, nm), open = "wb")
+      writeBin(charToRaw(enc2utf8(jsonlite::toJSON(b[[nm]], auto_unbox = TRUE, pretty = TRUE,
+                                                   null = "null", digits = NA))), con2)
+      close(con2)
+      written <- c(written, nm)
+    }
+    if (!length(written)) return(send_json(con, 400, list(ok = FALSE, error = "没有可保存的内容")))
+    return(send_json(con, 200, list(ok = TRUE, written = written)))
+  }
+
+  if (p == "/api/run" && identical(req$method, "POST")) {
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    # 服务器模式的运行目录在服务器上，本机这个路径不存在，起不了进程。
+    #   以前不拦，会以"运行目录不可用"这种含糊的话失败，
+    #   看起来像目录选错了，实际是这个动作本就不该在这里做。
+    if (isTRUE(st$runDirRemote))
+      return(send_json(con, 400, list(ok = FALSE,
+        error = "当前是服务器模式，流程要在服务器上跑。第一步的「保存并识别」会把这次要办的事交给助手，请在那条路里执行。")))
+    b <- body_json()
+    stepId <- as.character(b$step %||% "")
+    r <- tryCatch(launch_step(stepId, runDir), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  if (p == "/api/stop" && identical(req$method, "POST")) {
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    r <- tryCatch(stop_step(runDir), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  if (p == "/api/status") {
+    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, status = "idle", log = "")))
+    step_is_running(runDir)          # 顺便把「假运行」纠正掉
+    s <- read_step_state(runDir)
+    logtxt <- read_text_any(step_log_file(runDir), max_bytes = 120000L)
+    return(send_json(con, 200, c(list(ok = TRUE, log = logtxt), s)))
+  }
+
+  # 环境体检结果。
+  #   本机模式：读运行目录里的 env_check.json（本机真跑出来的）。
+  #   服务器模式：读 state/remote_env.json —— 那是从服务器上跑完导回来的，
+  #     不能读本机运行目录里的文件（那个目录在服务器上，本机不存在；
+  #     就算存在也是本机的旧数据，拿它当服务器结果是错的）。
+  if (p == "/api/envcheck") {
+    if (HAS_PLACE) {
+      pl <- tryCatch(place_read(APP_DIR), error = function(e) NULL)
+      if (!is.null(pl) && identical(as.character(pl$mode %||% ""), "server")) {
+        rf <- file.path(STATE_DIR, "remote_env.json")
+        # 新鲜度判定：这份结果属于「最近一次点保存并识别」那一次吗？
+        #   判据是请求标记 —— 发布时写入 last_commit.json，
+        #   回写结果时随结果一起存下。两边对得上才算本次结果。
+        #   对不上就只有参考价值：它可能是几小时前跑的另一轮，
+        #   拿它当"这次识别出来的结论"会让人以为按钮真的生效了。
+        lc <- tryCatch(read_json_file(file.path(STATE_DIR, "last_commit.json")),
+                       error = function(e) NULL)
+        want <- as.character(lc$id %||% "")
+        if (!file.exists(rf))
+          return(send_json(con, 200, list(ok = TRUE, result = NULL,
+                                         remote = TRUE, stale = FALSE,
+                                         pending_request = if (nzchar(want)) want else NULL)))
+        rr <- read_json_file(rf)
+        have <- as.character(rr$req_id %||% "")
+        fresh <- nzchar(want) && nzchar(have) && identical(want, have)
+        return(send_json(con, 200, list(ok = TRUE, result = rr, remote = TRUE,
+                                       stale = !fresh,
+                                       result_request = if (nzchar(have)) have else NULL,
+                                       pending_request = if (nzchar(want)) want else NULL)))
+      }
+    }
+    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    f <- file.path(status_dir(runDir), "env_check.json")
+    if (!file.exists(f)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    r <- read_json_file(f)
+    return(send_json(con, 200, list(ok = TRUE, result = r)))
+  }
+
+  # 让应用自己去连服务器做体检。
+  #   用配置里的 host / user / password，代码里不写死任何机器 ——
+  #   换一台服务器只要在页面上改配置，这条路就跟着换过去。
+  #   连不上就如实返回原因（refused / timeout / auth），不编造结果。
+  if (p == "/api/remote-check" && identical(req$method, "POST")) {
+    if (!HAS_PLACE) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/place.R")))
+    pl <- tryCatch(place_read(APP_DIR), error = function(e) NULL)
+    if (is.null(pl)) return(send_json(con, 400, list(ok = FALSE, error = "读不到位置配置")))
+    if (!identical(as.character(pl$mode %||% ""), "server"))
+      return(send_json(con, 400, list(ok = FALSE, error = "当前不是服务器模式")))
+    rc <- file.path(ENGINE_DIR, "remote_check.R")
+    if (!file.exists(rc))
+      return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/remote_check.R")))
+    srv <- pl$server
+    rs <- file.path(R.home("bin"), "Rscript")
+    out_f <- file.path(STATE_DIR, "remote_env.json")
+    a <- c("--vanilla", rc,
+           "--host", as.character(srv$host %||% ""),
+           "--user", as.character(srv$user %||% ""),
+           "--port", as.character(srv$port %||% 22L),
+           "--data", as.character(srv$data_root %||% ""),
+           "--script", as.character(srv$script_root %||% ""),
+           "--out", out_f)
+    # 密码走环境变量交给子进程，不放进命令行
+    oldp <- Sys.getenv("SC_REMOTE_PWD", unset = NA)
+    Sys.setenv(SC_REMOTE_PWD = as.character(srv$password %||% ""))
+    o <- tryCatch(suppressWarnings(system2(rs, a, stdout = TRUE, stderr = TRUE)),
+                  error = function(e) structure(conditionMessage(e), status = 1L))
+    if (is.na(oldp)) Sys.unsetenv("SC_REMOTE_PWD") else Sys.setenv(SC_REMOTE_PWD = oldp)
+    res <- if (file.exists(out_f)) read_json_file(out_f) else NULL
+    return(send_json(con, 200, list(
+      ok = !is.null(res) && isTRUE(res$ok),
+      result = res,
+      output = substr(paste(utils::tail(o, 8L), collapse = "\n"), 1, 700))))
+  }
+
+  # 导入远程（服务器）体检结果。
+  #   应用跑在云端，写不了服务器上的文件，所以结果先存在应用本地，
+  #   由 /api/envcheck 在服务器模式下读回。
+  if (p == "/api/envcheck/import" && identical(req$method, "POST")) {
+    b <- body_json()
+    if (is.null(b$result) || !is.list(b$result))
+      return(send_json(con, 400, list(ok = FALSE, error = "缺少 result")))
+    obj <- b$result
+    obj$imported_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+    obj$source_host <- as.character(b$host %||% "")
+    # 请求标记：写回的人可以显式带上（表示"我跑的就是那一次请求"）。
+    #   不带就取当前挂着的请求号 —— 执行端是从那条注入的指令接到任务的，
+    #   它回写时天然就是在还这一次的账。
+    #   带上之后，页面才能区分"这次的结果"和"上一轮的旧结果"。
+    rq <- as.character(b$req_id %||% "")
+    if (!nzchar(rq)) {
+      lc <- tryCatch(read_json_file(file.path(STATE_DIR, "last_commit.json")),
+                     error = function(e) NULL)
+      rq <- as.character(lc$id %||% "")
+    }
+    if (nzchar(rq)) obj$req_id <- rq
+    rf <- file.path(STATE_DIR, "remote_env.json")
+    dir.create(dirname(rf), showWarnings = FALSE, recursive = TRUE)
+    con2 <- file(rf, open = "wb")
+    writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE,
+                                                 null = "null", digits = NA))), con2)
+    close(con2)
+    return(send_json(con, 200, list(ok = TRUE, saved = enc2utf8(rf),
+                                    req_id = if (nzchar(rq)) rq else NULL)))
+  }
+
+  # 自动判定的结论。
+  #   页面要靠它来决定「能不能开跑」以及「能不能提示人去答 B 段那几件」。
+  #   和 step_plan.R 里的 read_decision() 读的是同一个文件，
+  #   不在这里另做一遍判定 —— 两处判定早晚不一致。
+  if (p == "/api/decision") {
+    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    f <- file.path(status_dir(runDir), "decision.json")
+    if (!file.exists(f)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    r <- read_json_file(f)
+    return(send_json(con, 200, list(ok = TRUE, result = r)))
+  }
+
+  # 脚本库：库表 + 按当前环境查表的结果
+  #   页面上的「脚本库」页签用它。判定逻辑只在 pick.R 一份，
+  #   这里只负责把结果发给界面，不重复实现。
+  # ---- 运行位置：本机 / 服务器 -------------------------------------
+  #   密码只存本机 config，不回传给浏览器；界面只看得到 host/user/path。
+  if (p == "/api/where") {
+    prof_f <- file.path(APP_DIR, "config", "server_profile.json")
+    prof <- tryCatch(read_json_file(prof_f), error = function(e) NULL)
+    if (is.null(prof)) prof <- list(mode = "local")
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      if (!is.null(b$mode) && nzchar(as.character(b$mode))) {
+        prof$mode <- as.character(b$mode)
+        if (!is.null(b$run_dir) && nzchar(as.character(b$run_dir))) {
+          prof[[prof$mode]] <- prof[[prof$mode]] %||% list()
+          prof[[prof$mode]]$default_run_dir <- as.character(b$run_dir)
+        }
+        dir.create(dirname(prof_f), showWarnings = FALSE, recursive = TRUE)
+        con2 <- file(prof_f, open = "wb")
+        writeBin(charToRaw(enc2utf8(jsonlite::toJSON(prof, auto_unbox = TRUE,
+                                                     pretty = TRUE, null = "null"))), con2)
+        close(con2)
+      }
+    }
+    srv <- prof$server %||% list()
+    safe <- list(label = srv$label, host = srv$host, port = srv$port, user = srv$user,
+                 data_root = srv$data_root, work_root = srv$work_root, note = srv$note,
+                 runtime = srv$runtime,
+                 has_password = nzchar(srv$password %||% ""))
+    return(send_json(con, 200, list(ok = TRUE, mode = prof$mode %||% "local",
+                                    local = prof$local, server = safe)))
+  }
+
+  # ---- engine 包外送：把出图引擎（含入口守卫与 skill 脚本）交给外部 ----------
+  #   为什么用应用当中转：本机与用户电脑、服务器互相不可达，
+  #   而这个应用有固定公网地址，是唯一一条三方都能走的通道。
+  if (p == "/api/engine-pack") {
+    fp <- file.path(APP_DIR, "state", "exports", "engine_pack.tar.xz")
+    if (!file.exists(fp)) return(send_json(con, 404, list(ok = FALSE, error = "尚未准备 engine 包")))
+    raw <- readBin(fp, "raw", n = file.size(fp))
+    return(send_json(con, 200, list(ok = TRUE, name = "engine_pack.tar.xz",
+                                    bytes = length(raw),
+                                    md5 = unname(tools::md5sum(fp)),
+                                    b64 = jsonlite::base64_enc(raw))))
+  }
+
+  # ---- 环节质检：对指定环节跑 reviewer（skill + 脚本双检）-----------
+  if (p == "/api/review") {
+    b <- body_json()
+    stage <- as.character(b$stage %||% "")
+    rd <- as.character(b$run_dir %||% runDir %||% "")
+    if (!nzchar(rd)) return(send_json(con, 400, list(ok = FALSE, error = "缺运行目录")))
+    if (!dir.exists(rd)) {
+      # 运行目录在远端服务器上，本机访问不到：转成质检任务，交给在工作电脑上的助手执行
+      prof <- tryCatch(read_json_file(file.path(APP_DIR, "config", "server_profile.json")),
+                       error = function(e) NULL) %||% list()
+      srv <- prof$server %||% list()
+      tq <- file.path(APP_DIR, "state", "tasks.jsonl")
+      dir.create(dirname(tq), showWarnings = FALSE, recursive = TRUE)
+      tk <- list(id = paste0("review-", format(Sys.time(), "%Y%m%d%H%M%S"), "-", stage),
+                 kind = "review", stage = stage, skill = "reviewer", run_dir = rd,
+                 server = list(host = srv$host, port = srv$port, user = srv$user,
+                               # 只放引用键，不放口令本体
+                               password_ref = "config/server_profile.json",
+                               work_root = srv$work_root,
+                               runtime = srv$runtime),
+                 status = "pending",
+                 created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), result = NULL)
+      cc <- file(tq, open = "a", encoding = "UTF-8")
+      writeLines(jsonlite::toJSON(tk, auto_unbox = TRUE, null = "null"), cc, useBytes = TRUE)
+      close(cc)
+      Sys.chmod(tq, mode = "0600")  # 不吞失败：设不上要能被看见
+      return(send_json(con, 200, list(ok = FALSE, queued = TRUE, stage = stage,
+                                      task = tk$id,
+                                      output = paste0("运行目录不在本机（", rd,
+                                                      "），已生成质检任务交给助手在服务器上执行。")))
+      )
+    }
+    rv <- file.path(ENGINE_DIR, "reviewer.R")
+    if (!file.exists(rv)) return(send_json(con, 200, list(ok = FALSE, error = "找不到 engine/reviewer.R")))
+    rs <- file.path(R.home("bin"), "Rscript")
+    a <- c("--vanilla", rv, "--engine", ENGINE_DIR, "--dir", rd)
+    if (nzchar(stage)) a <- c(a, "--stage", stage)
+    o <- tryCatch(system2(rs, a, stdout = TRUE, stderr = TRUE),
+                  error = function(e) structure(conditionMessage(e), status = 1L))
+    code <- attr(o, "status")
+    if (is.null(code)) code <- 0L
+    return(send_json(con, 200, list(ok = identical(as.integer(code), 0L),
+                                    code = as.integer(code),
+                                    stage = stage,
+                                    output = paste(o, collapse = "\n"))))
+  }
+
+  # ---- 任务通道：把「跑某个环节」变成一条任务，交给助手执行 ----------
+  #   为什么走这条路：应用跑在本机（云上），数据在远端服务器，两边网络不通；
+  #   助手能操作的是用户的工作电脑，而那台电脑能连服务器。
+  #   所以应用不直接连服务器，只把「跑哪一步、用哪套脚本、在哪个目录」写成任务，
+  #   由助手在工作电脑上按 step_plan 执行，再把结果写回 state/tasks.jsonl。
+  if (p == "/api/task") {
+    tf <- file.path(APP_DIR, "state", "tasks.jsonl")
+    dir.create(dirname(tf), showWarnings = FALSE, recursive = TRUE)
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      stage <- as.character(b$stage %||% "")
+      if (!nzchar(stage)) return(send_json(con, 400, list(ok = FALSE, error = "缺 stage")))
+      prof <- tryCatch(read_json_file(file.path(APP_DIR, "config", "server_profile.json")),
+                       error = function(e) NULL) %||% list()
+      srv <- prof$server %||% list()
+      task <- list(
+        id = paste0("task-", format(Sys.time(), "%Y%m%d%H%M%S"), "-", stage),
+        stage = stage,
+        skill = as.character(b$skill %||% ""),
+        run_dir = as.character(b$run_dir %||% (srv$work_root %||% "")),
+        note = as.character(b$note %||% ""),
+        server = list(host = srv$host, port = srv$port, user = srv$user,
+                      # 只放引用键，不放口令本体
+                      password_ref = "config/server_profile.json",
+                      data_root = srv$data_root, work_root = srv$work_root,
+                      runtime = srv$runtime),
+        status = "pending",
+        created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+        result = NULL
+      )
+      con2 <- file(tf, open = "a", encoding = "UTF-8")
+      writeLines(jsonlite::toJSON(task, auto_unbox = TRUE, null = "null"), con2, useBytes = TRUE)
+      close(con2)
+      Sys.chmod(tf, mode = "0600")  # 不吞失败：设不上要能被看见
+      return(send_json(con, 200, list(ok = TRUE, task = task)))
+    }
+    items <- list()
+    if (file.exists(tf)) {
+      ln <- readLines(tf, warn = FALSE, encoding = "UTF-8")
+      ln <- ln[nzchar(ln)]
+      ln <- utils::tail(ln, 20)
+      items <- lapply(ln, function(x)
+        tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE), error = function(e) NULL))
+      items <- Filter(Negate(is.null), items)
+      # 口令只落盘给助手读，不回传给浏览器：这个应用是公网可访问的。
+      items <- lapply(items, function(x) {
+        if (!is.null(x$server)) x$server$password <- NULL
+        x
+      })
+    }
+    return(send_json(con, 200, list(ok = TRUE, tasks = items)))
+  }
+
+  # ---- 按环节分组的脚本清单 ---------------------------------------
+  if (p == "/api/stage-scripts") {
+    sf <- file.path(ENGINE_DIR, "stage_scripts.R")
+    if (!file.exists(sf)) return(send_json(con, 200, list(ok = FALSE, error = "找不到 engine/stage_scripts.R")))
+    source(sf, local = TRUE)
+    return(send_json(con, 200, stage_scripts(ENGINE_DIR, runDir)))
+  }
+
+  # ===================================================================
+  #  历史记录 · 快照 · 回退
+  #
+  #  为什么要有这三样：
+  #    原来的台账只回答"这一步跑没跑成"，回答不了
+  #    "我上次是怎么跑的" 和 "我想改一个决定、从第 3 步重来"。
+  #    没有它们，页面只能往前走，唯一的回头路是删掉整个运行目录。
+  # ===================================================================
+
+  # 历次运行：按 run_id 归并，给出时间、涉及步骤、用的是哪套脚本
+  if (p == "/api/history") {
+    if (!HAS_HISTORY) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/history.R")))
+    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, runs = list(), steps = list())))
+    return(send_json(con, 200, list(
+      ok = TRUE,
+      run_dir = enc2utf8(gsub("\\\\", "/", runDir)),
+      runs = hist_runs(runDir),
+      steps = hist_step_states(runDir, STEP_ORDER),
+      order = as.list(STEP_ORDER),
+      snapshots = hist_snapshots(runDir),
+      mark = hist_read_json(hist_roll_file(runDir))
+    )))
+  }
+
+  # 手动存一个快照（也可以在保存设置时自动存）
+  if (p == "/api/snapshot" && identical(req$method, "POST")) {
+    if (!HAS_HISTORY) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/history.R")))
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    b <- body_json()
+    r <- tryCatch(hist_snapshot(runDir, label = as.character(b$label %||% "manual"),
+                                kind = "manual", note = as.character(b$note %||% "")),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 回退：恢复某个快照；或只做"从某一步往后重跑"的标记
+  #   mode=restore  恢复快照里的 pipeline.json / gates.json
+  #   mode=rerun    不还原配置，只标记从某一步起为"待重跑"
+  #   两种都不删产物：删是不可逆的，而重跑本来会覆盖。
+  if (p == "/api/rollback" && identical(req$method, "POST")) {
+    if (!HAS_HISTORY) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/history.R")))
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    b <- body_json()
+    mode <- as.character(b$mode %||% "rerun")
+    r <- tryCatch({
+      if (identical(mode, "restore")) {
+        hist_rollback(runDir, as.character(b$snapshot %||% ""), STEP_ORDER,
+                      from_step = as.character(b$from_step %||% "") )
+      } else {
+        hist_mark_rerun(runDir, as.character(b$from_step %||% ""), STEP_ORDER)
+      }
+    }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 最近用过的运行目录：换回来 / 退回到欢迎页
+  if (p == "/api/recent-dirs") {
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      if (isTRUE(b$clear)) {
+        # 退回欢迎页：只清"当前"，不动磁盘上任何东西
+        st$runDir <- NULL
+        save_state(st)
+        return(send_json(con, 200, list(ok = TRUE, runDir = NULL)))
+      }
+      d <- as.character(b$dir %||% "")
+      if (nzchar(d) && dir.exists(d)) {
+        st$runDir <- normalizePath(d, winslash = "/", mustWork = FALSE)
+        save_state(st)
+        if (HAS_HISTORY) hist_recent_add(APP_DIR, st$runDir)
+        return(send_json(con, 200, list(ok = TRUE, runDir = st$runDir)))
+      }
+      return(send_json(con, 400, list(ok = FALSE, error = "这个目录用不了")))
+    }
+    dirs <- if (HAS_HISTORY) hist_recent_dirs(APP_DIR) else list()
+    return(send_json(con, 200, list(ok = TRUE, current = runDir %||% NULL, dirs = dirs)))
+  }
+
+  # ===================================================================
+  #  脚本工作台：看、换、传、审、改
+  #
+  #  为什么要做成一套接口而不是"直接改文件"：
+  #    脚本一换，整条链路的其余部分就可能对不上（没有守卫、写死阈值、
+  #    非 ASCII 源码在中文 Windows 上直接不解析）。
+  #    所以换之前先给机械检查的结论，换之后重建白名单 ——
+  #    否则下一次 reviewer 会一直报"脚本被改动"，人就不再看它了。
+  # ===================================================================
+
+  if (p == "/api/scripts") {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    return(send_json(con, 200, sop_inventory(ENGINE_DIR)))
+  }
+
+  if (p == "/api/script-read") {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    rel <- as.character(q$rel %||% "")
+    full <- sop_safe_path(ENGINE_DIR, rel)
+    if (is.null(full) || !file.exists(full))
+      return(send_json(con, 404, list(ok = FALSE, error = "找不到这个脚本")))
+    txt <- sop_read_text(full)
+    info <- file.info(full)
+    return(send_json(con, 200, list(
+      ok = TRUE, rel = rel, md5 = sop_md5(full),
+      size = as.numeric(info$size),
+      mtime = format(info$mtime, "%Y-%m-%dT%H:%M:%S"),
+      truncated = nchar(txt, type = "bytes") > 400000L,
+      content = substr(txt, 1, 400000L),
+      backups = sop_backups(ENGINE_DIR, rel)
+    )))
+  }
+
+  # 机械检查：问"这个脚本能不能接进现有工作流"，立刻给答案
+  #   两种用法：
+  #     rel       查磁盘上现在这一份
+  #     rel+content  查一份草稿 —— 改完还没保存时，想知道"改完还接得上吗"
+  #   漏掉 content 转发的话，前端点了「检查这份改动」也只会回磁盘上旧版的结论，
+  #   用户以为改动没问题，其实检查的是旧内容。
+  if (p == "/api/script-review") {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- if (identical(req$method, "POST")) body_json() else list()
+    rel <- as.character(b$rel %||% q$rel %||% "")
+    draft <- if (!is.null(b$content) && length(b$content) && nzchar(as.character(b$content)))
+      as.character(b$content) else NULL
+    r <- tryCatch(sop_review(ENGINE_DIR, rel, content = draft),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 写入：置换已有脚本（必须存在）/ 新增（必须不存在）
+  if (p == "/api/script-put" && identical(req$method, "POST")) {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- body_json()
+    r <- tryCatch(sop_put(ENGINE_DIR, as.character(b$rel %||% ""),
+                          as.character(b$content %||% ""),
+                          mode = as.character(b$mode %||% "replace")),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    if (isTRUE(r$ok)) {
+      # 每次改动都留痕，和台账分开：台账记"跑"，这里记"改"
+      if (HAS_HISTORY && !is.null(runDir)) {
+        try(hist_snapshot(runDir, label = paste0("script-edit-", basename(as.character(b$rel %||% ""))),
+                          kind = "auto", note = "script replaced"), silent = TRUE)
+      }
+    }
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 从备份还原
+  #   backup 收的是备份 ID（<时间戳>/<相对路径>），不是绝对路径。
+  #   前端列表里回传的也是这个 ID，两边保持一致。
+  if (p == "/api/script-restore" && identical(req$method, "POST")) {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- body_json()
+    r <- tryCatch(sop_restore_backup(ENGINE_DIR, as.character(b$backup %||% b$backup_id %||% "")),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 上传：先落到 incoming，不直接覆盖任何在用脚本
+  #   直接覆盖等于让未审阅的代码变成在用代码，而且没有回头路。
+  if (p == "/api/script-upload" && identical(req$method, "POST")) {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- body_json()
+    r <- tryCatch(sop_incoming_add(ENGINE_DIR, as.character(b$name %||% "upload.R"),
+                                   as.character(b$content %||% ""),
+                                   note = as.character(b$note %||% "")),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  if (p == "/api/incoming") {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+      act <- as.character(b$action %||% "drop")
+      id <- as.character(b$id %||% "")
+      if (identical(act, "drop")) {
+        return(send_json(con, 200, sop_incoming_drop(ENGINE_DIR, id)))
+      }
+      if (identical(act, "adopt")) {
+        # 采纳：把它写成目标位置，原文件留着（等于一次"带来源的替换"）
+        txt <- sop_incoming_text(ENGINE_DIR, id)
+        if (is.null(txt)) return(send_json(con, 400, list(ok = FALSE, error = "找不到这个上传件")))
+        r <- tryCatch(sop_put(ENGINE_DIR, as.character(b$rel %||% ""), txt,
+                              mode = as.character(b$mode %||% "replace")),
+                      error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+        return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+      }
+      return(send_json(con, 400, list(ok = FALSE, error = "未知操作")))
+    }
+    return(send_json(con, 200, list(ok = TRUE, items = sop_incoming_list(ENGINE_DIR))))
+  }
+
+  # 有改动想法但没有现成脚本：把请求连同当前文件一起交给助手
+  if (p == "/api/script-change" && identical(req$method, "POST")) {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- body_json()
+    rel <- as.character(b$rel %||% "")
+    idea <- as.character(b$idea %||% "")
+    if (!nzchar(idea)) return(send_json(con, 400, list(ok = FALSE, error = "请先写下想改什么")))
+    r <- tryCatch(sop_change_request(APP_DIR, ENGINE_DIR, rel, idea, run_dir = runDir),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 请助手做一次"读得懂代码"的审阅（机械检查之外的判断）
+  if (p == "/api/script-ask" && identical(req$method, "POST")) {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    b <- body_json()
+    r <- tryCatch(sop_review_request(APP_DIR, ENGINE_DIR, as.character(b$rel %||% ""),
+                                     run_dir = runDir,
+                                     question = as.character(b$question %||% "")),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+  }
+
+  # 统一的任务队列：脚本审阅 / 脚本改动 / 环节质检 / 跑某一步
+# ---- 会话指令：页面上写下要做什么，由助手去执行 ------------------
+  #
+  #   为什么要有这条通道：
+  #     应用跑在这台机器上，连不到用户内网的服务器；
+  #     但用户的工作电脑能连上。所以"去服务器上做某件事"这件事，
+  #     只能由能连的那一端执行。
+  #   这里负责三件：收下指令、记下状态、把结果收回来显示。
+  #   它不假装自己能执行 —— 状态里会明说"等助手执行"。
+  if (p == "/api/instruct") {
+    f <- file.path(APP_DIR, "state", "instruct.jsonl")
+    dir.create(dirname(f), showWarnings = FALSE, recursive = TRUE)
+
+    read_all <- function() {
+      if (!file.exists(f)) return(list())
+      ln <- tryCatch(readLines(f, warn = FALSE, encoding = "UTF-8"),
+                     error = function(e) character(0))
+      ln <- ln[nzchar(trimws(ln))]
+      out <- list()
+      for (x in ln) {
+        j <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE), error = function(e) NULL)
+        if (!is.null(j)) out[[length(out) + 1L]] <- j
+      }
+      out
+    }
+    write_all <- function(items) {
+      con <- file(f, open = "w", encoding = "UTF-8")
+      for (it in items) {
+        writeLines(jsonlite::toJSON(it, auto_unbox = TRUE, null = "null"), con, useBytes = TRUE)
+      }
+      close(con)
+      Sys.chmod(f, mode = "0600")
+    }
+
+    if (identical(req$method, "POST")) {
+      b <- body_json()
+
+      # 回写：助手执行完把结果写回来
+      if (!is.null(b$result_for)) {
+        rid <- as.character(b$result_for)
+        items <- read_all()
+        hit <- FALSE
+        for (i in seq_along(items)) {
+          if (identical(as.character(items[[i]]$id %||% ""), rid)) {
+            items[[i]]$status <- as.character(b$status %||% "done")
+            items[[i]]$summary <- as.character(b$summary %||% "")
+            items[[i]]$detail <- as.character(b$detail %||% "")
+            items[[i]]$finished_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+            hit <- TRUE
+          }
+        }
+        if (!hit) {
+          # 助手回写时可能不带原指令号（任务由平台承载，页面并不知道它）。
+          #   这时不该拒收 —— 结果本身是有价值的，拒收等于白跑一趟。
+          #   直接追加一条已完成记录，页面照样看得到。
+          items[[length(items) + 1L]] <- list(
+            id = if (nzchar(rid)) rid else paste0("instr-", format(Sys.time(), "%Y%m%d%H%M%S")),
+            text = as.character(b$text %||% "（由助手执行）"),
+            status = as.character(b$status %||% "done"),
+            created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            finished_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            target_host = as.character(b$host %||% ""),
+            target_user = "",
+            by = "assistant",
+            summary = as.character(b$summary %||% ""),
+            detail = as.character(b$detail %||% ""))
+        }
+        write_all(items)
+        return(send_json(con, 200, list(ok = TRUE, id = rid)))
+      }
+
+      # 新指令
+      txt <- trimws(as.character(b$text %||% ""))
+      if (!nzchar(txt)) return(send_json(con, 400, list(ok = FALSE, error = "指令是空的")))
+      prof <- tryCatch(read_json_file(file.path(APP_DIR, "config", "server_profile.json")),
+                       error = function(e) NULL) %||% list()
+      srv <- prof$server %||% list()
+      it <- list(
+        id = paste0("instr-", format(Sys.time(), "%Y%m%d%H%M%S"), "-",
+                    paste(sample(c(letters, 0:9), 4L), collapse = "")),
+        text = txt,
+        status = "pending",
+        created_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+        target_host = as.character(srv$host %||% ""),
+        target_user = as.character(srv$user %||% ""),
+        by = "user",
+        summary = "", detail = "")
+      con2 <- file(f, open = "a", encoding = "UTF-8")
+      writeLines(jsonlite::toJSON(it, auto_unbox = TRUE, null = "null"), con2, useBytes = TRUE)
+      close(con2)
+      Sys.chmod(f, mode = "0600")
+      return(send_json(con, 200, list(ok = TRUE, instruction = it)))
+    }
+
+    items <- read_all()
+    items <- utils::tail(items, 30)
+    return(send_json(con, 200, list(ok = TRUE, instructions = rev(items))))
+  }
+
+  if (p == "/api/queue") {
+    if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    # 服务可能挂在公网地址上，而队列里的任务带着服务器连接信息。
+    #   口令只落盘给助手读，绝不回传给浏览器 —— 和 /api/task 同一条规矩。
+    #   漏掉这一步就等于把口令印在网页上。
+    tasks <- sop_queue_list(APP_DIR)
+    tasks <- lapply(tasks, function(x) {
+      if (!is.null(x$server)) x$server$password <- NULL
+      if (!is.null(x$static)) x$static <- NULL
+      x
+    })
+    return(send_json(con, 200, list(ok = TRUE, tasks = tasks)))
+  }
+
+  if (p == "/api/library") {
+    pk <- file.path(ENGINE_DIR, "pick.R")
+    if (!file.exists(pk)) {
+      return(send_json(con, 200, list(ok = FALSE, error = "找不到 engine/pick.R")))
+    }
+    src <- tryCatch({ source(pk, local = TRUE); TRUE }, error = function(e) FALSE)
+    if (!src) return(send_json(con, 200, list(ok = FALSE, error = "pick.R 载入失败")))
+
+    idx <- read_library_index(ENGINE_DIR)
+    if (is.null(idx)) {
+      return(send_json(con, 200, list(ok = FALSE, error = "读不到库表 library/index.json")))
+    }
+
+    # 本机是否已扫到甲方脚本（跟数据放一起的那套）
+    local_found <- FALSE
+    if (!is.null(runDir)) {
+      sf <- file.path(status_dir(runDir), "scripts_scan.json")
+      if (file.exists(sf)) {
+        sj <- read_json_file(sf)
+        if (!is.null(sj) && !is.null(sj$n_found)) {
+          local_found <- suppressWarnings(as.integer(sj$n_found)) > 0L
+        }
+      }
+    }
+
+    env <- detect_env(mem_gb = NULL)
+    a_pick <- tryCatch(pick_set(ENGINE_DIR, category = "A", demand = "D1_pipeline",
+                                local_scripts_found = local_found),
+                       error = function(e) list(error = conditionMessage(e)))
+    b_pick <- tryCatch(pick_set(ENGINE_DIR, category = "B"),
+                       error = function(e) list(error = conditionMessage(e)))
+
+    # 每一条目的落地状态（文件在不在、状态是否 ready）
+    entries <- lapply(idx$entries, function(e) {
+      r <- resolve_entry(ENGINE_DIR, e)
+      rq <- check_requires(e$requires, env)
+      r$requires_ok <- rq$ok
+      r$requires_why <- rq$reasons
+      r$usable <- isTRUE(r$ok) && isTRUE(rq$ok)
+      r$residency <- e$residency %||% ""
+      r$own_locations <- e$own_locations %||% list()
+      r$notes <- e$notes %||% ""
+      r$env <- e$env %||% "*"
+      r$demand <- e$demand %||% ""
+      r
+    })
+
+    return(send_json(con, 200, list(
+      ok = TRUE,
+      env = list(id = env$id, os = env$os, memory_gb = env$memory_gb, why = env$why),
+      local_scripts_found = local_found,
+      categories = idx$categories,
+      entries = entries,
+      pick_A = if (is.null(a_pick$error)) a_pick else list(ok = FALSE, error = a_pick$error),
+      pick_B = if (is.null(b_pick$error)) b_pick else list(ok = FALSE, error = b_pick$error)
+    )))
+  }
+
+  if (p == "/api/artifacts") {
+    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, items = list())))
+    r <- list_artifacts(runDir)
+    return(send_json(con, 200, list(
+      ok = TRUE, outdir = enc2utf8(gsub("\\\\", "/", r$outdir)),
+      items = lapply(r$items, function(x) x[names(x) != "full"]))))
+  }
+
+  if (p == "/api/download") {
+    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    rel <- as.character(q$rel %||% "")
+    r <- list_artifacts(runDir)
+    hit <- Filter(function(x) identical(x$rel, rel), r$items)
+    if (!length(hit)) return(send_json(con, 404, list(ok = FALSE, error = paste0("找不到这个文件：", rel))))
+    f <- hit[[1]]$full
+    info <- file.info(f)
+    fname <- enc2utf8(basename(f))
+    # 中文文件名用 filename*=UTF-8'' 才不会乱码；
+    # 同时给一个纯 ASCII 的 filename= 兜底，给不吃 filename* 的老浏览器用。
+    ext <- tools::file_ext(fname)
+    ascii_fallback <- paste0("result", if (nzchar(ext)) paste0(".", ext) else ".bin")
+    hdr <- paste0("HTTP/1.1 200 OK\r\n",
+                  "Content-Type: application/octet-stream\r\n",
+                  "Content-Length: ", info$size, "\r\n",
+                  "Content-Disposition: attachment; filename=\"", ascii_fallback,
+                  "\"; filename*=UTF-8''", utils::URLencode(fname, reserved = TRUE), "\r\n",
+                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n")
+    writeBin(charToRaw(enc2utf8(hdr)), con)
+    fc <- file(f, open = "rb")
+    repeat {
+      chunk <- readBin(fc, "raw", 262144L)
+      if (!length(chunk)) break
+      writeBin(chunk, con)
+    }
+    close(fc); flush(con)
+    return(invisible(NULL))
+  }
+
+  f <- static_file(p)
+  if (!is.null(f)) {
+    ext <- paste0(".", tolower(tools::file_ext(f)))
+    ctype <- MIME[[ext]] %||% "application/octet-stream"
+    raw <- readBin(f, "raw", file.info(f)$size + 1024L)
+    return(send_raw(con, 200, ctype, raw))
+  }
+
+  send_text(con, 404, "text/plain; charset=utf-8", "Not found")
+}
+
+# =====================================================================
+# 主循环
+# =====================================================================
+main <- function() {
+  srv <- tryCatch(serverSocket(PORT), error = function(e) {
+    say("")
+    say("[!] 端口 ", PORT, " 用不了：", conditionMessage(e))
+    say("    可能已经开着一个了。换个端口再试：")
+    say("      Rscript serve.R --port ", PORT + 1L)
+    say("")
+    quit(save = "no", status = 1)
+  })
+  st <- read_state()
+
+  say("")
+  say("===========================================================")
+  say("  Personal Analysis Assistant  --  local server")
+  say("")
+  say("  在浏览器打开：  http://127.0.0.1:", PORT, "/")
+  say("")
+  say("  关掉这个窗口就是停止服务。所有计算都在本机，不联网。")
+  say("  运行目录：", if (is.null(st$runDir)) "（还没选）" else st$runDir)
+  say("===========================================================")
+  say("")
+
+  if (AUTOOPEN) try(browseURL(paste0("http://127.0.0.1:", PORT, "/")), silent = TRUE)
+
+  repeat {
+    # Windows 上 socketAccept 的 timeout 参数不受支持，传了会直接报错，
+    # 所以按平台分开调用：Unix 给超时（否则 Ctrl+C 之后要等连接才退出），
+    # Windows 不给超时（一次 accept 就阻塞着，正常用法）。
+    con <- tryCatch(
+      if (IS_WIN) socketAccept(srv, blocking = TRUE, open = "r+b")
+      else        socketAccept(srv, blocking = TRUE, open = "r+b", timeout = 3600),
+      error = function(e) NULL)
+    if (is.null(con)) next
+    ok <- tryCatch({
+      req <- read_request(con)
+      if (!is.null(req)) serve_request(con, req)
+      TRUE
+    }, error = function(e) {
+      try(send_json(con, 500, list(ok = FALSE, error = enc2utf8(conditionMessage(e)))), silent = TRUE)
+      FALSE
+    })
+    try(close(con), silent = TRUE)
+    if (!ok) say("[warn] 这次请求没处理成：", format(Sys.time(), "%H:%M:%S"))
+  }
+}
+
+main()

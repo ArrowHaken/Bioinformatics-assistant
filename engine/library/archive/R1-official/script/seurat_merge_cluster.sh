@@ -1,0 +1,1 @@
+/share/apps/R/R-4.1.2-4/bin/Rscript /share/home/liny/Project/personality/SY_wangwenbiao_spleen_mouse_20250521/Seurat/7Harmony/log/seurat_merge_cluster.R

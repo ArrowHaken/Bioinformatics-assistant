@@ -1,0 +1,473 @@
+{
+ "built_at": "2026-11-03",
+ "records": [
+  {
+   "id": "R1-official",
+   "name": "官方原始脚本库",
+   "when": "甲方交付",
+   "where": "zjz 桌面 script/",
+   "note": "甲方给的第一份脚本，没经我们改动",
+   "files": [
+    {
+     "name": "01_packages.R",
+     "rel": "script/01_packages.R",
+     "bytes": 120757,
+     "mtime": "2026-11-03 11:13",
+     "stage": "env",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "analysis.R",
+     "rel": "script/analysis.R",
+     "bytes": 145281,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_cell_ratio.sh",
+     "rel": "script/cluster_cell_ratio.sh",
+     "bytes": 377,
+     "mtime": "2026-11-03 11:13",
+     "stage": "final",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_diff_enrich.sh",
+     "rel": "script/cluster_diff_enrich.sh",
+     "bytes": 435,
+     "mtime": "2026-11-03 11:13",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_marker.sh",
+     "rel": "script/cluster_marker.sh",
+     "bytes": 1483,
+     "mtime": "2026-11-03 11:13",
+     "stage": "markers",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_enrich.R",
+     "rel": "script/cluster_profile_enrich.R",
+     "bytes": 11505,
+     "mtime": "2026-11-03 11:13",
+     "stage": "enrich",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_mmu.R",
+     "rel": "script/cluster_profile_mmu.R",
+     "bytes": 4423,
+     "mtime": "2026-11-03 11:13",
+     "stage": "enrich",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "diff_enrich_volcano_annot_4.1.R",
+     "rel": "script/diff_enrich_volcano_annot_4.1.R",
+     "bytes": 6892,
+     "mtime": "2026-11-03 11:13",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene.R",
+     "rel": "script/markgene.R",
+     "bytes": 4952,
+     "mtime": "2026-11-03 11:13",
+     "stage": "fullmark",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene_celltype.R",
+     "rel": "script/markgene_celltype.R",
+     "bytes": 5080,
+     "mtime": "2026-11-03 11:13",
+     "stage": "annotate",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_cell_numer.R",
+     "rel": "script/seurat_cell_numer.R",
+     "bytes": 23106,
+     "mtime": "2026-11-03 11:13",
+     "stage": "final",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_merge_cluster.R",
+     "rel": "script/seurat_merge_cluster.R",
+     "bytes": 9711,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_merge_cluster.sh",
+     "rel": "script/seurat_merge_cluster.sh",
+     "bytes": 152,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "soupX_doublefinder.R",
+     "rel": "script/soupX_doublefinder.R",
+     "bytes": 5337,
+     "mtime": "2026-11-03 11:13",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "soupX_doublefinder.sh",
+     "rel": "script/soupX_doublefinder.sh",
+     "bytes": 247,
+     "mtime": "2026-11-03 11:13",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 0
+    }
+   ]
+  },
+  {
+   "id": "R2-1022",
+   "name": "1016 / 1022 那次处理",
+   "when": "2026-10-22",
+   "where": "/share/home/hhhong1/rachel_7sample_2_261022",
+   "note": "第一次用官方那套跑的处理记录",
+   "files": [
+    {
+     "name": "01_packages.R",
+     "rel": "script/01_packages.R",
+     "bytes": 120757,
+     "mtime": "2026-11-03 11:13",
+     "stage": "env",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "analysis.R",
+     "rel": "script/analysis.R",
+     "bytes": 145281,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_cell_ratio.sh",
+     "rel": "script/cluster_cell_ratio.sh",
+     "bytes": 377,
+     "mtime": "2026-11-03 11:13",
+     "stage": "final",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_diff_enrich.sh",
+     "rel": "script/cluster_diff_enrich.sh",
+     "bytes": 435,
+     "mtime": "2026-11-03 11:13",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_marker.sh",
+     "rel": "script/cluster_marker.sh",
+     "bytes": 1483,
+     "mtime": "2026-11-03 11:13",
+     "stage": "markers",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_enrich.R",
+     "rel": "script/cluster_profile_enrich.R",
+     "bytes": 11505,
+     "mtime": "2026-11-03 11:13",
+     "stage": "enrich",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_mmu.R",
+     "rel": "script/cluster_profile_mmu.R",
+     "bytes": 4423,
+     "mtime": "2026-11-03 11:13",
+     "stage": "enrich",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "diff_enrich_volcano_annot_4.1.R",
+     "rel": "script/diff_enrich_volcano_annot_4.1.R",
+     "bytes": 6892,
+     "mtime": "2026-11-03 11:13",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene.R",
+     "rel": "script/markgene.R",
+     "bytes": 4952,
+     "mtime": "2026-11-03 11:13",
+     "stage": "fullmark",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene_celltype.R",
+     "rel": "script/markgene_celltype.R",
+     "bytes": 5080,
+     "mtime": "2026-11-03 11:13",
+     "stage": "annotate",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_cell_numer.R",
+     "rel": "script/seurat_cell_numer.R",
+     "bytes": 23106,
+     "mtime": "2026-11-03 11:13",
+     "stage": "final",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_merge_cluster.R",
+     "rel": "script/seurat_merge_cluster.R",
+     "bytes": 9711,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_merge_cluster.sh",
+     "rel": "script/seurat_merge_cluster.sh",
+     "bytes": 152,
+     "mtime": "2026-11-03 11:13",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "soupX_doublefinder.R",
+     "rel": "script/soupX_doublefinder.R",
+     "bytes": 5337,
+     "mtime": "2026-11-03 11:13",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 1
+    },
+    {
+     "name": "soupX_doublefinder.sh",
+     "rel": "script/soupX_doublefinder.sh",
+     "bytes": 247,
+     "mtime": "2026-11-03 11:13",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 1
+    }
+   ]
+  },
+  {
+   "id": "R3-1026",
+   "name": "1026 测试1",
+   "when": "2026-10-26",
+   "where": "/share/home/hhhong1/rachel_7sample_3_261026",
+   "note": "从服务器抓回的、当时实际在用的脚本",
+   "files": [
+    {
+     "name": "soupX_doublefinder.R",
+     "rel": "script_root/soupX_doublefinder.R",
+     "bytes": 5337,
+     "mtime": "2026-09-30 14:14",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 1
+    },
+    {
+     "name": "soupX_doublefinder.sh",
+     "rel": "script_root/soupX_doublefinder.sh",
+     "bytes": 247,
+     "mtime": "2026-09-30 14:14",
+     "stage": "doublet",
+     "used_ok": 0,
+     "used_fail": 1
+    },
+    {
+     "name": "seurat_merge_cluster.R",
+     "rel": "script_root/seurat_merge_cluster.R",
+     "bytes": 9711,
+     "mtime": "2025-12-26 10:13",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_merge_cluster.sh",
+     "rel": "script_root/seurat_merge_cluster.sh",
+     "bytes": 152,
+     "mtime": "2025-12-26 10:13",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_marker.sh",
+     "rel": "script_root/cluster_marker.sh",
+     "bytes": 1483,
+     "mtime": "2026-09-30 14:21",
+     "stage": "markers",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_cell_ratio.sh",
+     "rel": "script_root/cluster_cell_ratio.sh",
+     "bytes": 377,
+     "mtime": "2026-09-30 14:17",
+     "stage": "final",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_diff_enrich.sh",
+     "rel": "script_root/cluster_diff_enrich.sh",
+     "bytes": 435,
+     "mtime": "2026-09-30 14:20",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene.R",
+     "rel": "script_root/markgene.R",
+     "bytes": 4952,
+     "mtime": "2026-09-30 14:20",
+     "stage": "fullmark",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "markgene_celltype.R",
+     "rel": "script_root/markgene_celltype.R",
+     "bytes": 5080,
+     "mtime": "2026-09-30 14:22",
+     "stage": "annotate",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_mmu.R",
+     "rel": "script_root/cluster_profile_mmu.R",
+     "bytes": 4423,
+     "mtime": "2026-09-30 14:20",
+     "stage": "enrich",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_profile_enrich.R",
+     "rel": "script_root/cluster_profile_enrich.R",
+     "bytes": 11505,
+     "mtime": "2026-03-13 23:21",
+     "stage": "enrich",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "diff_enrich_volcano_annot_4.1.R",
+     "rel": "script_root/diff_enrich_volcano_annot_4.1.R",
+     "bytes": 6892,
+     "mtime": "2026-09-30 14:20",
+     "stage": "diff",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "seurat_cell_numer.R",
+     "rel": "script_root/seurat_cell_numer.R",
+     "bytes": 23106,
+     "mtime": "2026-09-30 14:17",
+     "stage": "final",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "01_packages.R",
+     "rel": "script_root/01_packages.R",
+     "bytes": 128520,
+     "mtime": "2026-10-27 17:14",
+     "stage": "env",
+     "used_ok": 0,
+     "used_fail": 0
+    },
+    {
+     "name": "analysis.R",
+     "rel": "script_root/analysis.R",
+     "bytes": 145281,
+     "mtime": "2026-08-27 14:50",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "merge_cluster.R",
+     "rel": "work_root/merge_cluster.R",
+     "bytes": 2772,
+     "mtime": "2026-10-26 21:09",
+     "stage": "merge",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "cluster_info.R",
+     "rel": "work_root/cluster_info.R",
+     "bytes": 3022,
+     "mtime": "2026-10-28 13:42",
+     "stage": "markers",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "drop_and_recluster.R",
+     "rel": "work_root/drop_and_recluster.R",
+     "bytes": 4573,
+     "mtime": "2026-10-28 13:23",
+     "stage": "filter",
+     "used_ok": 1,
+     "used_fail": 0
+    },
+    {
+     "name": "final_run.R",
+     "rel": "work_root/final_run.R",
+     "bytes": 6336,
+     "mtime": "2026-10-28 14:31",
+     "stage": "final",
+     "used_ok": 1,
+     "used_fail": 0
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,93 @@
+{
+  "_readme": [
+    "所有中文文案集中在这里。",
+    "原因：R 4.1.2 + 中文 Windows locale 不能解析非 ASCII 源码文件。",
+    "代码保持纯 ASCII，中文从本文件读。改文案不用碰代码。",
+    "占位符写成 {name}，代码会替换。"
+  ],
+
+  "guard_refuse": [
+    "拒绝运行：本脚本不接受直接调用。",
+    "",
+    "原因：{why}",
+    "",
+    "这套流程必须通过统一入口执行。原因不是形式主义：",
+    "  · 参数来源要留痕（官方 / 本机 / 你定的 / 待确认）",
+    "  · 参数没定下来时必须停住，不能带着猜的值算完",
+    "  · 每一步要写进台账，供事后核对",
+    "直接调用会跳过这三件事 —— 结果可能是错的，而且从结果上看不出错。",
+    "",
+    "正确用法：",
+    "  Rscript engine/sc_workflow.R status --dir <运行目录>",
+    "  Rscript engine/sc_workflow.R run --dir <运行目录> --step pipeline"
+  ],
+
+  "guard_ok": "已通过入口校验。本次运行 ID：{run_id}｜步骤：{step}",
+
+  "cli_usage": [
+    "个性化分析助手 · 工作流入口",
+    "",
+    "用法：Rscript engine/sc_workflow.R <命令> --dir <运行目录>",
+    "",
+    "命令：",
+    "  init     初始化（生成默认配置；接管已有进度）",
+    "  status   看当前状态：每一步跑到哪、还差什么",
+    "  gates    列出必须由人决定的事",
+    "  answer   回答其中一件  --gate <id> --value <值> [--detail <补充>]",
+    "  run      跑一步          --step <env|precheck|pipeline|plots|ppt|pack>",
+    "  run-all  按顺序全跑",
+    "  ledger   看执行台账（每一步谁跑的、结果如何）",
+    "  verify   独立核验台账里的产物是否还在、是否被改动",
+    "",
+    "说明：底层分析脚本拒绝被直接调用，只能经由本入口执行。"
+  ],
+
+  "cli_title": "个性化分析助手 · 工作流入口",
+  "cli_run_dir": "运行目录",
+  "cli_no_project": "这个目录还不是一个工作项目。先跑：Rscript engine/sc_workflow.R init --dir {dir}",
+  "cli_init_done": "已初始化。生成：{written}",
+  "cli_init_existing": "检测到目录里已有分析产物，已登记为「接手前就有」：{found}",
+
+  "cli_steps_head": "步骤            状态        说明",
+  "cli_step_pre_existing": "接手前就有",
+  "cli_step_done": "已完成",
+  "cli_step_running": "正在跑",
+  "cli_step_failed": "失败",
+  "cli_step_blocked": "被拦住",
+  "cli_step_not_run": "未运行",
+  "cli_step_note_dep": "依赖：{dep}（{dep_state}）",
+  "cli_step_note_gate": "需要先答完 {n} 件待确认",
+  "cli_step_note_ready": "可以跑",
+  "cli_gates_all_done": "要人定的事：都答完了",
+  "cli_gates_pending": "要人定的事：还有 {n} 件没答",
+  "cli_ledger_head": "执行台账",
+  "cli_ledger_empty": "（还没跑过任何一步）",
+  "cli_ledger_line": "{time}  {step}  退出码 {code}  用时 {secs}s",
+
+  "cli_verify_head": "核验台账里的产物",
+  "cli_verify_ok": "完整：{path}",
+  "cli_verify_missing": "已丢失：{path}",
+  "cli_verify_bad": "被改动过：{path}（台账 {want}，现在 {got}）",
+  "cli_verify_none": "台账里没有登记产物，无法核验。",
+  "cli_verify_summary": "核验结果：完整 {ok}，丢失 {missing}，被改 {changed}",
+
+  "cli_refused_blocked": [
+    "拒绝执行：参数还没定下来。",
+    "",
+    "还有 {n} 件必须由人决定：",
+    "{list}",
+    "",
+    "这几件事脚本不许自己猜。猜错的后果不是报错，是算出一份看起来正常、但错的结果。",
+    "先回答它们：Rscript engine/sc_workflow.R answer --dir {dir} --gate <id> --value <值>"
+  ],
+  "cli_refused_dep": "拒绝执行：前一步还没完成。\n  {step} 依赖 {dep}，而 {dep} 目前是「{state}」。\n  先把它跑完：Rscript engine/sc_workflow.R run --dir {dir} --step {dep}",
+  "cli_refused_existing": "这一步的产物已经存在：{path}\n  如果确认要重跑覆盖，加 --force。",
+  "cli_refused_running": "拒绝执行：上一步还在跑（进程 {pid}）。等它结束，或先停掉它。",
+
+  "cli_starting": "开始执行：{step}",
+  "cli_finished_ok": "完成：{step}",
+  "cli_finished_fail": "失败：{step}（退出码 {code}）",
+  "cli_resolved": "参数检查通过：{n} 项已定，0 项待定",
+  "cli_unknown_step": "未知步骤：{step}。可用：env precheck pipeline plots ppt pack",
+  "cli_answer_done": "已记录：{gate} = {value}"
+}

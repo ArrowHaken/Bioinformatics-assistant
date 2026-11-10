@@ -1,0 +1,100 @@
+{
+  "schema_version": "1.0",
+  "_readme": [
+    "本文件是单细胞流程的唯一参数来源。脚本不再自带任何业务参数。",
+    "source 字段的含义（四选一，不许混用）：",
+    "  official  官方口径，照抄对方脚本里的值。换数据通常仍适用。",
+    "  instance  本机实例适配，我方为在这台机器上跑通做的改动。",
+    "  user      用户显式指定，优先级最高。",
+    "  gate      未定，需要人工确认。读到 gate 且没有取值 → 脚本停下要答案，不兜底。",
+    "locked=true 表示不建议改（改了会和官方口径分叉，需写 why）。",
+    "首个样本跑完会有一次「样本剔除闸门」，那时才填 steps.post_cluster_exclusion 里的样本名。",
+    "steps 里 cluster_filter 默认 none（不剔除）。按簇号剔除是数据相关决定，换数据必须重做。"
+  ],
+  "case": {
+    "name": "",
+    "note": "",
+    "updated_at": ""
+  },
+  "environment": {
+    "rscript_path": { "value": "", "source": "gate" },
+    "r_lib_paths": { "value": [], "source": "gate" },
+    "expected_seurat_major": { "value": 4, "source": "official", "locked": true, "why": "官方基于 Seurat v4；v5 槽语义不同，结果不可比" },
+    "memory_gb": { "value": null, "source": "gate" }
+  },
+  "io": {
+    "indir": { "value": "", "source": "gate" },
+    "outdir": { "value": "", "source": "gate" },
+    "samples_file": { "value": null, "source": "gate" },
+    "reference_table": { "value": null, "source": "gate" },
+    "lit_dict": { "value": null, "source": "gate" }
+  },
+  "params": {
+    "species": { "value": "Mouse", "source": "official", "locked": true, "why": "本批数据全 Mouse" },
+    "nfeatures": { "value": 2000, "source": "official", "locked": true, "why": "" },
+    "dims": { "value": 20, "source": "official", "locked": true, "why": "" },
+    "pcs_doublet": { "value": 20, "source": "official", "locked": true, "why": "" },
+    "pN": { "value": 0.25, "source": "official", "locked": true, "why": "RunDF 默认值" },
+    "qc_min_features": { "value": null, "source": "gate", "why": "官方数据实测最小 401，但脚本写 300、PPT 写 400、注释写 500。必须确认。" },
+    "qc_max_features": { "value": 5000, "source": "official", "locked": false, "why": "" },
+    "qc_mt": { "value": 10, "source": "official", "locked": false, "why": "" },
+    "res1": { "value": 0.5, "source": "official", "locked": false, "why": "" },
+    "res2": { "value": 0.6, "source": "official", "locked": false, "why": "" },
+    "seed": { "value": 42, "source": "instance", "locked": false, "why": "我方固定值。官方脚本无 set.seed，其自身结果不可复现。" },
+    "min_gene_per_type_for_test": { "value": 3, "source": "official", "locked": false, "why": "差异分析每组至少 3 个细胞才纳入" }
+  },
+  "steps": {
+    "read_exclusion": {
+      "mode": "none",
+      "samples": [],
+      "source": "gate",
+      "reason": "读入前剔除整样本。仅在明确了要剔哪个样本时才用。"
+    },
+    "cluster_filter": {
+      "mode": "none",
+      "by_name_keep": [],
+      "mapping_file": null,
+      "source": "gate",
+      "reason": "筛群。默认不剔除。若确需剔除，优先按细胞类型名（换数据安全）；按簇号仅限本次有效，且必须在 reason 里写明。"
+    },
+    "post_cluster_exclusion": {
+      "mode": "none",
+      "samples": [],
+      "source": "gate",
+      "reason": "聚类后剔除样本。样本名必须来自首样本结果，不许预先写死。"
+    },
+    "lowconfidence": {
+      "mode": "flag_only",
+      "min_cells": 200,
+      "source": "gate",
+      "reason": "细胞数低于 min_cells 的簇标记为低置信，不强行命名。"
+    },
+    "memory": {
+      "mode": "auto",
+      "blocked_when_insufficient": true,
+      "source": "instance",
+      "reason": "内存不足时自动走分块距离矩阵路径（结果等价，已实测）。不许抽样、不许降精度。"
+    }
+  },
+  "plots": {
+    "_readme": "出图版式配置（sc-plot-kit 读这一段）。所有颜色与尺寸都在这里，脚本里不写死；换一组分组名不用改代码。",
+    "dpi": 300,
+    "size_qc": [10, 8],
+    "size_cluster": [10, 8],
+    "size_markgene": [10, 8],
+    "size_annot": [10, 8],
+    "size_ratio": [10, 8],
+    "size_diff": [10, 10],
+    "size_enrich": [10, 10],
+    "qc_color": "#F8766D",
+    "group_palette": ["#E64B35", "#4DBBD5", "#00A087", "#3C5488", "#F39B7F", "#8491B4", "#91D1C2", "#DC0000"],
+    "group_colors": null,
+    "volcano_colors": { "UP": "#E64B35", "DOWN": "#00A087", "NO": "#3C5488" },
+    "celltype_palette": ["#53A85F","#58A4C3","#AB3282","#8C549C","#BD956A","#57C3F3","#6778AE",
+                         "#F3B1A0","#F1BB72","#DCC1DD","#E95C59","#625D9E","#F7F398","#E63863",
+                         "#5F3D69","#C5DEBA","#CCE0F5","#B53E2B","#AA9A59","#E39A35","#91D0BE",
+                         "#23452F","#E4C755","#585658","#C1E6F3","#D6E7A3","#712820","#CCC9E6",
+                         "#3A6963","#68A180","#61B934","#476D87","#9FA3A8","#968175"]
+  },
+  "gates_answered": {}
+}

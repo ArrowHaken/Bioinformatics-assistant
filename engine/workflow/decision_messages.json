@@ -1,0 +1,17 @@
+{
+  "_readme": [
+    "decision.R 与 decide_cli.R 的文案。",
+    "同样是纯 ASCII 源码 + 中文从这里读，原因见 guard.R 顶部说明。"
+  ],
+  "cli_usage": [
+    "自动判定 · 用法",
+    "  Rscript engine/decide_cli.R --dir <运行目录> --engine <引擎目录>"
+  ],
+  "head": "自动判定：这台机器现在能不能跑",
+  "verdict_go": "结论：可以按流程往下跑。",
+  "verdict_blocked": "结论：先解决下面这几件，再往下跑。",
+  "verdict_need_choice": "结论：机器上已经有现成的脚本。先定用哪套，不要并行两套。",
+  "gaps_head": "要你先处理的：",
+  "checks_head": "逐项实测：",
+  "next_tail": "下一步：Rscript engine/sc_workflow.R status --dir {dir}"
+}

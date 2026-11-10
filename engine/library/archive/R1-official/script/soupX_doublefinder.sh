@@ -1,0 +1,1 @@
+Rscript soupX_doublefinder.R --datadir /share/home/liny/Project/personality/SY_wangwenbiao_spleen_mouse_20250521/data3/ --sample 18m-G489,18m-G490,18m-G491,18m-G756,18m-G757,18m-G761,18m-G760 --outdir ./ --soupx N --doublefinder Y --species Mouse

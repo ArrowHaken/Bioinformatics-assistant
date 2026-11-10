@@ -1,0 +1,216 @@
+#!/usr/bin/env Rscript
+# =====================================================================
+#  poller.R -- 持久调度器：关掉页面也得接着推进
+#
+#  为什么需要这个文件
+#    以前「等服务器跑完」是浏览器每 5 秒读一次 /api/status。
+#    关掉标签页，这条链就断了；serve.R 里的 inject_sweep 只计算并打印补发项，
+#    主循环从来没调用它 —— 于是补发逻辑写好了但不生效。
+#    本文件把它变成独立 worker：不需要浏览器在场，重启后接着跑。
+#
+#  租约（为什么不是简单的「取一条」）
+#    两个 worker 同时取同一条会造成重复投递与重复返工。
+#    做法是一条 UPDATE ... RETURNING 原子领取，并写 lease_until；
+#    领取者崩了，租约到期后别人能接。这不是分布式锁，单机足够。
+#
+#  三类作业共用一套租约，但计数分开存（见 rework.R 顶部说明）
+#    poll   查远程任务/产物
+#    fetch  取回产物（C3）
+#    rework 催返工单
+#
+#  调用
+#    Rscript engine/poller.R [--once] [--app <dir>] [--interval 30]
+# =====================================================================
+
+suppressWarnings(options(stringsAsFactors = FALSE, warn = -1))
+
+`%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+
+POLL_LEASE_SECS <- 90L
+POLL_INTERVAL_SECS <- 30L
+# 退避：2 分钟 -> 5 分钟，带抖动。抖动是为了避免所有 job 同一秒撞上来。
+POLL_BACKOFF_SECS <- c(120L, 300L)
+
+poller_jitter <- function(secs) secs + sample(0:15, 1)
+
+# ---- 原子领取 --------------------------------------------------------
+
+poller_claim <- function(con, worker = "poller", now = db_now()) {
+  # SQLite 不支持 UPDATE ... RETURNING（3.35 起支持，但为兼容老版本用事务包裹）。
+  #
+  # 踩过的坑（2026-11-06）：这里原本在 dbWithTransaction 的表达式里写了
+  #   `if (!nrow(r)) return(NULL)`。R 的 return() 退出的是**外层函数**
+  #   poller_claim，不是那段表达式，于是 dbWithTransaction 的
+  #   commit/rollback 全被跳过 —— 事务就这么悬在连接上。
+  #   后果不是"这一轮没领到活"，而是连接从此卡在事务里：
+  #   接下来每一次 BEGIN 都报 "cannot start a transaction within a transaction"，
+  #   于是 /api/step/import 全部 409，进度永远写不回来。
+  #   触发条件极常见：队列里没有到期作业时就走这条路 —— 也就是绝大多数轮次。
+  #
+  # 现在改成：先把结果算进变量，事务本体正常跑完，退出事务后再决定返回什么。
+  got <- NULL
+  DBI::dbWithTransaction(con, {
+    r <- DBI::dbGetQuery(con,
+      "SELECT job_id FROM poll_jobs
+        WHERE state IN ('pending','leased')
+          AND next_check_at <= ?
+          AND (lease_until IS NULL OR lease_until < ?)
+        ORDER BY next_check_at LIMIT 1", list(now, now))
+    if (nrow(r)) {
+      job_id <- as.character(r$job_id[1])
+      DBI::dbExecute(con,
+        "UPDATE poll_jobs SET state='leased', lease_until=?, leased_by=?, updated_at=?
+          WHERE job_id=?", list(db_iso_add(POLL_LEASE_SECS), worker, now, job_id))
+      j <- DBI::dbGetQuery(con, "SELECT * FROM poll_jobs WHERE job_id=?", list(job_id))
+      got <- as.list(j[1, ])
+    }
+  })
+  got
+}
+
+poller_finish <- function(con, job, ok, error = NULL, delay = NULL, state = NULL) {
+  attempts <- as.integer(job$attempts %||% 0) + 1L
+  nxt <- db_iso_add(delay %||% poller_jitter(
+    POLL_BACKOFF_SECS[min(attempts, length(POLL_BACKOFF_SECS))]))
+  DBI::dbExecute(con,
+    "UPDATE poll_jobs SET state=?, attempts=?, lease_until=NULL, leased_by=NULL,
+       next_check_at=?, last_error=?, updated_at=? WHERE job_id=?",
+    list(state %||% (if (ok) "done" else "pending"), attempts, nxt,
+         error %||% NA_character_, db_now(), job$job_id))
+  db_event(con, if (ok) "poll_done" else "poll_error",
+           owner_key = job$owner_key, version_id = job$version_id,
+           run_id = job$run_id, step_id = job$step_id, attempt_id = job$attempt_id,
+           payload = list(job_id = job$job_id, kind = job$kind,
+                          error = error, attempts = attempts))
+  invisible(TRUE)
+}
+
+# ---- 各类作业 --------------------------------------------------------
+
+# 查询作业的六要素契约（A6）：缺一项就不发消息，只记 schedule_error。
+#   为什么要这么严：第 4 环复核子步的实际报错就是「定时注入正文为空」，
+#   因为队列里只有 step 名，没有 project/version/run/attempt，
+#   拼出来的指令缺上下文，执行端读不到真实 mtime。
+POLL_REQUIRED_FIELDS <- c("version_id", "run_id", "step_id", "attempt_id", "query_request_id")
+
+poller_validate <- function(job) {
+  miss <- POLL_REQUIRED_FIELDS[vapply(POLL_REQUIRED_FIELDS, function(k) {
+    v <- job[[k]]
+    is.null(v) || length(v) == 0L || is.na(v) || !nzchar(as.character(v))
+  }, TRUE)]
+  miss
+}
+
+poller_run_poll <- function(con, job, app_dir) {
+  miss <- poller_validate(job)
+  if (length(miss)) {
+    db_event(con, "schedule_error", owner_key = job$owner_key,
+             version_id = job$version_id, run_id = job$run_id, step_id = job$step_id,
+             attempt_id = job$attempt_id,
+             payload = list(job_id = job$job_id, missing = miss,
+                            why = "查询体缺必需字段，不发消息、不标分析失败"))
+    poller_finish(con, job, ok = FALSE, error = paste("缺字段:", paste(miss, collapse = ",")),
+                  state = "error")
+    return(list(ok = FALSE, error = "missing_context", missing = miss))
+  }
+
+  # 只查不重跑：这条语义要写进发出去的正文，否则执行端会自己决定重跑。
+  txt <- sprintf(
+    "【查询请求 %s】只查不重跑。project=%s version=%s run=%s step=%s attempt=%s。请回报该产物当前的真实 mtime 与大小，不要重新执行脚本。",
+    job$query_request_id, job$payload_project %||% "-", job$version_id, job$run_id,
+    job$step_id, job$attempt_id)
+  DBI::dbExecute(con,
+    "INSERT OR IGNORE INTO outbox(item_id,owner_key,session_ref,step_id,req_id,text,reason,
+       state,attempts,next_attempt_at,created_at,updated_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+    list(paste0("ob-", job$job_id), job$owner_key, NA_character_, job$step_id,
+         job$query_request_id, txt, "poll", "pending", 0L, db_now(), db_now(), db_now()))
+  poller_finish(con, job, ok = TRUE)
+  list(ok = TRUE, queued = TRUE)
+}
+
+poller_run_fetch <- function(con, job, app_dir) {
+  # 取回失败不能算「分析失败」，它只影响本地镜像是否完整。
+  #   这里只负责把状态推进到可重试的位置，真正的取数在 serve.R 的 fetch 端点。
+  fj <- db_rows(con, "SELECT * FROM fetch_jobs WHERE request_id = ?", list(job$ticket_id))
+  if (!nrow(fj)) return(poller_finish(con, job, ok = FALSE, error = "fetch_job_missing", state = "error"))
+  fj <- as.list(fj[1, ])
+  if (identical(fj$state, "verified")) return(poller_finish(con, job, ok = TRUE))
+  retries <- as.integer(fj$retries %||% 0)
+  if (retries >= as.integer(fj$max_retries %||% 3)) {
+    DBI::dbExecute(con, "UPDATE fetch_jobs SET state='manual', updated_at=? WHERE request_id=?",
+                   list(db_now(), fj$request_id))
+    poller_finish(con, job, ok = FALSE, error = "retry_exhausted", state = "manual")
+    return(list(ok = FALSE, action = "manual"))
+  }
+  DBI::dbExecute(con, "UPDATE fetch_jobs SET retries=retries+1, updated_at=? WHERE request_id=?",
+                 list(db_now(), fj$request_id))
+  poller_finish(con, job, ok = FALSE, error = "awaiting_fetch")
+  list(ok = TRUE, action = "retry")
+}
+
+poller_run_rework <- function(con, job, app_dir) {
+  r <- rework_nudge(con, job$ticket_id)
+  poller_finish(con, job, ok = TRUE, state = if (identical(r$action, "escalated")) "done" else "pending")
+  r
+}
+
+# ---- 主循环 ----------------------------------------------------------
+
+poller_step <- function(con, app_dir, worker = "poller", now = db_now()) {
+  job <- poller_claim(con, worker, now)
+  if (is.null(job)) return(NULL)
+  res <- tryCatch({
+    switch(as.character(job$kind),
+      poll   = poller_run_poll(con, job, app_dir),
+      fetch  = poller_run_fetch(con, job, app_dir),
+      rework = poller_run_rework(con, job, app_dir),
+      { poller_finish(con, job, ok = FALSE, error = "unknown_kind", state = "error")
+        list(ok = FALSE, error = "unknown_kind") })
+  }, error = function(e) {
+    poller_finish(con, job, ok = FALSE, error = conditionMessage(e))
+    list(ok = FALSE, error = conditionMessage(e))
+  })
+  list(job_id = job$job_id, kind = job$kind, result = res)
+}
+
+poller_loop <- function(app_dir, once = FALSE, interval = POLL_INTERVAL_SECS) {
+  con <- db_connect(app_dir)
+  on.exit(DBI::dbDisconnect(con))
+  repeat {
+    n <- 0L
+    repeat {
+      r <- poller_step(con, app_dir)
+      if (is.null(r)) break
+      n <- n + 1L
+      if (once && n >= 20L) break
+    }
+    # 每轮都盖一次时间戳，哪怕这一轮什么都没领到。
+    #   为什么：原来看"调度在不在动"只有一个信号 —— 有作业被处理。
+    #   队列闲的时候这个信号永远不出现，于是"调度器活着但没活干"和
+    #   "调度器根本没跑"在页面上长得一模一样。
+    #   心跳与"推进了几条"分开记，两个问题才分得开。
+    tryCatch({
+      db_meta_set(con, "poller_last_run", db_now())
+      db_meta_set(con, "poller_last_count", as.character(n))
+    }, error = function(e) NULL)
+    if (once) {
+      cat("polled:", n, "\n")
+      return(invisible(n))
+    }
+    Sys.sleep(interval)
+  }
+}
+
+poller_cli <- function() {
+  a <- commandArgs(trailingOnly = TRUE)
+  get <- function(k, d = NULL) { i <- match(k, a); if (is.na(i) || i == length(a)) return(d); a[i + 1] }
+  app <- get("--app", getwd())
+  once <- "--once" %in% a
+  interval <- as.integer(get("--interval", POLL_INTERVAL_SECS))
+  source(file.path(app, "engine", "db.R"))
+  source(file.path(app, "engine", "rework.R"))
+  poller_loop(app, once = once, interval = interval)
+}
+
+if (sys.nframe() == 0L && !interactive()) poller_cli()

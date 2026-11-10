@@ -1,0 +1,1154 @@
+{
+  "spec_version": "1.0",
+  "skill": "sc-ppt-kit",
+  "deck": {
+    "slide_size": {
+      "cx": 12192000,
+      "cy": 6858000
+    },
+    "aspect": "16:9",
+    "theme_fonts": {
+      "major": "等线 Light",
+      "minor": "等线"
+    },
+    "body_font": "微软雅黑",
+    "font_sizes": {
+      "chapter_title": 2000,
+      "body_lead": 2200,
+      "body_text": 1500,
+      "table_body": 2000,
+      "end_page": 8000
+    },
+    "colors": {
+      "title_emphasis": "C86464",
+      "body_emphasis": "C86400",
+      "accent_red": "B51B22",
+      "dark_teal": "0C3141"
+    },
+    "default_result_title": "单细胞分析结果汇报",
+    "out_pattern": "analysis_report_{yyyymmdd}.pptx",
+    "result_subdirs": [
+      "QC",
+      "cluster",
+      "markgene",
+      "annot",
+      "cell_ratio",
+      "diff_enrich"
+    ],
+    "chapters": {
+      "00": "样本基本信息",
+      "01": "细胞聚类",
+      "02": "分群marker",
+      "03": "细胞注释",
+      "04": "细胞比例统计",
+      "05": "组间差异富集"
+    },
+    "toc_text": "01.样本基本信息\n\n02.细胞聚类\n\n03.分群marker\n\n04.细胞注释\n\n05.细胞比例统计\n\n06.组间差异富集\n\n",
+    "shape_slots": {
+      "chapter_title": "文本框 1",
+      "chapter_badge": "文本框 3",
+      "body_copy": "TextBox 10",
+      "toc_copy": "TextBox 67",
+      "toc_title": "前凸带形 6",
+      "cover_title": "矩形 19",
+      "cover_date": "矩形 3",
+      "end_text": "TextBox 7"
+    },
+    "content_image_box": {
+      "off": [
+        4320000,
+        1080000
+      ],
+      "ext": [
+        7200000,
+        5400000
+      ]
+    }
+  },
+  "table_spec": {
+    "xfrm": {
+      "off": [
+        540000,
+        3420000
+      ],
+      "ext": [
+        11160000,
+        720000
+      ]
+    },
+    "filenames": [
+      "QC/sample_stat.tsv",
+      "QC/sample_stat.csv",
+      "QC/sample_stat.xls",
+      "QC/sample_stat.txt",
+      "QC/qc_stat.tsv",
+      "QC/qc_stat.csv",
+      "QC/qc_stat.xls",
+      "QC/sample_info.tsv",
+      "QC/sample_info.csv",
+      "sample_stat.tsv",
+      "sample_stat.csv",
+      "qc_stat.tsv",
+      "qc_stat.csv"
+    ],
+    "glob_patterns": [
+      "QC/*sample*stat*.*",
+      "QC/*qc*stat*.*",
+      "*sample*stat*.tsv",
+      "*qc*stat*.csv"
+    ],
+    "sample_keys": [
+      "sample",
+      "sampleid",
+      "sample名",
+      "样本",
+      "样本名",
+      "样本名/sample",
+      "orig.ident"
+    ],
+    "metric_rows": [
+      {
+        "label": "原始细胞数",
+        "keys": [
+          "raw",
+          "rawcell",
+          "原始细胞数",
+          "raw_cell",
+          "raw细胞数"
+        ]
+      },
+      {
+        "label": "高质量细胞数",
+        "keys": [
+          "filtered",
+          "filteredcell",
+          "高质量细胞数",
+          "highquality",
+          "高质量"
+        ]
+      },
+      {
+        "label": "过滤掉细胞数",
+        "keys": [
+          "removed",
+          "filterout",
+          "过滤掉细胞数",
+          "过滤细胞数"
+        ]
+      },
+      {
+        "label": "过滤比率(%)",
+        "keys": [
+          "removeratio",
+          "过滤比率",
+          "过滤比率(%)",
+          "过滤比例"
+        ]
+      },
+      {
+        "label": "基因中位数",
+        "keys": [
+          "nfeature",
+          "mediannfeature",
+          "基因中位数",
+          "genemedian"
+        ]
+      },
+      {
+        "label": "线粒体中位数(%)",
+        "keys": [
+          "percentmt",
+          "mitomedian",
+          "线粒体中位数",
+          "线粒体中位数(%)",
+          "mtmedian"
+        ]
+      }
+    ],
+    "summary_template": "本次分析样本数共{n_samples}个，总共获得细胞数{total_cells}个，所有样本基因中位数为：{gene_median}； 线粒体中位数为：{mt_median}，首先使用DoubleFinder软件去除每个样本中的双细胞，然后使用Seurat包对每个样本进行质控，细胞过滤阈值：nFeature:400-5000 & percent.mt <10，质控结果进行统计如下表：",
+    "dir_note": "\n该分析结果所在目录：*QC/"
+  },
+  "pages": [
+    {
+      "no": 1,
+      "type": "cover",
+      "skin": 1,
+      "texts": [
+        {
+          "slot": "cover_title",
+          "text": "{title}"
+        },
+        {
+          "slot": "cover_date",
+          "text": "日期：{date}"
+        }
+      ]
+    },
+    {
+      "no": 2,
+      "type": "toc",
+      "skin": 2,
+      "texts": [
+        {
+          "slot": "toc_title",
+          "text": "目录"
+        },
+        {
+          "slot": "toc_copy",
+          "text": "{toc_text}"
+        }
+      ]
+    },
+    {
+      "no": 3,
+      "type": "table",
+      "skin": 3,
+      "section": "00",
+      "title": "样本基本信息",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          10800000,
+          2880000
+        ],
+        "paragraphs": [
+          {
+            "text": "{sample_summary}",
+            "sz": 2000
+          },
+          {
+            "text": "\n该分析结果所在目录：*QC/",
+            "sz": 2000
+          }
+        ]
+      },
+      "table": true
+    },
+    {
+      "no": 4,
+      "type": "content",
+      "skin": 4,
+      "section": "00",
+      "title": "样本基本信息",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本的质控图",
+            "sz": 2200
+          },
+          {
+            "text": "图中nFeature_RNA、nCount_RNA、percent.mt分别代表每个样本原始细胞中检测到的基因数、UMI数和线粒体基因reads占比的小提琴图。该分析结果所在目录：*QC/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "nfeature_violin.png",
+          "dirs": [
+            "QC"
+          ],
+          "patterns": [
+            "nfeature_violin.png",
+            "*nfeature*violin*.png",
+            "*nFeature*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 5,
+      "type": "content",
+      "skin": 4,
+      "section": "00",
+      "title": "样本基本信息",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本的质控图",
+            "sz": 2200
+          },
+          {
+            "text": "图中nFeature_RNA、nCount_RNA、percent.mt分别代表每个样本原始细胞中检测到的基因数、UMI数和线粒体基因reads占比的小提琴图。该分析结果所在目录：*QC/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "nCount_violin.png",
+          "dirs": [
+            "QC"
+          ],
+          "patterns": [
+            "nCount_violin.png",
+            "*ncount*violin*.png",
+            "*nCount*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 6,
+      "type": "content",
+      "skin": 4,
+      "section": "00",
+      "title": "样本基本信息",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本的质控图",
+            "sz": 2200
+          },
+          {
+            "text": "图中nFeature_RNA、nCount_RNA、percent.mt分别代表每个样本原始细胞中检测到的基因数、UMI数和线粒体基因reads占比的小提琴图。该分析结果所在目录：*QC/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "mt_violin.png",
+          "dirs": [
+            "QC"
+          ],
+          "patterns": [
+            "mt_violin.png",
+            "*percent*mt*.png",
+            "*mt*violin*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 7,
+      "type": "content",
+      "skin": 4,
+      "section": "01",
+      "title": "细胞聚类",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本合并分群图",
+            "sz": 2200
+          },
+          {
+            "text": "图中每个点代表一个细胞，不同颜色的点属于不同亚群的细胞。该分析结果所在目录：*cluster/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "merge_umap.png",
+          "dirs": [
+            "cluster"
+          ],
+          "patterns": [
+            "merge_umap.png",
+            "*merge*umap*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 8,
+      "type": "content",
+      "skin": 4,
+      "section": "01",
+      "title": "细胞聚类",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本合并分群图",
+            "sz": 2200
+          },
+          {
+            "text": "按照每个样本进行着色的细胞聚类图。该分析结果所在目录：*cluster/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "sample_umap.png",
+          "dirs": [
+            "cluster"
+          ],
+          "patterns": [
+            "sample_umap.png",
+            "*sample*umap*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 9,
+      "type": "content",
+      "skin": 4,
+      "section": "01",
+      "title": "细胞聚类",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本合并分群图",
+            "sz": 2200
+          },
+          {
+            "text": "按照每个样本所属的分组进行分面展示的细胞聚类图。该分析结果所在目录：*cluster/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "merge_group_umap.png",
+          "dirs": [
+            "cluster"
+          ],
+          "patterns": [
+            "merge_group_umap.png",
+            "*group*umap*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 10,
+      "type": "content",
+      "skin": 10,
+      "section": "01",
+      "title": "细胞聚类",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          1650365
+        ],
+        "paragraphs": [
+          {
+            "text": "右图为所有样本合并分群图",
+            "sz": 2200
+          },
+          {
+            "text": "按照每个样本进行分面展示的细胞聚类图。该分析结果所在目录：*cluster/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "merge_sample_umap.png",
+          "dirs": [
+            "cluster"
+          ],
+          "patterns": [
+            "merge_sample_umap*",
+            "*sample*umap*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            3772535,
+            1286510
+          ],
+          "ext": [
+            8355965,
+            5571490
+          ]
+        }
+      ]
+    },
+    {
+      "no": 11,
+      "type": "content",
+      "skin": 4,
+      "section": "02",
+      "title": "分群marker",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是每个群top10的markgene在所有群中的表达水平热图",
+            "sz": 2200
+          },
+          {
+            "text": "图中每行代表各个markgene，每列代表各个cluster中的细胞，颜色越红代表该基因在该cluster中表达水平越高。该图可以帮助我们判断细胞分群的效果，一般每个群的markgene都是在该群中高表达，而在其他群中是低表达的情况，热图会呈现色块的梯度分布。该分析结果所在目录：*markgene/heatmap/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "top10_heatmap.png",
+          "dirs": [
+            "markgene/heatmap",
+            "markgene"
+          ],
+          "patterns": [
+            "top10_heatmap.png",
+            "*heatmap*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 12,
+      "type": "content",
+      "skin": 4,
+      "section": "02",
+      "title": "分群marker",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示markgene在聚类图的表达水平图",
+            "sz": 2200
+          },
+          {
+            "text": "图中颜色越深表示该基因在该群中表达水平越高，该图可以帮助我们去鉴定细胞类型，如果某个群特异的表达某个细胞类型的marker，就表明该群很大概率是该细胞类型。该分析结果所在目录：*markgene/featureplot/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "featureplot.png",
+          "dirs": [
+            "markgene/featureplot",
+            "markgene"
+          ],
+          "patterns": [
+            "featureplot_cluster*.png",
+            "*featureplot*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 13,
+      "type": "content",
+      "skin": 4,
+      "section": "02",
+      "title": "分群marker",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示markgene在所有群中表达水平的小提琴图",
+            "sz": 2200
+          },
+          {
+            "text": "图中行是各个cluster，列是该基因在各个cluster中的表达水平。该图也可以帮助我们去鉴定细胞类型。该分析结果所在目录：*markgene/violin/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "violin.png",
+          "dirs": [
+            "markgene/violin",
+            "markgene"
+          ],
+          "patterns": [
+            "violin_cluster*.png",
+            "*violin*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 14,
+      "type": "content",
+      "skin": 14,
+      "section": "03",
+      "title": "细胞注释",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          1971040
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是使用marker进行人工注释的结果",
+            "sz": 2200
+          },
+          {
+            "text": "展示的是对每个群进行人工注释对应的细胞类型。该分析结果所在目录：*annot",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "merge_umap_cluster_annot.png",
+          "dirs": [
+            "annot"
+          ],
+          "patterns": [
+            "merge_umap_cluster_annot.png",
+            "*cluster*annot*.png",
+            "*annot*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            5360035,
+            691515
+          ],
+          "ext": [
+            6727825,
+            4601845
+          ]
+        },
+        {
+          "descr": "merge_umap_annot.png",
+          "dirs": [
+            "annot"
+          ],
+          "patterns": [
+            "merge_umap_annot.png",
+            "*umap*annot*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            0,
+            2990215
+          ],
+          "ext": [
+            5250180,
+            3859530
+          ]
+        }
+      ]
+    },
+    {
+      "no": 15,
+      "type": "content",
+      "skin": 4,
+      "section": "03",
+      "title": "细胞注释",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          1971040
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是使用marker进行人工注释的结果",
+            "sz": 2200
+          },
+          {
+            "text": "展示的是对每个群进行人工注释使用的marker及对应的细胞类型。该分析结果所在目录：*annot",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "genelist_dotplot.png",
+          "dirs": [
+            "annot"
+          ],
+          "patterns": [
+            "genelist_dotplot.png",
+            "*dotplot*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4004945,
+            1678305
+          ],
+          "ext": [
+            8187690,
+            4208145
+          ]
+        }
+      ]
+    },
+    {
+      "no": 16,
+      "type": "content",
+      "skin": 4,
+      "section": "04",
+      "title": "细胞比例统计",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          1650365
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是合并聚类后对每个群进行细胞数量统计",
+            "sz": 2200
+          },
+          {
+            "text": "右图是每个cluster分组的细胞比例柱状图。该分析结果所在目录：*cell_ratio/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "cell_number_rate_group_facet.png",
+          "dirs": [
+            "cell_ratio"
+          ],
+          "patterns": [
+            "cell_number_rate_group_facet.png",
+            "*group*facet*.png",
+            "*cell*rate*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4319905,
+            1080135
+          ],
+          "ext": [
+            7200265,
+            4940300
+          ]
+        }
+      ]
+    },
+    {
+      "no": 17,
+      "type": "content",
+      "skin": 4,
+      "section": "04",
+      "title": "细胞比例统计",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          1971040
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是合并聚类后对每个群进行细胞数量统计",
+            "sz": 2200
+          },
+          {
+            "text": "右图是每个cluster分样本的细胞比例柱状图。该分析结果所在目录：*cell_ratio/",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "cell_number_rate_sample_facet.png",
+          "dirs": [
+            "cell_ratio"
+          ],
+          "patterns": [
+            "cell_number_rate_sample_facet*",
+            "*sample*facet*.png",
+            "*cell*rate*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4067810,
+            1280795
+          ],
+          "ext": [
+            8124190,
+            5415915
+          ]
+        }
+      ]
+    },
+    {
+      "no": 18,
+      "type": "content",
+      "skin": 4,
+      "section": "04",
+      "title": "细胞比例统计",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图展示的是合并聚类后对每个群进行细胞数量统计",
+            "sz": 2200
+          },
+          {
+            "text": "每个组中各个cluster的细胞比例柱状图，图中每个点代表组内的一个样本。该分析结果所在目录：*cell_ratio",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "all_cluster_cell_number_rate.png",
+          "dirs": [
+            "cell_ratio"
+          ],
+          "patterns": [
+            "all_cluster_cell_number_rate*.png",
+            "*number*rate*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4319905,
+            172085
+          ],
+          "ext": [
+            7200265,
+            6540500
+          ]
+        }
+      ]
+    },
+    {
+      "no": 19,
+      "type": "content",
+      "skin": 4,
+      "section": "05",
+      "title": "组间差异富集",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图是差异比较组合火山图",
+            "sz": 2200
+          },
+          {
+            "text": "对聚类后各个cluster进行组间的差异分析，对差异基因进行火山图展示，同时按avg_log2FC绝对值最大的前50个基因进行标注。该分析结果所在目录：*diff_enrich/diff/*/volcano",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "volcano.png",
+          "dirs": [
+            "diff_enrich/diff",
+            "diff_enrich"
+          ],
+          "patterns": [
+            "*volcano*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 20,
+      "type": "content",
+      "skin": 4,
+      "section": "05",
+      "title": "组间差异富集",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图是差异基因的GO（BP）富集分析图",
+            "sz": 2200
+          },
+          {
+            "text": "使用clusterProfiler软件对每个cluster的显著差异基因集进行GO功能富集分析，分ALL、UP和DOWN三种结果分别进行富集（ALL是各细胞类型总的差异基因，UP是各细胞类型上调的差异基因，DOWN是各细胞类型下调的差异基因），GO富集结果分BP（生物学过程）、CC（细胞组成）、MF（分子功能）三种类型进行了统计。图中行是注释到GO编号上的差异基因数，图中列是各个通路，点的大小与注释到该GO通路上的差异基因数成正相关，点的颜色代表该通路富集的显著程度，颜色越红越显著。该分析结果所在目录：*diff_enrich/enrich",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "GO_BP_enrichment.png",
+          "dirs": [
+            "diff_enrich/enrich",
+            "diff_enrich"
+          ],
+          "patterns": [
+            "*BP*.png",
+            "*GO*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 21,
+      "type": "content",
+      "skin": 4,
+      "section": "05",
+      "title": "组间差异富集",
+      "body": {
+        "off": [
+          540000,
+          1080000
+        ],
+        "ext": [
+          3600000,
+          5400000
+        ],
+        "paragraphs": [
+          {
+            "text": "右图是差异基因的KEGG富集分析图",
+            "sz": 2200
+          },
+          {
+            "text": "使用clusterProfiler软件对每个cluster的显著差异基因集进行KEGG功能富集分析，分ALL、UP和DOWN三种结果分别进行富集（ALL是各细胞类型总的差异基因，UP是各细胞类型上调的差异基因，DOWN是各细胞类型下调的差异基因）。图中行是注释到KEGG编号上的差异基因数，图中列是各个通路，点的大小与注释到该GO通路上的差异基因数成正相关，点的颜色代表该通路富集的显著程度，颜色越红越显著。该分析结果所在目录：*diff_enrich/enrich",
+            "sz": 1500
+          }
+        ]
+      },
+      "images": [
+        {
+          "descr": "KEGG_enrichment.png",
+          "dirs": [
+            "diff_enrich/enrich",
+            "diff_enrich"
+          ],
+          "patterns": [
+            "*KEGG*.png",
+            "*.png"
+          ],
+          "required": true,
+          "off": [
+            4320000,
+            1080000
+          ],
+          "ext": [
+            7200000,
+            5400000
+          ]
+        }
+      ]
+    },
+    {
+      "no": 22,
+      "type": "end",
+      "skin": 22,
+      "texts": [
+        {
+          "slot": "end_text",
+          "text": "谢谢观看！"
+        }
+      ]
+    }
+  ]
+}

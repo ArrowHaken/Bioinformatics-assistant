@@ -1,0 +1,264 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+workpc_scan_ref.py -- 在「能连上分析服务器的那台电脑」上跑一次注释依据表扫描（只读）。
+
+为什么要有这个文件（而不是每次临场写一段脚本）：
+  这件事每次都一样：连上去、在几个给定目录里按名字和扩展名找参考表、
+  记下路径/字节数/修改时间、再看一眼表头判断物种与组织、输出 JSON 回写应用。
+  但在 2026-11-04 那一轮里，执行端现场写了三版脚本、第一版扫全盘撞了 300 秒超时，
+  白等 5 分钟；接着又写了三个不同的 xlsx 解析脚本去猜表头，又花了 98 秒。
+  根本原因是"扫哪里、扫多深、最多扫几个、多久必须收手"这些决定每次都在临场做，
+  而临场做就容易做成"全盘深扫"。
+  把做法固定在这里：范围进来、深度有上限、数量有上限、总时长有硬闸门。
+
+用法（在能连服务器的那台电脑上）：
+  export SC_REMOTE_PWD='登录口令'          # 口令只走环境变量，不进 argv/日志
+  python3 workpc_scan_ref.py \\
+      --host 10.1.1.2 --user hhhong1 \\
+      --root /share/home/hhhong1/rachel_7sample_3_261026 \\
+      --root /share/home/liny/Project/personality/SY_wangwenbiao_spleen_mouse_20250521 \\
+      --out ./ref_scan.json
+然后回写应用：
+  POST /api/reference/scan   body 就是本次输出的 JSON 原文（含 host 与 items）。
+
+设计上的四条硬规矩（都是为了不再出现"白等五分钟"）：
+  1. 只扫 --root 给的目录，不接受空根、不接受 /、不接受 /share 这种大根；
+  2. 深度默认 6，超过就不再往下；
+  3. 候选数上限默认 80，超了就停下并标 truncated，宁可少列不要扫穿；
+  4. 总时长闸门默认 120 秒，到点就用已完成的部分收尾，绝不挂到 300 秒。
+
+判据：
+  名字命中 KEY_HINTS 或属于扩展名白名单，且不在排除名单里。
+  排除名单是为了不把中间产物（cluster_stats、差异表、火山图）当参考表列进去 ——
+  列错了比列少了更糟，人会照着选，然后拿错依据去注释。
+"""
+
+import argparse
+import json
+import os
+import posixpath
+import sys
+import time
+
+try:
+    import paramiko
+except ImportError:
+    sys.stderr.write("paramiko 没装。先装： python3 -m pip install paramiko\n")
+    sys.exit(3)
+
+EXT_OK = ("xlsx", "xls", "tsv", "csv", "json")
+
+# 名字里带这些的，才认为是"能给细胞类型定名的表"。
+KEY_HINTS = ("marker", "celltype", "cell_type", "cell-type", "annot",
+             "markgene", "mark_gene", "dict", "reference", "ref_",
+             "supplement", "supp", "table", "参考", "依据", "字典", "注释")
+
+# 中间产物一律不列。这些是分析算出来的，不是注释依据。
+EXCLUDE = ("cluster_stats", "diff_", "_diff", "volcano", "umap", "tsne",
+           "pca", "vlnplot", "dotplot", "featureplot", "heatmap",
+           "qc_", "doublet_", "_log", ".log")
+
+# 大目录不进去：进去就等着超时。
+SKIP_DIRS = ("node_modules", ".git", "__pycache__", ".cache", ".conda",
+             "miniconda3", "pkgs", "R_libs", "library", ".Trash")
+
+
+def sh(client, cmd, timeout=60):
+    """一条远端命令。返回 (rc, stdout, stderr)。任何异常都不抛，交给调用方判。"""
+    try:
+        _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
+        out = stdout.read().decode("utf-8", "replace")
+        err = stderr.read().decode("utf-8", "replace")
+        return stdout.channel.recv_exit_status(), out, err
+    except Exception as e:  # 超时、通道断了，都当成"这条没拿到"
+        return -1, "", str(e)
+
+
+def build_find(root, max_depth):
+    """拼一条 find：限深、限类型、限扩展名，并排掉大目录。"""
+    ext_expr = " -o ".join(["-iname '*.%s'" % e for e in EXT_OK])
+    prune = " -o ".join(["-name '%s'" % d for d in SKIP_DIRS])
+    # 先 prune 再判扩展名：顺序错了会照样钻进 node_modules。
+    return (
+        "find '%s' \\( -type d \\( %s \\) -prune \\) -o "
+        "\\( -type f \\( %s \\) -maxdepth %d -printf '%%p\\t%%s\\t%%TY-%%Tm-%%Td %%TH:%%TM\\n' \\) "
+        "2>/dev/null" % (root, prune, ext_expr, max_depth)
+    )
+
+
+def name_hits(path):
+    low = posixpath.basename(path).lower()
+    full = path.lower()
+    for bad in EXCLUDE:
+        if bad in low:
+            return False
+    for k in KEY_HINTS:
+        if k in full:
+            return True
+    return False
+
+
+def preview_header(client, path, budget=6):
+    """
+    看一眼表头，给物种/组织留线索。只读、限时、失败就空着。
+    为什么不用 openpyxl：服务器上不保证装了它。
+      2026-11-04 那轮为了解析 xlsx 连写了三版脚本都没有稳。
+      这里用 unzip 抽 sharedStrings 的前若干条字符串，纯 shell，够用且不挑环境。
+    """
+    ext = posixpath.splitext(path)[1].lower()
+    if ext in (".xlsx", ".xlsm"):
+        cmd = ("unzip -p '%s' xl/sharedStrings.xml 2>/dev/null "
+               "| tr '<' '\\n' | grep -o 't>[^<]*' | sed 's/^t>//' | head -40 "
+               "| tr '\\n' '|'" % path)
+    elif ext == ".xls":
+        cmd = "strings -n 3 '%s' 2>/dev/null | head -40 | tr '\\n' '|'" % path
+    else:
+        cmd = "head -c 2000 '%s' 2>/dev/null | tr '\\r\\n' '  '" % path
+    rc, out, _ = sh(client, cmd, timeout=budget)
+    if rc != 0 or not out.strip():
+        return ""
+    s = " ".join(out.split())
+    return s[:600]
+
+
+def species_of(text):
+    """从表头文本里判物种。判不出就返回空 —— 猜一个写上去，后面每个人都会当真。"""
+    t = (text or "").lower()
+    mouse = sum(t.count(k) for k in ("mouse", "mus musculus", "小鼠", "mmu_", "mm10", "grcm"))
+    human = sum(t.count(k) for k in ("human", "homo sapiens", "人", "hsa_", "hg19", "hg38", "grch"))
+    if mouse and not human:
+        return "Mouse"
+    if human and not mouse:
+        return "Human"
+    return ""
+
+
+def tissue_of(text):
+    t = (text or "").lower()
+    for k, v in (("spleen", "脾"), ("脾", "脾"),
+                 ("kidney", "肾"), ("肾", "肾"),
+                 ("lung", "肺"), ("肺", "肺"),
+                 ("liver", "肝"), ("肝", "肝"),
+                 ("blood", "血"), ("pbmc", "外周血"), ("血", "血"),
+                 ("brain", "脑"), ("脑", "脑"),
+                 ("tumor", "肿瘤"), ("肿瘤", "肿瘤")):
+        if k in t:
+            return v
+    return ""
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--host", required=True)
+    ap.add_argument("--port", type=int, default=22)
+    ap.add_argument("--user", required=True)
+    ap.add_argument("--root", action="append", required=True,
+                    help="要扫的目录，可给多次。不接受 / 或 /share 这类大根。")
+    ap.add_argument("--max-depth", type=int, default=6)
+    ap.add_argument("--max-files", type=int, default=80)
+    ap.add_argument("--preview", type=int, default=12,
+                    help="最多看几张表的表头；看多了就是在烧时间")
+    ap.add_argument("--timeout", type=int, default=120,
+                    help="总时长闸门（秒）。到点用已完成部分收尾")
+    ap.add_argument("--out", default="")
+    a = ap.parse_args()
+
+    pwd = os.environ.get("SC_REMOTE_PWD", "")
+    if not pwd:
+        sys.stderr.write("SC_REMOTE_PWD 是空的 —— 口令要走环境变量传\n")
+        sys.exit(4)
+
+    # 根目录先自检：宁可当场拒掉，也不要扫穿整个 /share。
+    roots = []
+    for r in a.root:
+        r = r.rstrip("/")
+        if not r or r in ("/", "/share", "/share/", "/home", "/backup2"):
+            sys.stderr.write("拒绝扫描过大的根目录：%r（请给具体项目目录）\n" % (r or "/"))
+            sys.exit(5)
+        roots.append(r)
+    if not roots:
+        sys.stderr.write("至少要给一个 --root\n")
+        sys.exit(5)
+
+    t0 = time.time()
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(a.host, port=a.port, username=a.user, password=pwd,
+                   timeout=15, banner_timeout=30, auth_timeout=30,
+                   look_for_keys=False, allow_agent=False)
+
+    notes = []
+    found = []
+    truncated = False
+
+    for root in roots:
+        if time.time() - t0 > a.timeout * 0.5:
+            notes.append("时间用掉一半，跳过后续根目录：%s" % root)
+            truncated = True
+            break
+        rc, out, err = sh(client, build_find(root, a.max_depth), timeout=45)
+        if rc == -1:
+            notes.append("扫描 %s 超时或通道异常：%s" % (root, err[:120]))
+            truncated = True
+            continue
+        if not out.strip():
+            continue
+        for line in out.splitlines():
+            parts = line.rsplit("\t", 2)
+            if len(parts) < 3:
+                continue
+            path, size, mtime = parts[0], parts[1], parts[2]
+            if not name_hits(path):
+                continue
+            found.append({"path": path, "bytes": int(size) if size.isdigit() else 0,
+                          "mtime": mtime, "note": ""})
+            if len(found) >= a.max_files:
+                truncated = True
+                notes.append("候选已达上限 %d，停止继续收集" % a.max_files)
+                break
+        if len(found) >= a.max_files:
+            break
+
+    # 表头预览：只挑前 N 个，且总时长还有余量才做。
+    previewed = 0
+    for it in found:
+        if previewed >= a.preview:
+            break
+        if time.time() - t0 > a.timeout * 0.85:
+            notes.append("时间接近上限，表头预览提前收手（已看 %d 张）" % previewed)
+            break
+        hd = preview_header(client, it["path"])
+        previewed += 1
+        if not hd:
+            continue
+        sp, ti = species_of(hd), tissue_of(hd)
+        if sp:
+            it["species"] = sp
+        if ti:
+            it["tissue"] = ti
+            it["note"] = "表头线索：" + hd[:120]
+
+    client.close()
+
+    elapsed = round(time.time() - t0, 1)
+    obj = {
+        "ok": True,
+        "host": a.host,
+        "items": found,
+        "elapsed_sec": elapsed,
+        "scanned_roots": roots,
+        "max_depth": a.max_depth,
+        "truncated": truncated,
+        "previewed": previewed,
+        "notes": notes,
+    }
+    txt = json.dumps(obj, ensure_ascii=False, indent=2)
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(txt)
+    sys.stdout.write(txt + "\n")
+
+
+if __name__ == "__main__":
+    main()

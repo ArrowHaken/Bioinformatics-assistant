@@ -1,0 +1,262 @@
+#!/usr/bin/env Rscript
+# =====================================================================
+# 02_annotate.R — 文献驱动细胞类型注释
+#
+# 逻辑（照官方 markgene_celltype.R 的思路，加上文献打分）：
+#   每个聚类取 top-N 上调 marker → 与文献词典求交集打分 → 得分最高者判为该群类型
+#   → 写回对象 annot 列 → 输出注释结果表与细胞类型计数
+#
+# 铁律：
+#   1. 不做降级。词典缺失、打分全部为 0 → 停下报告，不许硬套近似类型。
+#   2. 词典的两个来源（reference 表 / lit-dict.json）汇成同一结构后使用：
+#      {细胞类型: {markers:[基因…], refs:[…], full:"全称"}}
+# =====================================================================
+
+suppressMessages({
+  library(Seurat); library(dplyr); library(jsonlite)
+})
+
+# 脚本目录定位：要同时支持 source() 和 Rscript 直接调用两种方式。
+#   只用 sys.frame(1)$ofile 时，Rscript 直接跑会拿到 NULL，
+#   表现为「cannot open file './lib/core_functions.R'」——很难排查。
+.this_dir <- local({
+  f <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (!is.null(f) && nzchar(f)) return(dirname(normalizePath(f)))
+  ca <- commandArgs(trailingOnly = FALSE)
+  m <- grep("^--file=", ca, value = TRUE)
+  if (length(m) > 0) {
+    p <- sub("^--file=", "", m[1])
+    if (nzchar(p) && file.exists(p)) return(dirname(normalizePath(p)))
+  }
+  if (dir.exists("lib") && file.exists(file.path("lib", "core_functions.R"))) return(normalizePath("."))
+  "."
+})
+
+# ---- 入口守卫：拒绝被直接调用 ----
+#   这不是装饰。它让「必须走统一入口」这件事由代码保证，而不是靠文档里的约定。
+#   守卫位置：脚本往上找 workflow/guard_load.R。找不到就停 —— 不静默跳过。
+#   为什么必须停：守卫缺失时继续跑，等于约束失效而没人知道，比直接报错危险得多。
+.guard_load <- local({
+  cands <- c(file.path(.this_dir, "..", "..", "workflow", "guard_load.R"),
+             file.path(.this_dir, "..", "workflow", "guard_load.R"),
+             file.path(.this_dir, "..", "..", "..", "workflow", "guard_load.R"))
+  hit <- cands[file.exists(cands)]
+  if (!length(hit)) {
+    stop("\n  拒绝运行：找不到入口守卫 workflow/guard_load.R。\n",
+         "  本脚本必须经由统一入口执行，守卫缺失时不能继续。\n",
+         "  找过：\n    ", paste(cands, collapse = "\n    "), "\n", call. = FALSE)
+  }
+  hit[1]
+})
+source(.guard_load, local = FALSE)
+sc_guard_banner("annotate", .this_dir)
+
+source(file.path(.this_dir, "lib", "core_functions.R"))
+
+LOG  <- function(...) cat(sprintf("[%s] %s\n", format(Sys.time(), "%H:%M:%S"), paste0(...)))
+STEP <- function(t) cat(sprintf("\n[%s] ===== %s =====\n", format(Sys.time(), "%H:%M:%S"), t))
+
+# ---------------------------------------------------------------------
+# 参数
+# ---------------------------------------------------------------------
+args <- commandArgs(trailingOnly = TRUE)
+get_opt <- function(k, d = NULL) {
+  i <- match(k, args)
+  if (is.na(i)) return(d)
+  if (i == length(args) || grepl("^--", args[i + 1])) return(d)
+  args[i + 1]
+}
+has_flag <- function(k) k %in% args
+
+rds_path  <- args[1]
+outdir    <- get_opt("--outdir")
+reference <- get_opt("--reference")     # xlsx / tsv，与 --lit-dict 二选一
+lit_dict  <- get_opt("--lit-dict")      # json
+top_n     <- as.integer(get_opt("--top-n", "30"))
+min_score <- as.integer(get_opt("--min-score", "1"))
+min_pct   <- as.numeric(get_opt("--min-pct", "0.1"))
+logfc     <- as.numeric(get_opt("--logfc", "0.25"))
+
+if (is.null(rds_path) || is.na(rds_path)) stop("必须给第一个位置参数：<processed.rds>", call. = FALSE)
+if (is.null(outdir) || is.na(outdir))     stop("必须给 --outdir", call. = FALSE)
+if (!file.exists(rds_path))               stop("rds 不存在: ", rds_path, call. = FALSE)
+if (is.null(reference) && is.null(lit_dict)) {
+  stop("必须提供 --reference 或 --lit-dict 之一。\n",
+       "  没有文献依据就无法判定细胞类型；本脚本不会凭空猜测。", call. = FALSE)
+}
+dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+
+# ---------------------------------------------------------------------
+# 1. 加载词典 → 统一结构
+# ---------------------------------------------------------------------
+STEP("STEP 1 加载文献词典")
+norm_dict <- function(lst) {
+  # 统一成 {类型: list(markers=..., refs=..., full=...)}
+  out <- list()
+  for (nm in names(lst)) {
+    e <- lst[[nm]]
+    if (is.null(e)) next
+    mk <- if (!is.null(e$markers)) e$markers else if (!is.null(e$Positive.Markers)) e$Positive.Markers else character(0)
+    mk <- toupper(trimws(as.character(mk))); mk <- mk[nzchar(mk)]
+    if (length(mk) == 0) next
+    out[[nm]] <- list(markers = unique(mk),
+                      refs    = as.character(if (!is.null(e$refs)) e$refs else ""),
+                      full    = as.character(if (!is.null(e$full)) e$full else nm))
+  }
+  out
+}
+
+dict <- list()
+if (!is.null(lit_dict)) {
+  if (!file.exists(lit_dict)) stop("词典文件不存在: ", lit_dict, call. = FALSE)
+  dict <- norm_dict(jsonlite::fromJSON(lit_dict, simplifyVector = FALSE))
+  LOG("从 JSON 载入词典: ", lit_dict)
+} else {
+  if (!file.exists(reference)) stop("reference 表不存在: ", reference, call. = FALSE)
+  ext <- tolower(tools::file_ext(reference))
+  if (ext %in% c("xlsx", "xls")) {
+    if (!requireNamespace("readxl", quietly = TRUE)) {
+      stop("读 Excel 需要 readxl 包，未安装。请先 install.packages('readxl')，\n",
+           "  或把 reference 另存为 tsv 后用同样参数传入。不提供静默替代。", call. = FALSE)
+    }
+    sheets <- readxl::excel_sheets(reference)
+    raw <- readxl::read_excel(reference, sheet = sheets[1], col_names = FALSE)
+    raw <- as.data.frame(raw, stringsAsFactors = FALSE)
+    # 官方参考表表头在第 6 行（0-based 第 5 行）：上行是简称，本行是全称
+    hdr_idx <- 6
+    if (nrow(raw) < hdr_idx + 1) stop("reference 表行数不足，无法按官方表头位置解析。", call. = FALSE)
+    short_names <- as.character(unlist(raw[hdr_idx - 1, ]))
+    full_names  <- as.character(unlist(raw[hdr_idx, ]))
+    pos_row <- which(grepl("Positive Markers", full_names, ignore.case = TRUE))[1]
+    if (is.na(pos_row)) stop("在 reference 表里找不到 'Positive Markers' 列，请确认表结构。", call. = FALSE)
+    lst <- list()
+    for (j in seq_along(short_names)) {
+      key <- if (!is.na(short_names[j]) && nzchar(short_names[j])) short_names[j] else full_names[j]
+      if (is.na(key) || !nzchar(key)) next
+      cells <- as.character(unlist(raw[(hdr_idx + 1):nrow(raw), j]))
+      cells <- cells[!is.na(cells) & nzchar(cells) & cells != "NA"]
+      mk <- unlist(strsplit(paste(cells, collapse = ","), "[,;，；\\s]+"))
+      lst[[key]] <- list(markers = unique(mk), refs = "", full = full_names[j])
+    }
+    dict <- norm_dict(lst)
+  } else {
+    tb <- read.delim(reference, stringsAsFactors = FALSE, check.names = FALSE)
+    if (!all(c("celltype", "markers") %in% tolower(colnames(tb)))) {
+      stop("reference 表需要至少两列：celltype 与 markers（逗号分隔）。\n",
+           "  现有列: ", paste(colnames(tb), collapse = ", "), call. = FALSE)
+    }
+    cn <- tolower(colnames(tb)); ci <- which(cn == "celltype")[1]; mi <- which(cn == "markers")[1]
+    lst <- list()
+    for (i in seq_len(nrow(tb))) {
+      key <- as.character(tb[i, ci])
+      if (is.na(key) || !nzchar(key)) next
+      mk <- unlist(strsplit(as.character(tb[i, mi]), "[,;，；\\s]+"))
+      lst[[key]] <- list(markers = unique(mk), refs = "", full = key)
+    }
+    dict <- norm_dict(lst)
+  }
+  LOG("从表格载入词典: ", reference)
+}
+if (length(dict) == 0) stop("词典为空，停止。请检查参考表或词典文件。", call. = FALSE)
+LOG("词典条目数: ", length(dict))
+
+# ---------------------------------------------------------------------
+# 2. 每个聚类的 marker
+# ---------------------------------------------------------------------
+STEP("STEP 2 计算每个聚类的 marker")
+obj <- readRDS(rds_path)
+if (!"seurat_clusters" %in% colnames(obj@meta.data)) {
+  stop("对象里没有 seurat_clusters 列，无法按聚类注释。", call. = FALSE)
+}
+LOG("细胞数: ", ncol(obj), " | 聚类数: ", length(unique(obj$seurat_clusters)))
+Idents(obj) <- "seurat_clusters"
+
+mk <- Seurat::FindAllMarkers(obj, only.pos = TRUE, min.pct = min_pct,
+                             logfc.threshold = logfc, verbose = FALSE)
+if (is.null(mk) || nrow(mk) == 0) {
+  stop("FindAllMarkers 返回空，停止。请检查 min.pct / logfc 阈值或上游聚类结果。", call. = FALSE)
+}
+mk <- mk[!grepl(mk$gene, pattern = "^mt-|^MT-|^Mt-|^Rpl|^Rps"), , drop = FALSE]
+write.table(mk, file.path(outdir, "all_markgene.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+sig <- subset(mk, p_val_adj < 0.05)
+write.table(sig, file.path(outdir, "sig_markgene.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+LOG("marker 总数: ", nrow(mk), " | 显著: ", nrow(sig))
+if (nrow(sig) == 0) stop("没有显著 marker（p_val_adj < 0.05），无法注释，停止。", call. = FALSE)
+
+top <- sig %>% group_by(cluster) %>% slice_max(avg_log2FC, n = top_n)
+dict_genes <- unique(unlist(lapply(dict, function(e) e$markers)))
+
+# ---------------------------------------------------------------------
+# 3. 打分判定
+# ---------------------------------------------------------------------
+STEP("STEP 3 与词典比对打分")
+res <- data.frame()
+unmatched <- character(0)
+for (cl in levels(factor(as.character(top$cluster)))) {
+  g <- toupper(as.character(top$gene[top$cluster == cl]))
+  if (length(g) == 0) { unmatched <- c(unmatched, cl); next }
+  sc <- vapply(dict, function(e) length(intersect(g, e$markers)), integer(1))
+  ord <- sort(sc, decreasing = TRUE)
+  b1 <- names(ord)[1]; s1 <- as.integer(ord[1])
+  b2 <- if (length(ord) > 1) names(ord)[2] else NA_character_
+  s2 <- if (length(ord) > 1) as.integer(ord[2]) else NA_integer_
+  if (is.na(b1) || s1 < min_score) {
+    unmatched <- c(unmatched, cl)
+    res <- rbind(res, data.frame(cluster = cl, celltype = NA_character_, score = s1,
+                                 second = b2, score2 = s2, n_hit = 0, hit_genes = "",
+                                 full_name = "", refs = "", stringsAsFactors = FALSE))
+    next
+  }
+  hit <- intersect(g, dict[[b1]]$markers)
+  res <- rbind(res, data.frame(cluster = cl, celltype = b1, score = s1,
+                               second = b2, score2 = s2, n_hit = length(hit),
+                               hit_genes = paste(head(hit, 8), collapse = ","),
+                               full_name = dict[[b1]]$full,
+                               refs = paste(dict[[b1]]$refs, collapse = ","),
+                               stringsAsFactors = FALSE))
+}
+write.table(res, file.path(outdir, "annot_result.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+if (length(unmatched) > 0) {
+  LOG("以下 ", length(unmatched), " 个群未匹配到任何词典类型（得分 < ", min_score, "）：",
+      paste(unmatched, collapse = ", "))
+}
+
+# ---------------------------------------------------------------------
+# 4. 写回对象
+# ---------------------------------------------------------------------
+STEP("STEP 4 写回 annot 列")
+map <- setNames(res$celltype, res$cluster)
+obj$annot <- factor(unname(map[as.character(obj$seurat_clusters)]))
+n_na <- sum(is.na(obj$annot))
+if (n_na > 0) {
+  LOG("注意：", n_na, " 个细胞所在群未判出类型，annot 为 NA（保留 NA，不用近似类型填充）。")
+}
+cnt <- as.data.frame(table(obj$annot, useNA = "ifany"))
+write.table(cnt, file.path(outdir, "celltype_count.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+
+saveRDS(obj, file.path(outdir, "annotated.rds"))
+LOG("已保存: ", file.path(outdir, "annotated.rds"))
+
+# ---------------------------------------------------------------------
+# 5. 报告
+# ---------------------------------------------------------------------
+rep_lines <- c(
+  "# 注释运行报告", "",
+  paste0("- 时间: ", format(Sys.time(), "%Y-%m-%d %H:%M:%S")),
+  paste0("- 输入对象: ", rds_path),
+  paste0("- 词典来源: ", if (!is.null(lit_dict)) lit_dict else reference),
+  paste0("- 词典条目数: ", length(dict)),
+  paste0("- marker 参数: min.pct=", min_pct, ", logfc.threshold=", logfc, ", top_n=", top_n),
+  paste0("- 聚类数: ", length(unique(obj$seurat_clusters))),
+  paste0("- 判出类型数: ", length(unique(na.omit(as.character(res$celltype))))),
+  paste0("- 未匹配群: ", if (length(unmatched)) paste(unmatched, collapse = ", ") else "无"),
+  paste0("- 未判型细胞数: ", n_na),
+  "", "## 逐群判定结果", "",
+  paste0("| 群 | 类型 | 得分 | 次优 | 命中基因 |"),
+  paste0("|---|---|---|---|---|"),
+  apply(res, 1, function(r) paste0("| ", r[["cluster"]], " | ", r[["celltype"]], " | ",
+                                   r[["score"]], " | ", r[["second"]], " | ", r[["hit_genes"]], " |"))
+)
+writeLines(rep_lines, file.path(outdir, "annot_report.md"))
+STEP("注释完成")
+LOG("输出目录: ", outdir)

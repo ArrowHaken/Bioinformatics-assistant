@@ -1,0 +1,136 @@
+{
+  "schema_version": "1.0",
+  "built_at": "2026-10-23T14:40:00",
+  "_readme": [
+    "C 类：服务器上没有、必须由应用自带并按需下发的补充脚本。",
+    "存在理由：远端那套脚本是甲方/他人维护的，它里面没有的东西（缺一个产物、缺一张统计表、缺一次校验），",
+    "  不可能去改它的源码。补的部分必须留在应用里 —— 有出处、有版本、有哈希，用哪次调哪次。",
+    "",
+    "三条硬规则（违规即错误写入）：",
+    "  1. 不许在服务器上临时手写补丁脚本顶替。要补就补在本库里，由应用下发。",
+    "  2. 补充脚本的输出必须自带 generated_at / generated_by / 输入文件 mtime，",
+    "     用来判定这份产物是不是本题次产生的。靠文件自身的创建时间判不出来。",
+    "  3. 任何补充脚本都不许读上一轮遗留的产物来生成这一轮的结果。输入只能来自本题次运行。"
+  ],
+  "entries": [
+    {
+      "id": "C_annotate",
+      "for_stage": "annotate",
+      "for_sub": "",
+      "title": "细胞类型注释（文献驱动打分）",
+      "why": "引用参考表的 marker 给每个簇定类型、写回 annot 列。出图脚本的差异段与富集段都要求 annot 列存在，缺这一列时那两段会被静默跳过（图有、火山图和富集没有），看起来像脚本坏了。 ｜ 2026-10-29 更正：脚本一直存在，登记路径写成了 sc-pipeline/scripts/02_annotate.R，那个目录不存在，所以接口报「条目登记了但文件不在」。 ｜ 2026-10-29 二次更正：原来指向 A_code/.../02_annotate.R，那是同一份脚本的第二份副本，表头还写死第 6 行。下发 md5 因此一直是旧版，人肾表（表头在第 5 行）在服务器上永远解析失败。现统一指向唯一一份。",
+      "file": "sc-pipeline/scripts/02_annotate.R",
+      "runtime": "rscript",
+      "requires_env": [
+        "SC_WORKFLOW_RUN",
+        "SC_WORKFLOW_DIR",
+        "SC_WORKFLOW_ENGINE"
+      ],
+      "argv": [
+        "{work_root}/8.final/final_object.rds",
+        "--outdir",
+        "{work_root}/9.annot",
+        "--reference",
+        "{reference_xlsx}"
+      ],
+      "writes": [
+        "9.annot/annotated.rds",
+        "9.annot/annot_result.xls",
+        "9.annot/celltype_count.xls"
+      ],
+      "inputs_must_be_current": [
+        "8.final/final_object.rds"
+      ],
+      "refuses_old_data": true,
+      "status": "ready"
+    },
+    {
+      "id": "C_plot_figs",
+      "for_stage": "figs",
+      "for_sub": "",
+      "title": "六套图出图（应用自带的前端出图套件）",
+      "why": "服务器那套脚本里没有 make_figs3.R。出图能力本来就在应用里（B_analysis/plots/plot_all_v2.R，562 行，含 QC/聚类/marker/比例/差异/富集六段）。之前流程定义里写的 make_figs3.R 这个名字是臆造的，和实际脚本对不上，才误判成'服务器上没有'。",
+      "file": "B_analysis/plots/plot_all_v2.R",
+      "runtime": "rscript",
+      "argv": [
+        "{work_root}/8.final/final_object.rds",
+        "--outdir",
+        "{work_root}/10.figs",
+        "--stage",
+        "qc,cluster,ratio,diff",
+        "--group-col",
+        "group",
+        "--sample-col",
+        "orig.ident",
+        "--compare",
+        "MicroplasticsvsMock"
+      ],
+      "writes": [
+        "10.figs/0.QC",
+        "10.figs/1.cluster",
+        "10.figs/3.cell_ratio",
+        "10.figs/4.diff_enrich"
+      ],
+      "inputs_must_be_current": [
+        "8.final/final_object.rds"
+      ],
+      "refuses_old_data": true,
+      "status": "ready"
+    },
+    {
+      "id": "C_plot_enrich",
+      "for_stage": "enrich",
+      "for_sub": "",
+      "title": "GO-BP 富集与 dotplot（应用自带）",
+      "why": "服务器那套里没有 make_enrich2.R。富集段本来就在同一个脚本里（plot_all_v2.R 的 enrich 分支，聚类簇来源是上一步的差异表）。",
+      "file": "B_analysis/plots/plot_all_v2.R",
+      "runtime": "rscript",
+      "argv": [
+        "{work_root}/8.final/final_object.rds",
+        "--outdir",
+        "{work_root}/10.figs",
+        "--stage",
+        "enrich",
+        "--group-col",
+        "group",
+        "--sample-col",
+        "orig.ident",
+        "--compare",
+        "MicroplasticsvsMock"
+      ],
+      "writes": [
+        "10.figs/4.diff_enrich/enrich"
+      ],
+      "inputs_must_be_current": [
+        "10.figs/4.diff_enrich/diff"
+      ],
+      "refuses_old_data": true,
+      "status": "ready"
+    },
+    {
+      "id": "C_stat_xls",
+      "for_stage": "doublet",
+      "for_sub": "stat",
+      "title": "把 1.doublet 的细胞数统计成 _stat.xls",
+      "why": "服务器上 soupX_doublefinder.R 只写 rds 与 sample_raw_cellnumber.xls，全文件没有一行写 _stat.xls；而流程把「写 _stat.xls」列为该阶段环节。补的部分必须在应用里。",
+      "file": "C_supplement/stat_xls.R",
+      "runtime": "rscript",
+      "argv": [
+        "--doublet-dir",
+        "{work_root}/1.doublet",
+        "--samples",
+        "{samples}",
+        "--raw-xls",
+        "{work_root}/1.doublet/sample_raw_cellnumber.xls"
+      ],
+      "writes": [
+        "1.doublet/doublet_stat.xls"
+      ],
+      "inputs_must_be_current": [
+        "1.doublet/<样本>.rds"
+      ],
+      "refuses_old_data": true,
+      "status": "ready"
+    }
+  ]
+}

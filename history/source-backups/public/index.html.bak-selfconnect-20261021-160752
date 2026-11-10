@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>个性化分析助手</title>
+<link rel="stylesheet" href="app.css?v=20261021i">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-in">
+    <div class="brand">
+      <b>个性化分析助手</b>
+      <span id="subline">正在连接本地服务…</span>
+    </div>
+    <div class="spacer"></div>
+    <div class="tally" id="tally"></div>
+    <div class="btnrow">
+      <button class="btn" id="btnHistory">历史记录与回退</button>
+      <button class="btn" id="btnArtifacts">产物下载</button>
+      <button class="btn" id="btnJargon">名词解释</button>
+      <button class="btn" id="btnAdv">高级参数</button>
+    </div>
+  </div>
+</header>
+
+<nav class="sidenav" id="sidenav" aria-label="页面导航"></nav>
+
+<div class="wrap">
+
+  <div id="bootErr" class="card card-pad" style="display:none;border-color:#f3c9c6;background:#fdeceb">
+    <b>连不上本地服务。</b>
+    <p class="small" style="margin:6px 0 0" id="bootErrMsg"></p>
+  </div>
+
+  <div id="main" style="display:none">
+
+    <!-- ============ 第一步：运行位置与脚本库 ============ -->
+    <section class="sec" id="secPlace" data-nav="运行位置与脚本库" data-navgroup="开始">
+      <div class="sec-h">
+        <h2>第一步 · 运行位置与脚本库</h2>
+        <span class="note" id="placeNote"></span>
+      </div>
+      <div id="placeHost"></div>
+      <div id="identifyHost"></div>
+      <div id="taskLogHost"></div>
+    </section>
+
+    <!-- ============ 需要你决定的事 ============ -->
+    <section class="sec" id="secGates" data-nav="需要你决定的事" data-navgroup="开始">
+      <div class="sec-h">
+        <h2>需要你决定的事</h2>
+        <span class="note" id="gatesNote"></span>
+      </div>
+      <div id="gatesHost"></div>
+    </section>
+
+    <!-- ============ 跑分析 ============ -->
+    <section class="sec" id="secRun" data-nav="跑分析" data-navgroup="跑">
+      <div class="sec-h">
+        <h2>跑分析</h2>
+        <span class="note" id="runNote"></span>
+      </div>
+      <div class="card card-pad">
+        <div id="stepsHost" class="stepgrid"></div>
+        <div class="runbar">
+          <button class="btn primary big" id="btnRunAll">一键全流程</button>
+          <span id="runState" class="runstate">空闲</span>
+          <div class="spacer"></div>
+          <button class="btn" id="btnStop" style="display:none">停止</button>
+        </div>
+        <div class="small" id="runHint" style="margin-top:8px"></div>
+        <details id="logFold" class="logfold">
+          <summary>运行日志 <span class="sm" id="logHint">还没开始</span></summary>
+          <pre class="log" id="logBox"></pre>
+        </details>
+      </div>
+    </section>
+
+
+  </div>
+</div>
+
+<!-- ============ 选目录弹窗（供第一步的「选择工作路径」用） ============ -->
+<div class="modal" id="dlgDir" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>选一个工作路径</b>
+      <button class="btn ghost" data-dlgclose="dlgDir">关闭</button>
+    </div>
+    <div class="crumb" id="crumb">读取中…</div>
+    <div class="listing" id="listing"></div>
+    <div class="modal-f">
+      <span class="small" id="dlgHint"></span>
+      <div class="spacer"></div>
+      <button class="btn" id="dlgUp">上一层</button>
+      <button class="btn primary" id="dlgUse">就用这个目录</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ 名词解释 ============ -->
+<div class="modal" id="dlgJargon" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>名词解释</b>
+      <span class="small" id="jargonNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgJargon">关闭</button>
+    </div>
+    <div class="modal-body" id="jargonHost"></div>
+  </div>
+</div>
+
+<!-- ============ 历史记录与回退 ============ -->
+<div class="modal" id="dlgHistory" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>历史记录与回退</b>
+      <span class="small" id="histNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgHistory">关闭</button>
+    </div>
+    <div class="modal-body" id="historyHost"></div>
+  </div>
+</div>
+
+<!-- ============ 产物下载 ============ -->
+<div class="modal" id="dlgArtifacts" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>产物下载</b>
+      <span class="small" id="artNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgArtifacts">关闭</button>
+    </div>
+    <div class="modal-f" style="border-top:none;border-bottom:1px solid var(--line)">
+      <button class="btn" id="btnRefreshArt">刷新</button>
+    </div>
+    <div class="modal-body" id="artHost"></div>
+  </div>
+</div>
+
+<!-- ============ 高级参数 ============ -->
+<div class="modal" id="dlgAdv" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b>高级参数</b>
+      <span class="small" id="settingsNote" style="margin-left:10px"></span>
+      <button class="btn ghost" data-dlgclose="dlgAdv">关闭</button>
+    </div>
+    <div class="modal-body" id="settingsHost"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：打开（看内容） ============ -->
+<div class="modal" id="dlgScript" style="display:none">
+  <div class="modal-box wide">
+    <div class="modal-h">
+      <b id="scriptTitle">脚本内容</b>
+      <button class="btn ghost" data-dlgclose="dlgScript">关闭</button>
+    </div>
+    <div class="modal-body" id="scriptBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：检查（AI 审核） ============ -->
+<div class="modal" id="dlgCheck" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="checkTitle">脚本检查</b>
+      <button class="btn ghost" data-dlgclose="dlgCheck">关闭</button>
+    </div>
+    <div class="modal-body" id="checkBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：修改（上传新文件 或 写要求交助手） ============ -->
+<div class="modal" id="dlgChange" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="changeTitle">修改脚本</b>
+      <button class="btn ghost" data-dlgclose="dlgChange">关闭</button>
+    </div>
+    <div class="modal-body" id="changeBody"></div>
+  </div>
+</div>
+
+<!-- ============ 脚本：上传（传完自动送审） ============ -->
+<div class="modal" id="dlgUpload" style="display:none">
+  <div class="modal-box">
+    <div class="modal-h">
+      <b id="uploadTitle">上传脚本</b>
+      <button class="btn ghost" data-dlgclose="dlgUpload">关闭</button>
+    </div>
+    <div class="modal-body" id="uploadBody"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="app.js?v=20261021l"></script>
+</body>
+</html>

@@ -1,0 +1,1 @@
+/share/apps/R/R-4.1.2-4/bin/Rscript /share/home/liny/Project/personality/script/cell_number/seurat_cell_numer.R --rds1 /share/home/liny/Project/personality/SY_wangwenbiao_spleen_mouse_20250521/Seurat/7Harmony/merge_rds/merge_data.rds --outdir /share/home/liny/Project/personality/SY_wangwenbiao_spleen_mouse_20250521/Seurat/7Harmony/3.cell_ratio --celltype annot --group group

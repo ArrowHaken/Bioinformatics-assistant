@@ -1,0 +1,533 @@
+{
+  "schema_version": "2.0",
+  "built_at": "2026-10-16T09:10:00",
+  "_readme": [
+    "脚本库的库表。v2：按 gina 2026-11-03 的定义改为三层，不再用 A/B 分类。",
+    "",
+    "L1 可调用库：运行体上能直接调用的东西。自建 skill、公共脚本。",
+    "   关键点：skill 不需要下发给远端，agent 在自己这台机器上直接执行即可。",
+    "   这一层是第一优先 —— 能在这里解决，就不该往远端搬文件。",
+    "L2 环境探测：服务器/工作电脑上实际存在的脚本，靠扫描得到。",
+    "   这一层库里不存实体，只存「探测到过什么、在哪、怎么复核」。",
+    "   与数据同放的那套甲方脚本属于这一层。",
+    "L3 应用自带：随应用分发的脚本，供远端没有时下发。",
+    "   这是「兜底与补丁」层，包含 C_supplement 里的补充脚本。",
+    "",
+    "同一种能力可以在多层同时存在（例如出图：L1 有 skill、L3 有下发副本），",
+    "用 capability 字段串起来。取用时按 L1 → L2 → L3 的顺序，能就地跑就不搬文件。",
+    "",
+    "status 三态不变：ready 可用 / pending_import 位置定了但文件没导入 / draft 口径未定。",
+    "fetchable=true 才允许推到别的电脑上运行。",
+    "",
+    "注意：条目里的 category 是内部选择器（A 数据处理 / B 分析绘图），只给 pick.R 用，",
+    "不是对外的分类。对外只看 layer 三层。两者并存是为了不破坏既有调用。"
+  ],
+  "entries": [
+    {
+      "id": "A-official-E2-D1",
+      "role": "official",
+      "env": "E2_hpc",
+      "demand": "D1_pipeline",
+      "title": "甲方原生脚本（第一套）",
+      "path": "A_code/official/E2_hpc/D1_pipeline",
+      "residency": "with_data",
+      "own_locations": [
+        "D:\\scwork_v4\\scriptlib\\L1_native\\client_scripts",
+        "（对方 HPC 上随数据一同交付的位置，路径以实际为准）"
+      ],
+      "status": "pending_import",
+      "fetchable": true,
+      "requires": {
+        "os": "linux",
+        "memory_gb_min": 32,
+        "packages": [
+          "Seurat",
+          "DoubletFinder",
+          "harmony"
+        ]
+      },
+      "files_known": [
+        "01_packages.R",
+        "soupX_doublefinder.R",
+        "seurat_merge_cluster.R",
+        "analysis.R",
+        "markgene.R",
+        "markgene_celltype.R",
+        "seurat_cell_numer.R",
+        "diff_enrich_volcano_annot_4.1.R",
+        "cluster_profile_enrich.R"
+      ],
+      "files_count_note": "已点名的 9 个已列出。台账口径是总量 15 个，其余文件名等导入时按实际补全，不臆造。",
+      "notes": "与数据同放。判定查询应先在本机找；找不到、但对方环境满足 requires，就从库里取这套推过去跑。 ｜ 2026-11-03 核实：目录 A_code/official/E2_hpc/D1_pipeline 在磁盘上不存在，files_known 里那 9 个只是文件名，没有实体。状态保持 pending_import，不改成 ready —— 没有文件就不许标可用。",
+      "layer": "L2_server",
+      "capability": "pipeline",
+      "category": "A"
+    },
+    {
+      "id": "A-adapted-E1-D1",
+      "role": "adapted",
+      "env": "E1_windows_lowmem",
+      "demand": "D1_pipeline",
+      "title": "低内存适配脚本（第二套）",
+      "path": "A_code/adapted/E1_windows_lowmem/D1_pipeline",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "requires": {
+        "os": "windows",
+        "memory_gb_max": 20,
+        "packages": [
+          "Seurat",
+          "DoubletFinder",
+          "harmony",
+          "jsonlite"
+        ]
+      },
+      "files": [
+        "00_run_all.R",
+        "01_preprocess.R",
+        "02_annotate.R",
+        "03_verify.R",
+        "lib/core_functions.R",
+        "lib/config.R",
+        "lib/evidence_functions.R",
+        "lib/param_sweep_blocked.R",
+        "tests/test_rdist_equiv.R",
+        "pipeline.default.json",
+        "gates.default.json"
+      ],
+      "notes": "内存不足时用这套。核心适配是去双的距离矩阵改分块，等价性已实测（最大绝对差 0、排序一致）。两条声明偏差：分块距离矩阵；ScaleData 只对可变基因。 ｜ 2026-11-03：本套件里的 02_annotate.R 是旧副本（13178 B），表头行号写死 6；注释环节请用 engine/sc-pipeline/scripts/02_annotate.R（14557 B）。两处差异已记入 known_issues。",
+      "known_issues": [
+        {
+          "file": "A_code/adapted/E1_windows_lowmem/D1_pipeline/02_annotate.R",
+          "md5_short": "5f0d3e754806",
+          "bytes": 13178,
+          "issue": "参考表表头行号写死为 6（hdr_idx <- 6）。换一份表头在第 5 行的参考表（如人肾表）就会读错列，解析失败。",
+          "authoritative": "engine/sc-pipeline/scripts/02_annotate.R（14557 B，支持 --reference 与 --lit-dict 两条依据路径，表头自适应）",
+          "action": "本条目内这份仅作为「整套低内存适配包」的组成部分保留，下发注释环节时不要用它，用权威版本。"
+        }
+      ],
+      "layer": "L3_app",
+      "capability": "pipeline",
+      "mirrors": "L1-skill-sc-pipeline",
+      "category": "A"
+    },
+    {
+      "id": "A-fallback",
+      "role": "fallback",
+      "kind": "playbook",
+      "env": "*",
+      "demand": "D1_pipeline",
+      "title": "没有现成脚本时怎么办",
+      "path": "A_code/fallback",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": false,
+      "notes": "库里查不到匹配这套「环境×需求」的脚本时走这里：先做小范围探针定位瓶颈，再决定改现有脚本还是新建。新建出来的脚本必须过六条入库门槛才能进库。这一步才需要 AI。",
+      "layer": "L1_callable",
+      "capability": "playbook",
+      "category": "A"
+    },
+    {
+      "id": "B-reference",
+      "role": "reference",
+      "env": "*",
+      "demand": "D1_annot",
+      "title": "注释依据（参考表 / marker 词典）",
+      "path": "B_analysis/reference",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "notes": "注释这一步必须有外部依据。有 reference 表就用表；没有就现查文献生成 marker 词典。没有依据的注释是猜，不是注释。 ｜ 2026-11-03：补齐文件清单。这四条来源于 sc-lit-dict skill，是「没有参考表时现生成词典」的整条链路，此前只登记了目录没登记文件。注意这条链路从未运行过，所以库里没有任何产出过的词典。",
+      "files": [
+        {
+          "name": "collect.py",
+          "path": "B_analysis/reference/collect.py",
+          "bytes": 21336,
+          "role": "检索文献并收集候选 marker 证据",
+          "md5": "c7985dac8761"
+        },
+        {
+          "name": "assemble.py",
+          "path": "B_analysis/reference/assemble.py",
+          "bytes": 30603,
+          "role": "把检索结果组装成词典 JSON",
+          "md5": "b6c64f06b472"
+        },
+        {
+          "name": "validate.py",
+          "path": "B_analysis/reference/validate.py",
+          "bytes": 13604,
+          "role": "词典自检：marker 是否有文献支撑、基因名是否在物种注释包里",
+          "md5": "c49467a319d6"
+        },
+        {
+          "name": "litdict_common.py",
+          "path": "B_analysis/reference/litdict_common.py",
+          "bytes": 6650,
+          "role": "公共函数",
+          "md5": "e86403c014b7"
+        }
+      ],
+      "layer": "L1_callable",
+      "capability": "annotation_basis",
+      "mirrors": "L1-skill-sc-lit-dict",
+      "category": "B"
+    },
+    {
+      "id": "B-plots",
+      "role": "plots",
+      "env": "*",
+      "demand": "D2_plots",
+      "title": "六套图出图",
+      "path": "B_analysis/plots",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "notes": "质控 / 聚类 / marker / 注释 / 细胞比例 / 组间差异富集。版式与配色全部走配置，脚本里不写死。 ｜ 2026-11-03：同步为引擎版（md5 与 engine/sc-plot-kit/scripts/plot_all_v2.R 一致）。此前库内副本停在 2026-10-21 的版本，不支持 --species，从库里取参数时富集段会静默跳过。 ｜ 2026-11-03：本条目是 sc-plot-kit 在应用内的下发副本（L3）。同一能力在 L1 有 skill 可直接执行；只有远端没有、必须下发时才走这一条。",
+      "files": [
+        {
+          "name": "plot_all_v2.R",
+          "path": "B_analysis/plots/plot_all_v2.R",
+          "bytes": 29619,
+          "role": "主用。七段：qc / cluster / markgene / annot / ratio / diff / enrich",
+          "md5": "df701cd31667"
+        },
+        {
+          "name": "plot_all.R",
+          "path": "B_analysis/plots/plot_all.R",
+          "bytes": 21017,
+          "role": "旧版，已被 v2 取代。保留仅为历史对照，不要下发",
+          "md5": "7d1c86749a4c"
+        }
+      ],
+      "canonical": "B_analysis/plots/plot_all_v2.R",
+      "layer": "L3_app",
+      "capability": "plots",
+      "mirrors": "L1-skill-sc-plot-kit",
+      "category": "B"
+    },
+    {
+      "id": "B-ppt",
+      "role": "ppt",
+      "env": "*",
+      "demand": "D2_ppt",
+      "title": "交付 PPT",
+      "path": "B_analysis/ppt",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "requires": {
+        "python": true
+      },
+      "notes": "按客户那套版式组装成可直接交付的 pptx。需要 Python。 ｜ 2026-11-03：本条目是 sc-ppt-kit 的下发副本（L3）。模板 template.pptx 随应用分发，16 MB。",
+      "files": [
+        {
+          "name": "make_ppt.py",
+          "path": "B_analysis/ppt/make_ppt.py",
+          "bytes": 53624,
+          "role": "PPT 组装，纯标准库，不依赖 python-pptx",
+          "md5": "e2b14e9af4eb"
+        },
+        {
+          "name": "slide_spec.json",
+          "path": "B_analysis/ppt/slide_spec.json",
+          "bytes": 27005,
+          "role": "页序表：逐页写放哪张图、去哪找",
+          "md5": "65d01fd36473"
+        }
+      ],
+      "assets_required": [
+        {
+          "path": "sc-ppt-kit/templates/template.pptx",
+          "bytes": 16777216,
+          "why": "模板 16 MB，走分片下发通道，不能一次 base64 JSON 带完"
+        }
+      ],
+      "layer": "L3_app",
+      "capability": "ppt",
+      "mirrors": "L1-skill-sc-ppt-kit",
+      "category": "B"
+    },
+    {
+      "id": "B-extract",
+      "role": "extract",
+      "env": "*",
+      "demand": "D2_report",
+      "title": "报告关键信息提取",
+      "path": "B_analysis/extract",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "notes": "从结果里提取要写进报告的关键数字与段落，供 PPT 与报告使用。",
+      "files": [
+        {
+          "name": "extract.R",
+          "path": "B_analysis/extract/extract.R",
+          "bytes": 3724,
+          "role": "从结果表里提取要写进报告的指标与段落",
+          "md5": "0497cea128d5"
+        }
+      ],
+      "layer": "L1_callable",
+      "capability": "report_extract",
+      "mirrors": "L1-skill-sc-report-extract",
+      "category": "B"
+    },
+    {
+      "id": "B-env-check",
+      "role": "env_check",
+      "env": "*",
+      "demand": "D0_env",
+      "title": "环境体检（R 版本 / 包 / 路径 / 符号链接 / 内存 / 磁盘）",
+      "path": "B_analysis/env-check",
+      "residency": "library_only",
+      "status": "ready",
+      "fetchable": true,
+      "files": [
+        {
+          "name": "env_check.R",
+          "path": "B_analysis/env-check/env_check.R",
+          "bytes": 16866,
+          "role": "只读体检：输出 status/env_check.json，供 runnable.R 判三档",
+          "md5": "ab0f7e593c37"
+        }
+      ],
+      "notes": "来源于 sc-env-check skill。2026-11-03 入库。必须显式传 --rscript / --rlib / --ld 三个参数并回显，否则会在一个包全装好的服务器上稳定误报「包全缺」—— 实测过两次：第一次用错 R（3.6.0 vs 4.1.2），第二次没设 LD_LIBRARY_PATH。这两种失败与「真的缺包」在输出上长得一模一样。",
+      "layer": "L1_callable",
+      "capability": "env_check",
+      "mirrors": "L1-skill-sc-env-check",
+      "category": "B"
+    },
+    {
+      "id": "L1-skill-sc-pipeline",
+      "layer": "L1_callable",
+      "capability": "pipeline",
+      "kind": "skill",
+      "skill_name": "sc-pipeline",
+      "title": "skill：sc-pipeline",
+      "demand": "D1_pipeline",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-pipeline/scripts/00_run_all.R",
+          "bytes": 4655,
+          "md5": "6ef10c9b04b1"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-pipeline/scripts/01_preprocess.R",
+          "bytes": 17886,
+          "md5": "1d8d5a355f85"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-pipeline/scripts/02_annotate.R",
+          "bytes": 11496,
+          "md5": "c8d7bbb5aab8"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-pipeline/scripts/03_verify.R",
+          "bytes": 28289,
+          "md5": "7cc8304f6ca0"
+        }
+      ],
+      "notes": "本机档单细胞流水线编排：00_run_all → 01_preprocess → 02_annotate → 03_verify ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。"
+    },
+    {
+      "id": "L1-skill-sc-plot-kit",
+      "layer": "L1_callable",
+      "capability": "plots",
+      "kind": "skill",
+      "skill_name": "sc-plot-kit",
+      "title": "skill：sc-plot-kit",
+      "demand": "D2_plots",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-plot-kit/scripts/plot_all_v2.R",
+          "bytes": 21547,
+          "md5": "142bbc883898"
+        }
+      ],
+      "notes": "六套图出图：qc / cluster / markgene / annot / ratio / diff / enrich 七段 ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。"
+    },
+    {
+      "id": "L1-skill-sc-ppt-kit",
+      "layer": "L1_callable",
+      "capability": "ppt",
+      "kind": "skill",
+      "skill_name": "sc-ppt-kit",
+      "title": "skill：sc-ppt-kit",
+      "demand": "D2_ppt",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-ppt-kit/scripts/make_ppt.py",
+          "bytes": 52335,
+          "md5": "afc9c1310657"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-ppt-kit/scripts/slide_spec.json",
+          "bytes": 27021,
+          "md5": "fb76a33ec5c1"
+        },
+        {
+          "path": "/srv/catsco-agent/work/personal-analysis-app/app/engine/sc-ppt-kit/templates/template.pptx",
+          "bytes": 16011749,
+          "md5": "21c55a560f2245ff8b81fbe993f69f19",
+          "role": "PPT 母版（16 MB），--template 必填参数指向它",
+          "rel": "sc-ppt-kit/templates/template.pptx"
+        }
+      ],
+      "notes": "按客户版式组装交付 PPT，纯 Python 标准库，不依赖 python-pptx ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。 ｜ 2026-11-03 补记：模板从来不在 skill 目录里，也不需要在那儿 —— 它在应用侧 sc-ppt-kit/templates/ 下，md5 与客户给的三份完全一致。之前把它当成\"缺失\"是判断错了位置。",
+      "assets_required": [
+        {
+          "name": "template.pptx",
+          "path": "/srv/catsco-agent/work/personal-analysis-app/app/engine/sc-ppt-kit/templates/template.pptx",
+          "bytes": 16011749,
+          "md5": "21c55a560f2245ff8b81fbe993f69f19",
+          "source": "客户交付母版（gina 2026-10-05 首次提供，2026-10-12 再次提供同名 template.pptx）",
+          "verified": "2026-11-03 实测：引擎内这份与附件里三份（10-05 / 10-12 / 10-19）md5 完全一致，均为 21c55a560f2245ff8b81fbe993f69f19",
+          "note": "模板是交付物本身的母版，必须随应用走。skill 目录里没有 templates/ 是正常的 —— 模板不属于 skill 本体，属于应用资源。"
+        }
+      ]
+    },
+    {
+      "id": "L1-skill-sc-report-extract",
+      "layer": "L1_callable",
+      "capability": "report_extract",
+      "kind": "skill",
+      "skill_name": "sc-report-extract",
+      "title": "skill：sc-report-extract",
+      "demand": "D2_report",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-report-extract/scripts/extract.R",
+          "bytes": 3724,
+          "md5": "0497cea128d5"
+        }
+      ],
+      "notes": "从结果表里提取要写进报告的关键指标与段落 ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。"
+    },
+    {
+      "id": "L1-skill-sc-lit-dict",
+      "layer": "L1_callable",
+      "capability": "annotation_basis",
+      "kind": "skill",
+      "skill_name": "sc-lit-dict",
+      "title": "skill：sc-lit-dict",
+      "demand": "D1_annot",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-lit-dict/scripts/collect.py",
+          "bytes": 21336,
+          "md5": "c7985dac8761"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-lit-dict/scripts/assemble.py",
+          "bytes": 30603,
+          "md5": "b6c64f06b472"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-lit-dict/scripts/validate.py",
+          "bytes": 13604,
+          "md5": "c49467a319d6"
+        },
+        {
+          "path": "/srv/catsco-agent/skills/sc-lit-dict/scripts/litdict_common.py",
+          "bytes": 6650,
+          "md5": "e86403c014b7"
+        }
+      ],
+      "notes": "文献驱动生成 marker 词典：collect → assemble → validate ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。"
+    },
+    {
+      "id": "L1-skill-sc-env-check",
+      "layer": "L1_callable",
+      "capability": "env_check",
+      "kind": "skill",
+      "skill_name": "sc-env-check",
+      "title": "skill：sc-env-check",
+      "demand": "D0_env",
+      "env": "*",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime",
+      "invoke": "在运行体上直接执行 skill 里的脚本；不需要下发给远端。",
+      "status": "ready",
+      "fetchable": false,
+      "files": [
+        {
+          "path": "/srv/catsco-agent/skills/sc-env-check/scripts/env_check.R",
+          "bytes": 16866,
+          "md5": "ab0f7e593c37"
+        }
+      ],
+      "notes": "只读环境体检：R 版本 / 包 / 路径 / 符号链接 / 内存 / 磁盘，输出三档判定依据 ｜ 2026-11-03 按三层结构登记。这一层是 agent 自己这台机器上就能跑的，走 skill 调用，不需要把脚本推到服务器。"
+    }
+  ],
+  "env_profiles": {
+    "E1_windows_lowmem": {
+      "title": "小内存 Windows 机",
+      "detect": "内存 < 20 GB 且系统为 Windows",
+      "default_set_A": "A-adapted-E1-D1"
+    },
+    "E2_hpc": {
+      "title": "大内存 Linux / HPC",
+      "detect": "内存 >= 32 GB 且系统为 Linux",
+      "default_set_A": "A-official-E2-D1"
+    },
+    "E3_unknown": {
+      "title": "未知环境",
+      "detect": "以上都不匹配",
+      "default_set_A": null,
+      "note": "先做容量预检 + 小范围探针，再决定取哪套或走兜底。"
+    }
+  },
+  "structure": "three_layers",
+  "layers": {
+    "L1_callable": {
+      "name": "可调用库",
+      "note": "运行体上能直接执行的 skill 与公共脚本。第一优先：能就地跑，就不下发。",
+      "residency": "with_agent",
+      "execute_on": "agent_runtime"
+    },
+    "L2_server": {
+      "name": "环境探测",
+      "note": "服务器或工作电脑上实际存在的脚本，靠扫描与复核得到，库里不存实体。",
+      "residency": "with_data",
+      "execute_on": "remote_host"
+    },
+    "L3_app": {
+      "name": "应用自带",
+      "note": "随应用分发的脚本与补丁，远端缺什么就下发什么。",
+      "residency": "with_app",
+      "execute_on": "remote_host_after_push"
+    }
+  }
+}
