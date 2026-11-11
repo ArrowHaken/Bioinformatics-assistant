@@ -24,6 +24,8 @@
 
   var started = false;
   var timer = null;
+  var inflightKey = null;
+  var inflightCurrent = null;
   var inflight = null;          // 单飞：同一时刻只跑一次投递，避免重复发
   var lastStatus = { pending: 0, due: 0, items: [] };
 
@@ -82,7 +84,8 @@
 
   /* ---------------- 投递 ---------------- */
 
-  function sendViaCompose(inst, text) {
+  function sendViaCompose(inst, text, meta) {
+    if (!stillCurrent(meta)) return Promise.resolve(recordChanged());
     return new Promise(function (resolve) {
       var settled = false;
       var ackTimer = null;
@@ -102,7 +105,7 @@
         });
       } catch (e) {}
       var sent = false;
-      try { sent = inst.proposeCompose({ text: text }); } catch (e) { sent = false; }
+      try { if (!stillCurrent(meta)) { finish(recordChanged()); return; } sent = inst.proposeCompose({ text: text }); } catch (e) { sent = false; }
       if (!sent) {
         finish({ ok: false, via: 'compose', code: 'send_failed', why: '交给平台时没成功。' });
         return;
@@ -115,6 +118,7 @@
   }
 
   function sendViaTask(api, text, meta) {
+    if (!stillCurrent(meta)) return Promise.resolve(recordChanged());
     var payload = { text: String(text || '') };
     if (meta && meta.mode === 'server') payload.mode = 'server';
     var intent = (meta && meta.intent) || 'assistant.connect.v1';
@@ -146,11 +150,13 @@
      它失败且属于"这条路堵了"就立刻转任务通道（要新鲜点击，手动点是有的）；
      两条都不成时，如实按真实原因给码和下一步。 */
   function attemptSend(text, meta) {
+    if (!stillCurrent(meta)) return Promise.resolve(recordChanged());
     var inst = composeInstance();
     var api = taskApi();
 
     if (inst) {
-      return sendViaCompose(inst, text).then(function (r) {
+      return sendViaCompose(inst, text, meta).then(function (r) {
+        if (!stillCurrent(meta)) return recordChanged();
         if (r.ok || !worthSecondTry(r)) return r;
         if (!api) {
           // 注入通道交不出去、任务通道又没连上 —— 这时只说"交给平台时没成功"
@@ -170,8 +176,9 @@
     return new Promise(function (resolve) {
       var t0 = Date.now();
       (function poll() {
+        if (!stillCurrent(meta)) { resolve(recordChanged()); return; }
         var i2 = composeInstance();
-        if (i2) { sendViaCompose(i2, text).then(resolve); return; }
+        if (i2) { sendViaCompose(i2, text, meta).then(resolve); return; }
         var a2 = taskApi();
         if (a2) { sendViaTask(a2, text, meta).then(resolve); return; }
         if (Date.now() - t0 >= SEND_WAIT_MS) {
@@ -225,22 +232,92 @@
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(body || {})
-    }).then(function (r) { return r.json(); });
+    }).then(function (r) {
+      return r.json().then(function (body) {
+        if (!r.ok) {
+          var err = new Error((body && (body.error || body.message || body.code)) || ('HTTP ' + r.status));
+          err.body = body; err.status = r.status;
+          throw err;
+        }
+        return body;
+      });
+    });
   }
 
   function getJSON(p) {
     return fetch(apiUrl(p)).then(function (r) { return r.json(); });
   }
 
+  // Every transport entry goes through this gate, including legacy queue recovery.
+  // Queue payloads are untrusted previews: only the server may recover their full text.
+  function failure(e, stage) {
+    var body = (e && e.body) || e || {};
+    return { ok: false, queued: false, code: body.code || 'instruction_prepare_failed',
+      error: body.error || body.message || '完整任务文件准备失败。',
+      why: body.error || body.why || body.message || '完整任务文件准备失败。',
+      stage: body.stage || stage || 'prepare',
+      http_status: body.http_status || (e && (e.status || e.http_status)) || 0 };
+  }
+
+  function recordChanged() {
+    return {ok:false, code:'record_changing', why:'记录已切换，已停止投递。', stage:'record_guard', queued:false};
+  }
+
+  function stillCurrent(meta) {
+    return !meta || typeof meta.isCurrent !== 'function' || meta.isCurrent();
+  }
+
+  function prepareText(text, meta) {
+    meta = meta || {};
+    var request = { session_id: meta.analysisId || '', req_id: meta.reqId || '',
+      text: meta.itemId ? '' : String(text || ''), purpose: meta.purpose || 'execute' };
+    if (meta.itemId) request.item_id = meta.itemId;
+    return postJSON('api/instruction/prepare', request).then(function (r) {
+      if (!r || !r.ok) return failure(r, 'prepare');
+      var absolute = function (p) { return typeof p === 'string' && p.charAt(0) === '/' && !/[\r\n\0]/.test(p); };
+      var identities = typeof r.session_id === 'string' && !!r.session_id &&
+        typeof r.req_id === 'string' && (request.purpose === 'query' || !!r.req_id);
+      // item_id recovery is authoritative: old req_id is NOT a reason to reject it.
+      if (!absolute(r.path) || !absolute(r.context_path) ||
+          typeof r.message !== 'string' || !r.message.trim() || r.message.length >= 950 ||
+          r.message.indexOf(r.path) < 0 || r.message.indexOf(r.context_path) < 0 ||
+          (r.instruction_id !== undefined && (typeof r.instruction_id !== 'string' || !r.instruction_id.trim())) ||
+          !identities || (!meta.itemId && (r.session_id !== request.session_id || r.req_id !== request.req_id))) {
+        return failure({code:'instruction_prepare_invalid', error:'完整任务文件未通过核验。'}, 'prepare_validate');
+      }
+      return {ok:true, text:r.message, analysisId:r.session_id, reqId:r.req_id, instructionId:r.instruction_id || ''};
+    }).catch(function (e) { return failure(e, 'prepare'); });
+  }
+
+  function prepareAndSend(text, meta) {
+    return prepareText(text, meta).then(function (p) {
+      if (!p.ok) return p;
+      if (!stillCurrent(meta)) return recordChanged();
+      // Keep the routing topic distinct from the analysis record identity.
+      return attemptSend(p.text, Object.assign({}, meta, {analysisId:p.analysisId, reqId:p.reqId}))
+        .then(function (r) { r.preparedText = p.text; r.preparedMeta = Object.assign({}, meta, {analysisId:p.analysisId, reqId:p.reqId, instructionId:p.instructionId}); return r; });
+    });
+  }
+
+  function retryMeta(it) {
+    return {itemId:it.id, session:it.session || '', analysisId:it.analysis_id || it.session_id || '',
+      reqId:it.req_id || '', purpose:it.purpose || 'execute', step:it.step || ''};
+  }
+
   function queueIt(text, meta) {
-    return postJSON('api/inject', {
+    if (!stillCurrent(meta)) return Promise.resolve(recordChanged());
+    var payload = {
       action: 'queue',
       text: String(text || ''),
       session: (meta && meta.session) || '',
+      analysis_id: (meta && meta.analysisId) || '',
+      purpose: (meta && meta.purpose) || 'execute',
       req_id: (meta && meta.reqId) || '',
       step: (meta && meta.step) || '',
       reason: (meta && meta.reason) || ''
-    }).then(function (r) {
+    };
+    if (meta && meta.instructionId) payload.instruction_id = meta.instructionId;
+    return postJSON('api/inject', payload).then(function (r) {
       return { ok: true, id: (r && r.item && r.item.id) || '', retrySecs: (r && r.retry_secs) || 3600 };
     }).catch(function () {
       return { ok: false, id: '', retrySecs: 3600 };
@@ -335,9 +412,20 @@
       return Promise.resolve({ ok: false, code: 'empty_text', why: '正文是空的。' });
     }
     // 单飞：并发调用合并成同一次投递，避免同一条指令发两遍。
-    if (inflight) return inflight;
+    var key = JSON.stringify([body, meta.analysisId || '', meta.reqId || '', meta.session || '', meta.purpose || 'execute', meta.step || '', meta.mode || '', meta.intent || '']);
+    if (inflight) {
+      if (inflightKey === key && stillCurrent(meta) && inflightCurrent === meta.isCurrent) return inflight;
+      return Promise.resolve({ok:false, queued:false, code:'send_in_progress', why:'另一条指令正在投递，请稍后重试。'});
+    }
+    if (!stillCurrent(meta)) return Promise.resolve(recordChanged());
+    inflightKey = key;
+    inflightCurrent = meta.isCurrent;
 
-    inflight = attemptSend(body, meta).then(function (r) {
+    inflight = prepareAndSend(body, meta).then(function (r) {
+      if (!r.preparedText) return r; // prepare failure must never queue the original.
+      if (!stillCurrent(meta)) return recordChanged();
+      meta = r.preparedMeta || meta;
+      body = r.preparedText;
       if (r.ok) {
         // 发出去也要入队：真正的完成判据是"有没有回写"。
         //   不入队的话，宿主收了消息但助手没动，就再没人提醒。
@@ -364,11 +452,11 @@
           };
         });
     }).then(function (out) {
-      inflight = null;
+      inflight = null; inflightKey = null; inflightCurrent = null;
       return out;
     }, function (e) {
-      inflight = null;
-      return { ok: false, code: 'shell_error', why: String((e && e.message) || e) };
+      inflight = null; inflightKey = null; inflightCurrent = null;
+      return failure(e, 'send');
     });
 
     return inflight;
@@ -386,15 +474,13 @@
       if (Number(it.attempts || 0) >= MAX_ATTEMPTS) {
         return reportAttempt(it.id, false, 'max_attempts', '已达重试上限，需要人工处理');
       }
-      return attemptSend(it.text, {
-        session: it.session, reqId: it.req_id, step: it.step
-      }).then(function (res) {
+      return prepareAndSend('', retryMeta(it)).then(function (res) {
         return reportAttempt(it.id, res.ok, res.code, res.why).then(function () {
           refreshStatus();
           return res;
         });
       });
-    }).catch(function () { return null; });
+    }).catch(function (e) { return failure(e, 'retry_due'); });
   }
 
   function refreshStatus() {
@@ -558,17 +644,12 @@
         Array.prototype.forEach.call(list.querySelectorAll('[data-inj-copy]'), function (b) {
           b.onclick = function () {
             b.disabled = true;
-            getJSON('api/inject/item?id=' + encodeURIComponent(b.getAttribute('data-inj-copy')))
-              .then(function (rr) {
-                var txt = (rr && rr.item && rr.item.text) || '';
-                if (!txt) { b.disabled = false; b.textContent = '取不到'; return; }
-                if (navigator.clipboard && navigator.clipboard.writeText) {
-                  return navigator.clipboard.writeText(txt).then(function () {
-                    b.textContent = '已复制'; b.disabled = false;
-                  }, function () { showRaw(txt); b.textContent = '复制'; b.disabled = false; });
-                }
-                showRaw(txt); b.disabled = false; b.textContent = '复制';
-              }).catch(function () { b.disabled = false; b.textContent = '取不到'; });
+            copyOne(b.getAttribute('data-inj-copy')).then(function (res) {
+              b.disabled = false;
+              b.textContent = res.ok ? (res.raw ? '复制短指针' : '已复制') : '复制失败';
+              b.title = res.ok ? '' : [res.code, res.stage, res.http_status, res.why].filter(Boolean).join('：');
+              if (!res.ok) { b.textContent = '复制失败：' + (res.why || res.code); }
+            });
           };
         });
         Array.prototype.forEach.call(list.querySelectorAll('[data-inj-drop]'), function (b) {
@@ -662,16 +743,36 @@
     });
   }
 
+  // Copy is a transport boundary too: never trust the queue's legacy preview.
+  function copyOne(id, meta) {
+    meta = Object.assign({}, meta, {itemId:id});
+    return prepareText('', meta).then(function (p) {
+      if (!p.ok) return p;
+      if (!stillCurrent(meta)) return recordChanged();
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(p.text).then(function () {
+          return {ok:true};
+        }, function () {
+          if (!stillCurrent(meta)) return recordChanged();
+          showRaw(p.text); return {ok:true, raw:true};
+        });
+      }
+      if (!stillCurrent(meta)) return recordChanged();
+      showRaw(p.text); return {ok:true, raw:true};
+    }).catch(function (e) { return failure(e, 'copy'); });
+  }
+
   /* 手动补发一条：先取全文，再走同一条投递链，最后如实记结果。 */
   function retryOne(id) {
     return getJSON('api/inject/item?id=' + encodeURIComponent(id)).then(function (r) {
       var it = (r && r.item) || null;
-      if (!it || !it.text) return { ok: false, code: 'empty_item' };
-      return attemptSend(it.text, { session: it.session, reqId: it.req_id, step: it.step })
+      if (!it) return { ok: false, code: 'empty_item' };
+      it.id = id;
+      return prepareAndSend('', retryMeta(it))
         .then(function (res) {
           return reportAttempt(id, res.ok, res.code, res.why).then(function () { return res; });
         });
-    }).catch(function () { return { ok: false, code: 'fetch_failed' }; });
+    }).catch(function (e) { return failure(e, 'retry_item'); });
   }
 
   /* 内部错误码 → 人话。

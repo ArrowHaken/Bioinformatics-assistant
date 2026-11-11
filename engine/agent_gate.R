@@ -157,25 +157,41 @@ agent_handoff_file <- function(app_dir, owner_key) {
   file.path(app_dir, "state", "agent_handoffs", paste0(agent_sha256(owner_key), ".json"))
 }
 
-# Return only the non-secret path. An agent can reuse, never mint authorization.
-agent_handoff_ensure <- function(app_dir, owner) {
+# Resolve existing authorization only: never issue, renew or mutate credentials.
+agent_handoff_existing <- function(app_dir, owner) {
   key <- owner$key %||% NA_character_
-  if (length(key) != 1L || is.na(key) || !grepl("^(viewer|topic):.+$", key))
+  if (!is.character(key) || length(key) != 1L || is.na(key) ||
+      !grepl("^(viewer|topic):.+$", key))
     return(list(ok = FALSE, code = "human_identity_required"))
   hf <- agent_handoff_file(app_dir, key)
+  # Do not follow a substituted handoff file/directory outside the private store.
+  links <- Sys.readlink(c(dirname(hf), hf))
+  if (any(!is.na(links) & nzchar(links)) || !file.exists(hf))
+    return(list(ok = FALSE, code = "handoff_unavailable"))
   ho <- tryCatch(jsonlite::fromJSON(hf), error = function(e) NULL)
-  valid <- if (is.list(ho)) agent_token_check(app_dir, ho$token) else list(ok = FALSE)
+  scalar <- function(x) is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+  if (!is.list(ho) || !scalar(ho$token) || !scalar(ho$owner_key) || !scalar(ho$token_id))
+    return(list(ok = FALSE, code = "handoff_unavailable"))
+  valid <- agent_token_check(app_dir, ho$token)
   if (isTRUE(valid$ok) && identical(valid$owner_key, key) &&
-      identical(as.character(ho$owner_key), key) &&
+      identical(ho$owner_key, key) && identical(ho$token_id, valid$token_id) &&
       (agent_human_owner(owner) ||
        (identical(owner$kind, "agent") &&
         identical(as.character(owner$external_id %||% ""), valid$token_id))))
     return(list(ok = TRUE, path = normalizePath(hf, mustWork = TRUE)))
+  list(ok = FALSE, code = "handoff_unavailable")
+}
+
+# Human commit may authorize; agents can only reuse their own existing identity.
+agent_handoff_ensure <- function(app_dir, owner) {
+  existing <- agent_handoff_existing(app_dir, owner)
+  if (isTRUE(existing$ok)) return(existing)
+  key <- owner$key %||% NA_character_
   if (!agent_human_owner(owner))
     return(list(ok = FALSE, code = "human_identity_required"))
   issued <- agent_token_issue(app_dir, key, note = "保存并识别：体检回写授权")
   if (!isTRUE(issued$ok)) return(list(ok = FALSE, code = issued$code))
-  list(ok = TRUE, path = normalizePath(hf, mustWork = TRUE))
+  agent_handoff_existing(app_dir, owner)
 }
 
 # ---- 验牌 -----------------------------------------------------------

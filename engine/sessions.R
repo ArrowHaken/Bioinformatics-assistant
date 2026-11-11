@@ -283,7 +283,11 @@ sess_get_identify <- function(app_dir, id = NULL) {
 #     would make switching records look like "the request came back".
 sess_set_pending <- function(app_dir, id, req_id) {
   if (is.null(id) || !nzchar(as.character(id))) return(list(ok = FALSE))
+  attempt_migrate(app_dir, id)
+  if (!is.null(req_id) && !attempt_register(app_dir, id, as.character(req_id)))
+    return(list(ok = FALSE, error = "attempt registration failed"))
   prof <- sess_profile(app_dir, id)
+  if (!is.null(req_id)) sess_write_json(file.path(sess_dir(app_dir,id), "attempt-head.json"), list(req_id=as.character(req_id)))
   prof$pending_req <- if (is.null(req_id)) NULL else as.character(req_id)
   prof$pending_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
   sess_profile_write(app_dir, id, prof)
@@ -387,3 +391,8 @@ sess_archive_restore <- function(app_dir, id, archive_id) {
   if (!is.null(prof)) sess_profile_write(app_dir, id, prof)
   list(ok = TRUE, restored = archive_id, kept = before$archive$id, session = r$session)
 }
+
+# Keep attempt facts outside profile snapshots and archive restore.
+source(file.path(dirname(sys.frame(1)$ofile %||% 'engine/sessions.R'), 'attempts.R'), local = FALSE)
+
+source(file.path(dirname(sys.frame(1)$ofile %||% "engine/sessions.R"), "instruction_handoff.R"), local = FALSE)

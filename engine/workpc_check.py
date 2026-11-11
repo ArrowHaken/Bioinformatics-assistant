@@ -48,6 +48,57 @@ import time
 import shlex
 import socket
 import subprocess
+import ast
+import pathlib
+import re
+import hashlib
+
+
+def connector_target(path):
+    """Read only literal target fields from the already installed connector."""
+    tree = ast.parse(pathlib.Path(path).read_text(encoding="utf-8-sig"))
+    calls = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "connect"]
+    if len(calls) != 1:
+        raise ValueError("connector_target_unverifiable")
+    node = calls[0]
+    keys = {kw.arg: kw.value for kw in node.keywords}
+    if len(node.args) != 1 or not all(k in keys for k in ("port", "username", "password")):
+        raise ValueError("connector_target_unverifiable")
+    values = [node.args[0], keys["port"], keys["username"]]
+    if not all(isinstance(v, ast.Constant) for v in values):
+        raise ValueError("connector_target_unverifiable")
+    return tuple(v.value for v in values)
+
+
+class LegacyConnector:
+    """Run an existing one-shot connector without reading or exporting its secret."""
+    def __init__(self, path, expected_sha256):
+        self.path = str(pathlib.Path(path).resolve(strict=True))
+        self.expected_sha256 = expected_sha256
+
+    def check_digest(self):
+        if hashlib.sha256(pathlib.Path(self.path).read_bytes()).hexdigest() != self.expected_sha256:
+            raise ValueError("connector_changed")
+
+    def run(self, cmd, timeout=300):
+        self.check_digest()
+        try:
+            completed = subprocess.run([sys.executable, self.path, "cmd"], input=cmd,
+                                       text=True, capture_output=True, timeout=timeout + 45,
+                                       encoding="utf-8", errors="replace")
+        except (OSError, subprocess.TimeoutExpired):
+            raise RuntimeError("legacy_connector_execution_failed") from None
+        match = re.search(r"(?:^|\n)\[EXIT\] (\d+)\s*$", completed.stdout)
+        if completed.returncode != 0 or not match or completed.stderr.strip():
+            raise RuntimeError("legacy_connector_execution_failed")
+        output = completed.stdout[:match.start()]
+        out, separator, err = output.partition("\n[STDERR]\n")
+        return int(match.group(1)), out, err if separator else ""
+
+    def close(self):
+        pass
 
 # 每个脚本干什么。表里没有的按内容判，并在输出里标明是判出来的。
 ROLE_BY_NAME = {
@@ -81,6 +132,8 @@ def sh(client, cmd, timeout=300):
                                 text=True, encoding="utf-8", errors="replace",
                                 timeout=timeout)
         return result.returncode, result.stdout, result.stderr
+    if isinstance(client, LegacyConnector):
+        return client.run(cmd, timeout)
     _, stdout, stderr = client.exec_command(cmd, timeout=timeout)
     out = stdout.read().decode("utf-8", "replace")
     err = stderr.read().decode("utf-8", "replace")
@@ -130,6 +183,9 @@ def write_notebook(path, result):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--transport", choices=("ssh", "local"), default="ssh")
+    ap.add_argument("--legacy-connector", default="")
+    ap.add_argument("--expected-device", default="")
+    ap.add_argument("--connector-sha256", default="")
     ap.add_argument("--notebook-out", default="")
     ap.add_argument("--host", required=True)
     ap.add_argument("--port", type=int, default=22)
@@ -146,6 +202,12 @@ def main():
     a = ap.parse_args()
     if a.transport == "ssh" and not a.user:
         ap.error("--user is required for ssh transport")
+    if a.transport == "local" and a.legacy_connector:
+        ap.error("--legacy-connector requires ssh transport")
+    if a.legacy_connector and not a.expected_device:
+        ap.error("--expected-device is required with --legacy-connector")
+    if a.legacy_connector and not re.fullmatch(r"[0-9a-f]{64}", a.connector_sha256):
+        ap.error("--connector-sha256 is required with --legacy-connector")
     checked_from = socket.gethostname()
     checked_via = ("local 本机执行（%s）" if a.transport == "local"
                    else "工作电脑 %s 经 SSH 执行") % checked_from
@@ -178,22 +240,48 @@ def main():
                  "拒绝本机体检：当前 hostname=%s，与 --host=%s 不匹配。"
                  % (checked_from, a.host))
     else:
-        pwd = os.environ.get("SC_REMOTE_PWD", "")
-        if not pwd:
-            fail(4, "credentials_missing", "当前执行环境没有可用凭据；未进入 SSH，未完成体检。")
+        if a.legacy_connector:
+            if checked_from.casefold() != a.expected_device.casefold():
+                fail(4, "connector_device_mismatch", "当前执行设备与本次授权连接设备不符；未进入 SSH。")
+            try:
+                client = LegacyConnector(a.legacy_connector, a.connector_sha256)
+                client.check_digest()
+                target = connector_target(a.legacy_connector)
+            except (OSError, SyntaxError, ValueError):
+                fail(4, "connector_unverifiable", "既有连接程序的目标无法核验；未进入 SSH。")
+            if target != (a.host, a.port, a.user):
+                fail(4, "connector_target_mismatch", "既有连接程序的主机、端口或账号与本次目标不符；未进入 SSH。")
+        else:
+            pwd = os.environ.get("SC_REMOTE_PWD", "")
+            if not pwd:
+                fail(4, "credentials_missing", "当前执行环境没有可用凭据；未进入 SSH，未完成体检。")
+            try:
+                import paramiko
+            except ImportError:
+                fail(3, "paramiko_missing", "paramiko 没装。先装： python3 -m pip install paramiko")
+            client = paramiko.SSHClient()
+            client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            try:
+                client.connect(a.host, port=a.port, username=a.user, password=pwd,
+                               timeout=15, banner_timeout=30, auth_timeout=30,
+                               look_for_keys=False, allow_agent=False)
+            except paramiko.AuthenticationException:
+                client.close()
+                fail(5, "ssh_authentication_failed", "已提交密码认证但服务器拒绝；未完成体检。认证方式=password；异常类型=AuthenticationException。")
+            except paramiko.BadHostKeyException:
+                client.close()
+                fail(5, "ssh_host_key_mismatch", "服务器主机密钥不匹配；未完成体检。认证方式=password；异常类型=BadHostKeyException。")
+            except Exception as exc:
+                client.close()
+                fail(5, "ssh_connect_failed", "SSH 连接未完成；未判定密码无效。认证方式=password；异常类型=%s。" % type(exc).__name__)
+
+    def checked_sh(command, timeout=300):
         try:
-            import paramiko
-        except ImportError:
-            fail(3, "paramiko_missing", "paramiko 没装。先装： python3 -m pip install paramiko")
-        client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        try:
-            client.connect(a.host, port=a.port, username=a.user, password=pwd,
-                           timeout=15, banner_timeout=30, auth_timeout=30,
-                           look_for_keys=False, allow_agent=False)
-        except Exception:
-            client.close()
-            fail(5, "ssh_connect_failed", "SSH 连接或认证失败；未完成体检。")
+            return sh(client, command, timeout)
+        except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
+            if client is not None:
+                client.close()
+            fail(5, "connector_execution_failed", "连接程序执行失败或文件已变化；未完成体检，未判定密码无效。")
 
     items = []
 
@@ -202,10 +290,12 @@ def main():
                       "detail": detail, "value": value})
 
     # ---- 节点身份 / 内存 / CPU：一次往返取全 ----
-    rc, out, _ = sh(client, "hostname; nproc; "
+    rc, out, _ = checked_sh("hostname; nproc; "
                             "awk '/MemTotal/{print $2}' /proc/meminfo; "
                             "awk '/MemAvailable/{print $2}' /proc/meminfo")
     lines = [l.strip() for l in out.splitlines() if l.strip()]
+    if rc != 0 or len(lines) != 4 or not lines[0] or not all(x.isdigit() for x in lines[1:]):
+        fail(5, "identity_probe_failed", "服务器身份与资源探针未返回完整有效结果；未完成体检。")
     node = lines[0] if lines else ""
     cores = int(lines[1]) if len(lines) > 1 and lines[1].isdigit() else None
     mem_kb = int(lines[2]) if len(lines) > 2 and lines[2].isdigit() else None
@@ -226,7 +316,7 @@ def main():
         add("cpu", "CPU", "warn", "读不到 nproc")
 
     # ---- 磁盘 ----
-    rc, out, _ = sh(client, "df -Pk /share 2>/dev/null | tail -1")
+    rc, out, _ = checked_sh("df -Pk /share 2>/dev/null | tail -1")
     f = out.split()
     if len(f) >= 4 and f[3].isdigit():
         avail = round(float(f[3]) / 1024.0 / 1024.0, 1)
@@ -238,7 +328,7 @@ def main():
         add("disk", "/share 剩余", "warn", "df 读不到 /share")
 
     # ---- R 本体 ----
-    rc, out, err = sh(client, "%s --version" % shlex.quote(a.rscript))
+    rc, out, err = checked_sh("%s --version" % shlex.quote(a.rscript))
     rver = (out or err).strip().splitlines()[0] if (out or err).strip() else ""
     if rc == 0 and rver:
         add("r_version", "R 版本", "ok", rver, rver)
@@ -259,7 +349,7 @@ def main():
         "v<-tryCatch(as.character(packageVersion(x)),error=function(e)\"-\");"
         "cat(\"PKG\\t\",x,\"\\t\",v,\"\\t\",r,\"\\n\",sep=\"\")}"
     )
-    rc, out, _ = sh(client, env_bits + "%s --vanilla -e %s 2>&1 | grep '^PKG'"
+    rc, out, _ = checked_sh(env_bits + "%s --vanilla -e %s 2>&1 | grep '^PKG'"
                     % (shlex.quote(a.rscript), shlex.quote(r_expr)), timeout=900)
     pkg_ok = 0
     for line in out.splitlines():
@@ -281,7 +371,7 @@ def main():
 
     # ---- 数据目录：逐个符号链接解到目标，并确认是三件套 ----
     samples = {"count": 0, "names": [], "matrix_files_each": 0, "storage": [], "note": ""}
-    rc, out, _ = sh(client, "ls -1 -- %s 2>/dev/null" % shlex.quote(a.data_root))
+    rc, out, _ = checked_sh("ls -1 -- %s 2>/dev/null" % shlex.quote(a.data_root))
     entries = [l.strip() for l in out.splitlines() if l.strip()]
     samples["names"] = entries
     samples["count"] = len(entries)
@@ -292,7 +382,7 @@ def main():
                "n=$(ls -1 \"$t\" 2>/dev/null | wc -l); "
                "ok=$(test -f \"$t/barcodes.tsv.gz\" -o -f \"$t/barcodes.tsv\" && echo Y || echo N); "
                "echo \"$b|$t|$n|$ok\"; done") % shlex.quote(a.data_root)
-        rc2, out2, _ = sh(client, cmd)
+        rc2, out2, _ = checked_sh(cmd)
         resolved = trio = 0
         counts = []
         storages = []
@@ -331,17 +421,17 @@ def main():
     sdir = a.script_dir
     asked_dir = sdir
     descended = False
-    rc, out, _ = sh(client, "ls -1 -- %s 2>/dev/null" % shlex.quote(sdir))
+    rc, out, _ = checked_sh("ls -1 -- %s 2>/dev/null" % shlex.quote(sdir))
     files = sorted([l.strip() for l in out.splitlines() if l.strip()])
     if files and not any(f.lower().endswith((".r", ".sh")) for f in files):
         cand = ""
         for nm in ("script", "scripts"):
-            rc2, o2, _ = sh(client, "test -d %s && echo Y || echo N" % shlex.quote(sdir + "/" + nm))
+            rc2, o2, _ = checked_sh("test -d %s && echo Y || echo N" % shlex.quote(sdir + "/" + nm))
             if o2.strip() == "Y":
                 cand = nm
                 break
         if not cand:
-            rc2, o2, _ = sh(client, "for x in %s/*; do [ -d \"$x\" ] "
+            rc2, o2, _ = checked_sh("for x in %s/*; do [ -d \"$x\" ] "
                                      "&& basename \"$x\"; done" % shlex.quote(sdir))
             subs = [l.strip() for l in o2.splitlines() if l.strip()]
             if len(subs) == 1:
@@ -349,7 +439,7 @@ def main():
         if cand:
             sdir = sdir.rstrip("/") + "/" + cand
             descended = True
-            rc, out, _ = sh(client, "ls -1 -- %s 2>/dev/null" % shlex.quote(sdir))
+            rc, out, _ = checked_sh("ls -1 -- %s 2>/dev/null" % shlex.quote(sdir))
             files = sorted([l.strip() for l in out.splitlines() if l.strip()])
     script_items = []
     if not files:
@@ -364,7 +454,7 @@ def main():
         #   对下游毫无用处，还让人以为脚本目录没问题。
         #   现在只要这一层没有一个实体文件或符号链接，就如实报 fail，
         #   不再把目录名当脚本。
-        rc, out2, _ = sh(client, "cd %s && for x in %s; do "
+        rc, out2, _ = checked_sh("cd %s && for x in %s; do "
                                  "if [ -L \"$x\" ]; then echo \"L $x\"; "
                                  "elif [ -d \"$x\" ]; then echo \"D $x\"; "
                                  "else echo \"F $x\"; fi; done"
@@ -387,7 +477,7 @@ def main():
                       if l.startswith(("F ", "L "))]:
                 role = ROLE_BY_NAME.get(f, "")
                 if not role:
-                    rc, out3, _ = sh(client, "head -80 -- %s 2>/dev/null" % shlex.quote(sdir + "/" + f))
+                    rc, out3, _ = checked_sh("head -80 -- %s 2>/dev/null" % shlex.quote(sdir + "/" + f))
                     guess = [tag for key, tag in
                              (("DoubletFinder", "DoubletFinder"), ("SoupX", "SoupX"),
                               ("RunHarmony", "harmony"), ("FindAllMarkers", "FindAllMarkers"),
@@ -397,7 +487,7 @@ def main():
                 script_items.append({"file": f, "role": role})
 
     # ---- 结果目录可写 ----
-    rc, out, _ = sh(client, "d=%s; mkdir -p \"$d\" 2>/dev/null; t=\"$d/.probe_$$\"; "
+    rc, out, _ = checked_sh("d=%s; mkdir -p \"$d\" 2>/dev/null; t=\"$d/.probe_$$\"; "
                             "if echo ok > \"$t\" 2>/dev/null; then rm -f \"$t\"; echo WRITABLE; "
                             "else echo NOTWRITABLE; fi; test -d \"$d\" && echo EXISTS" % shlex.quote(a.work_root))
     if "WRITABLE" in out.splitlines():
@@ -409,7 +499,7 @@ def main():
 
     # ---- 队列 ----
     extra = []
-    rc, out, err = sh(client, "which qsub qstat 2>/dev/null; qstat -f 2>&1 | head -3; "
+    rc, out, err = checked_sh("which qsub qstat 2>/dev/null; qstat -f 2>&1 | head -3; "
                               "qconf -sql 2>/dev/null | head -5")
     text = out + err
     if "qsub" in text or "qstat" in text:
@@ -419,7 +509,7 @@ def main():
         if qs:
             extra.append("队列 %s 可用（%s）" % (a.queue, " ".join(qs[0].split())))
     if a.node:
-        rc, out, _ = sh(client, "hostname -s")
+        rc, out, _ = checked_sh("hostname -s")
         if out.strip() == a.node.split("=")[-1]:
             extra.append("当前登录节点即约束节点 %s" % a.node.split("=")[-1])
     extra.append("脚本清单逐个复核：%s 下实体文件与符号链接已分别计数" % sdir.rsplit("/", 1)[-1])

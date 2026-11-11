@@ -1358,8 +1358,8 @@ async function uploadRefFile(f) {
     if (!r || !r.ok) { say('上传失败：' + ((r && r.error) || '未知')); return; }
     if (!S.sessionId) {
       // Library upload does not create a record or pick an unrelated history item.
-      S.pendingRef = { id: r.item.id, name: f.name };
-      say('已上传，待保存并识别创建记录后选用');
+      S.pendingRef = Object.assign({}, r.item, { id: r.item.id, name: f.name, bytes: f.size });
+      renderPlace();
       return;
     }
     const c = await recordAwait(postJSON('/api/reference/choose', {
@@ -2399,10 +2399,10 @@ async function askAboutArtifact(rel, question, msgEl) {
   const text = L.join('\n');
   if (msgEl) msgEl.textContent = '正在发进会话…';
   try {
-    const r = await recordAwait(injectToSession(text, function () {}), __recordScope);
+    const r = await recordAwait(injectToSession(text, function () {}, 'query'), __recordScope);
     if (msgEl) {
       msgEl.textContent = r.ok ? '已发进会话，等它回答。'
-        : ('没发出去：' + (r.why || r.code || '原因不明') + '（已转存队列）');
+        : ('没发出去：' + (r.why || r.code || '原因不明') + (r.queued ? '（已转存队列）' : '（未发送、未入队）'));
     }
     if (r.ok) toast('已发进会话。', 'good');
   } catch (e) {
@@ -5116,8 +5116,8 @@ async function sendL1Probe(key) {
   const text = L.join('\n');
   if (msg) msg.textContent = '正在发进会话…';
   try {
-    const r = await recordAwait(injectToSession(text, function () {}), __recordScope);
-    if (msg) msg.textContent = r.ok ? '已发进会话，等它回报。' : ('没发出去：' + (r.why || r.code || '原因不明') + '（已转存队列）');
+    const r = await recordAwait(injectToSession(text, function () {}, 'query'), __recordScope);
+    if (msg) msg.textContent = r.ok ? '已发进会话，等它回报。' : ('没发出去：' + (r.why || r.code || '原因不明') + (r.queued ? '（已转存队列）' : '（未发送、未入队）'));
     if (r.ok) {
       const old = document.getElementById('stSheet');
       if (old && old.parentNode) old.parentNode.removeChild(old);
@@ -5418,6 +5418,14 @@ function renderPlace() {
         + '<button class="btn btn-sm" data-reflit-go="1">保存存档号</button>'
         + '<span class="small" id="refLitMsg"></span></div>';
     }
+    // 上传入库但尚未创建记录：保留文件信息，不冒充已经选用。
+    if (S.pendingRef) {
+      h += '<div class="rz" data-ref-pending="1" style="margin-top:10px"><span class="mk">↑</span><span>'
+        + '已上传：<b>' + esc(S.pendingRef.name || S.pendingRef.id) + '</b>'
+        + '　' + fmtBytes(S.pendingRef.bytes)
+        + '<br><b>待绑定</b>：保存并识别创建本次记录后选用'
+        + '</span></div>';
+    }
     // 本次已经选定的那一份：常驻显示，不用去别处找它在哪。
     if (refCur) {
       h += '<div class="rz ok" style="margin-top:10px"><span class="mk">✓</span><span>'
@@ -5663,16 +5671,8 @@ async function autoInjectIdentify() {
     '在这台服务器上跑一次环境体检和脚本库识别：'
     + '看内存和磁盘够不够、R 包齐不齐、数据目录与脚本目录在不在，'
     + '再把服务器上已有的分析脚本列出来。'
-    + '同时把这个项目可用的【注释依据表】一并列出来：'
-    + '找 Supplementary Table、marker 表、celltype marker 表、参考依据表，'
-    + '扩展名 xlsx/xls/tsv/csv/json；范围不只看 reference 目录，'
-    + '几个数据与脚本根目录往下 6 层都要看；名字里带 marker / celltype / annot / '
-    + 'markgene / dict / 参考 / 依据 的都算。每份记绝对路径、文件名、字节数、修改时间，'
-    + '再看表头判物种与组织，判不出来的留空不要猜。'
-    + '列完把清单回写 POST /api/reference/scan。'
-    + '结果写回应用，让「识别结论」这一栏能显示出服务器那侧的真实情况。'
-    + '注释依据不再在页面上铺开：它只出现在点「注释」运行按钮时弹出的那张卡里，'
-    + '卡上的「服务器已有」一页会直接列出这些表供选用。');
+    + '注释依据严格按下文用户所选来源处理，已上传时不扫描服务器寻找其他表。'
+    + '结果写回应用，让「识别结论」这一栏显示真实执行结果；连接失败与回写鉴权失败分别说明，不得互相替代。');
 
   S.autoInjectBusy = true;
   S.autoInjectAt = Date.now();
@@ -7253,55 +7253,8 @@ function hostBridge() {
   return { api: h, connected: taskHostHandshakeAt > 0 };
 }
 
-// 任务通道送一次。用户激活只有 2 秒有效期，所以这个函数要贴着点击调用。
-function submitAsTask(api, text) {
-  const record = recordContext();
-  // 任务通道的载荷有长度上限（manifest 里 input_schema.text.maxLength = 1000）。
-  //   以前是「先切 950 再接一句队列说明」，接上的那句把总长顶到 1000 以上，
-  //   平台判 invalid_payload —— 于是整条被拒，两条通道全废，指令只能落队列。
-  //   现在先算好说明文字，剩下的额度再留给正文；总长硬顶在 950 以内。
-  const LIMIT = 950;
-  const full = String(text || '');
-  const prep = full.length > LIMIT
-    ? saveOutbox(full).then(function (o) {
-        const note = '\n（全文已存队列 id=' + ((o && o.id) || '未知') + '，可从 /api/outbox 取）';
-        const body = full.slice(0, Math.max(0, LIMIT - note.length));
-        return body + note;
-      })
-    : Promise.resolve(full);
 
-  return prep.then(function (payloadText) {
-    if (!recordCurrent(record) || sessionChanging) return { ok:false, code:"record_changed" };
-    let payload;
-    try {
-      payload = { text: payloadText };
-      const mode = (S.placeDraft && S.placeDraft.mode) || 'server';
-      if (mode === 'server') payload.mode = 'server';
-    } catch (e) { payload = { text: payloadText }; }
-    return api.requestTask('assistant.connect.v1', payload).then(function (t) {
-      return { ok: true, via: 'task', code: 'accepted', task: t || null };
-    });
-  }).catch(function (e) {
-    const code = (e && e.code) || 'task_failed';
-    const why = code === 'user_activation_required'
-      ? '任务通道要新鲜点击，再点一次。'
-      : (code === 'host_not_connected'
-        ? '任务通道还没连上。'
-        : ('平台任务通道没收下：' + ((e && e.message) || '未知原因')));
-    return { ok: false, via: 'task', code: code, why: why };
-  });
-}
 
-/* 两条各有脾气的通道，谁通走谁：
-     ① 平台任务通道（window.catscoArtifactHost.requestTask）
-        —— 平台给「页面点一下 → 变成一次真实会话」的正规入口。
-        它不等宿主先开口，页面报到之后可以自己问「连上没有」；
-        代价是用户激活只有 2 秒，必须贴着这次点击调用。
-     ② compose 通道（window.CatsCoAnnotations）
-        —— 老路，要等宿主先发握手。宿主不发，本机改不动；
-        而且回执可能永远不来，所以必须自带超时。
-   两条都不通时不留死路：指令存进本机待发送队列，页面照常可用，
-   人可以一键复制，也可以让我下次直接从队列里取。 */
 function saveOutbox(text) {
   // 带上会话号：队列里的指令也是"从某个会话点出来的"，
   //   取出来重发时要能回到同一个会话，否则又变成不知道送去哪儿。
@@ -7342,36 +7295,39 @@ function composeSend(inst, text, finish) {
    判据和外壳不一致（任务通道 isConnected() 恒为真那次，就把本来能用的
    注入通道整个绕过去了）；而且送失败之后只剩"请自己复制"。
    调用点不用改：签名与返回结构保持原样。 */
-function injectToSession(text, onState) {
+async function injectToSession(text, onState, purpose) {
   const record = recordContext();
   if (sessionChanging) return Promise.resolve({ok:false,code:"record_changing"});
-  const shell = window.AppShell;
-  if (!shell || typeof shell.inject !== 'function') {
-    // 外壳没加载成功时不假装能发：如实报，并交给本机队列兜底。
-    return saveOutbox(text).then(function (o) {
-      return { ok: false, code: 'shell_missing', queued: !!(o && o.ok),
-        why: '注入外壳没加载，指令已存本机队列。' };
-    });
-  }
-  if (onState) onState('sending');
-  return shell.inject(text, {
-    session: S.topicId || '',
-    reqId: S.commitReq || '',
+  text = String(text || '');
+  // AppShell owns the single prepare/validate gate for initial sends and retries.
+  const meta = {
+    analysisId: S.sessionId || '', purpose: purpose || 'execute',
+    session: S.topicId || '', reqId: S.commitReq || '',
     step: (S.delegated && S.delegated.step) || '',
     mode: (S.placeDraft && S.placeDraft.mode) || 'server',
-    intent: 'assistant.connect.v1'
-  }).then(function (r) {
-    if (onState && recordCurrent(record)) onState(r && r.ok ? 'connected' : 'waiting');
+    intent: 'assistant.connect.v1',
+    isCurrent: () => !sessionChanging && recordCurrent(record) &&
+      meta.analysisId === (S.sessionId || '') && meta.reqId === (S.commitReq || '')
+  };
+  const shell = window.AppShell;
+  if (!shell || typeof shell.inject !== 'function') {
+    if (onState && recordCurrent(record)) onState('failed');
+    return {ok:false, code:'shell_missing', stage:'prepare', queued:false,
+      why:'注入外壳未加载，无法核验完整任务；未发送、未入队。'};
+  }
+  if (onState) onState('sending');
+  return shell.inject(text, meta).then(function (r) {
+    if (onState && recordCurrent(record)) onState(r && r.ok ? 'connected' : (r && r.stage ? 'failed' : 'waiting'));
     // ok=true 只代表"交给宿主了"，真正做成要看回写 —— 外壳会盯着这一条。
     if (r && r.ok) return { ok: true, via: r.via || 'shell', code: r.code || 'accepted' };
-    return {
+    return Object.assign({}, r || {}, {
       ok: false,
       via: (r && r.via) || 'shell',
       code: (r && r.code) || 'not_connected',
       queued: !!(r && r.queued),
       id: (r && r.queueId) || '',
-      why: (r && r.why) || '两条通道都没连上。'
-    };
+      why: (r && (r.why || r.error)) || '两条通道都没连上。'
+    });
   });
 }
 
@@ -7386,7 +7342,6 @@ function injectToSession(text, onState) {
    ===================================================================== */
 function buildInstructionText(ask) {
   const d = S.placeDraft || placeDraftFromServer();
-  const MAX = 2000;
   const L = [];
 
   L.push('【来自 个性化分析助手】');
@@ -7427,8 +7382,17 @@ function buildInstructionText(ask) {
     //   取哪些项、怎么判、输出什么形状都定好了，照着跑就是一次 SSH 取全。
     //   所以这里明确写清：用哪个脚本、哪些参数、不要先做别的探测。
     L.push('怎么做（照这个来，不要自己另写探路的步骤）：');
-    L.push('1. 凭据配置绝对位置未提供；config/server_profile.json 仅是应用内相对位置，不代表执行电脑路径。'
-      + '具备云端本地读取权限时，从应用运行目录读取该配置；工作电脑仅沿用本次合法凭据渠道。不编造路径、不沿用旧临时口令文件、不传口令、不向用户索要配置路径。');
+    L.push('1. 连接仅限本次授权的执行设备、host、user、port；优先复用已核验的合法连接配置或凭据提供者，先核对其目标与授权范围。'
+      + '不因文件年龄或临时文件身份判定凭据失效；过期、撤销或目标不匹配时不得使用。不得跨账号或扫描任意脚本搜取秘密。'
+      + 'config/server_profile.json 仅是应用内相对位置，不代表执行电脑路径；具备应用本机读取权限时才从应用运行目录读取，不编造路径、不向用户索要配置路径。'
+      + '不在对话、命令参数或日志输出密码；不绕过权限或主机身份校验。'
+      + '非交互任务中，未提交密码的默认密钥失败不能判定账号或密码不可用。若工具仅允许默认密钥或无交互且无法提供密码，'
+      + '记录 actual_auth_method（实际认证方式）和 authentication_not_supplied（未提供所需认证），不得记为 password_invalid；不得盲重试。');
+    if (d.exec_pc === 'PC-20250808YJEP' && d.host === '10.1.1.2' && Number(d.port || 22) === 22 && d.user === 'hhhong1') {
+      L.push('已核验的本次连接入口：仅在获授权的 PC-20250808YJEP 上，核对 C:\\Users\\Administrator\\AppData\\Local\\Temp\\pa_ssh.py 仍存在且其连接目标为本次 host、port、user；用 engine/workpc_check.py --transport ssh --expected-device PC-20250808YJEP --connector-sha256 5653441dc0130770190012b24cbda124ec2c6dc5307312cc88ca6c0df2f53760 --legacy-connector 指向此现有脚本。探针将命令从私密标准输入交给旧程序，旧程序自行持有凭据；不复制凭据、不逐台安装，也不得将该路径用于其他设备或其他目标。入口不可用则回写真实失败。');
+    } else {
+      L.push('密码通道的执行接口：将已核验合法提供者取得的密码仅在本次子进程环境 SC_REMOTE_PWD 中传给 engine/workpc_check.py --transport ssh；不把密码放入命令参数、正文或日志，不持久保存新的副本。');
+    }
     L.push('2. 应用自带探针 engine/workpc_check.py（与 step_plan 同一目录）。'
       + '可在已授权目标服务器shell用本地python运行，或经指定工作电脑SSH执行；取全下列各项：'
       + '内存 / CPU / /share 剩余 / R 版本 / 10 个必需 R 包 / 数据目录逐个符号链接'
@@ -7479,9 +7443,7 @@ function buildInstructionText(ask) {
     if (d.local_path) L.push('工作路径：' + d.local_path);
   }
 
-  let text = L.join('\n');
-  if (text.length > MAX) { const suffix = '\n…（文本过长已截断）'; text = text.slice(0, MAX - suffix.length) + suffix; }
-  return text;
+  return L.join('\n');
 }
 
 async function renderTaskLog() {
