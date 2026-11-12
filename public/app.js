@@ -47,6 +47,10 @@ const S = {
   //   它随注入文本一起交给助手，助手回写时原样带回，
   //   页面据此判断"手上的结果是这一次跑出来的"还是上一轮的旧数据。
   commitReq: null, agentHandoffPath: null,
+  // 步骤槽的请求号（本次派给执行端的那条活的号）。
+  //   为什么要和 commitReq 分开：以前只有一个号，步骤下发会把它覆盖，
+  //   识别结论就被判成"不是你这次的旧数据"，页面永远停在识别中。
+  stepReq: null,
   // 勾选要一起跑的环节。用数组而不是只存一个，是因为要按流程顺序批量发。
   picked: [],
   // 多选模式：关着的时候卡片上不显示勾选框，界面和以前一模一样。
@@ -140,7 +144,7 @@ function resetRecordState() {
     envCheck:null, running:false, blocked:false, step:null, code:null,
     history:null, recentDirs:[], scripts:null, openScript:null, scriptDraft:null,
     scriptTab:'list', incoming:[], queue:[], scriptCheck:null, scriptBackups:null,
-    autoInject:null, autoInjectBusy:false, autoInjectAt:0, commitReq:null, agentHandoffPath:null,
+    autoInject:null, autoInjectBusy:false, autoInjectAt:0, commitReq:null, agentHandoffPath:null, stepReq:null,
     picked:[], pickMode:false, refTab:null, batch:null, envStale:false, staleEnv:null,
     identifyPhase:null, decisions:null, delegated:null, remoteSteps:{}, flow:null,
     flowOpen:{}, flowTimer:null, pollTimer:null, waitTimer:null, waitTries:0,
@@ -355,7 +359,7 @@ function bindEvents() {
   //   流程定义里 pack 是「服务器上跑」的环节，服务器模式下要点到最后一环、
   //   还要等回写；而这件事本质是本地压个 zip，绕过去只多一次等待和一个失败点。
   const bpk = $('#btnBuildPack'); if (bpk) bpk.addEventListener('click', buildPack);
-  const ra = $('#btnRunAll'); if (ra) ra.addEventListener('click', () => runStep('all'));
+  const ra = $('#btnRunAll'); if (ra) ra.addEventListener('click', () => runAllWithOverwriteConfirm());
   // 勾选的环节按流程顺序一起跑。以前只能一环一环点：
   //   跑到第 6 环停下，剩下 4 环要点四次、等四轮。
   //   这里做的是「按顺序串行发」而不是并发 —— 同一条链上并发写产物会互相覆盖。
@@ -399,7 +403,10 @@ async function loadSessionsState() {
   //   为什么不用 /api/envcheck：那个回答的是"最近一次识别是什么"，
   //   在多份记录并存之后就是错的 —— 打开一份旧记录会看到新记录的数字。
   const ident = s && s.identify;
-  const pending = d.pending_req || null;
+  // 两个槽位分开读：pending_req 是识别在等的号，pending_step_req 是步骤在等的号。
+  //   老服务端没有新字段时回退到 pending_req，语义与旧版一致。
+  const pending = d.pending_identify_req !== undefined ? d.pending_identify_req : (d.pending_req || null);
+  S.stepReq = d.pending_step_req || null;
   const waiting = pending && !(ident && ident.result && ident.req_id === pending);
   if (ident && ident.result && !waiting) {
     S.envCheck = ident.result;
@@ -1839,6 +1846,16 @@ function remoteStep(id) {
   return (S.remoteSteps && S.remoteSteps[id]) ? S.remoteSteps[id] : null;
 }
 function stepBadge(id) {
+  // Server writebacks are authoritative for remote runs; never let a stale local
+  // stepState overwrite the stage status shown by the run board.
+  if (S.needsRemote) {
+    const rs = remoteStep(id);
+    if (rs && ['done', 'failed', 'running', 'delegated', 'stopped'].includes(rs.status)) {
+      const labels = { done: ['done', '已完成'], failed: ['failed', '服务器上没跑通'],
+        running: ['running', '服务器上运行中'], delegated: ['running', '已交给助手'], stopped: ['failed', '已停止'] };
+      return { cls: labels[rs.status][0], txt: labels[rs.status][1] };
+    }
+  }
   // 退回标记优先：被作废的步骤要先显示「待重跑」，
   //   否则用户刚退回、卡片还写着「已完成」，会以为退回没生效。
   const hs = (S.history && S.history.steps) ? S.history.steps[id] : null;
@@ -2509,29 +2526,8 @@ function errKeyLines(txt) {
 }
 
 function renderStageFail(sg, rs) {
-  if (!sg) return '';
-  const st = sg.status || (rs && rs.status) || '';
-  if (st !== 'failed' && !(rs && rs.status === 'failed')) return '';
-  const code = (rs && rs.code !== null && rs.code !== undefined) ? rs.code : sg.code;
-  const log = String(sg.log || (rs && rs.log) || '');
-  const keys = errKeyLines(log + '\n' + arr(sg.subs)
-    .map(x => (x.status === 'failed' ? (x.note || '') : '')).join('\n'));
-
-  // 只留"为什么"这几句。
-  //   原来这里还有「最后一次回写：…」和一段"执行记录（全文）"折叠 ——
-  //   时间现在在卡片状态行里，全文在「任务完成详情」里，同一个位置说三遍
-  //   只会把真正该看的那句报错淹掉。
-  let h = '<div class="stfail">';
-  h += '<div class="stfail-h">为什么没跑通'
-    + (code === null || code === undefined ? '' : '（退出码 <b>' + esc(String(code)) + '</b>）')
-    + '</div>';
-  if (keys.length) {
-    h += '<ul class="stfail-k">' + keys.map(k => '<li>' + esc(k) + '</li>').join('') + '</ul>';
-  } else {
-    h += '<div class="stfail-p">回写里没带错误原文，点「再报一次」把它取回来。</div>';
-  }
-  h += '</div>';
-  return h;
+  // Failure details belong in the step-detail sheet, not inline in the grid card.
+  return '';
 }
 
 /* 卡片里的"细节"折叠区。
@@ -2539,34 +2535,12 @@ function renderStageFail(sg, rs) {
    常驻展开会把一行三个环节拉成三根长条，扫视时反而看不出哪个在跑、哪个失败。
    失败时默认展开，因为出错不必再点一下。 */
 function stageFoldHTML(sg, rs, stepId) {
-  const inline = renderStageInline(sg, stepId);
-  const fail = renderStageFail(sg, rs);
-  // 输入依赖一并列出。
-  //   为什么放在这里：会有人问"为什么富集排在出图后面"——
-  //   因为富集读的是出图那一步算出来的差异基因表（4.diff_enrich/diff）。
-  //   这层依赖原先只写在流程定义里，页面上看不到，顺序就显得可疑。
-  const stDef = arr(S.flow && S.flow.stages).find(x => x.id === stepId) || {};
-  const deps = arr(stDef.deps);
-  const depHTML = deps.length
-    ? '<div class="stdeps">输入依赖：' + deps.map(d => '<code>' + esc(d) + '</code>').join('、') + '</div>'
-    : '';
-  const body = depHTML + inline + fail;
-  if (!body) return '';
-  const st = (sg && sg.status) || (rs && rs.status) || '';
-  // 一律默认收起。
-  //   之前失败时自动展开，结果三列布局里那一张被撑得特别高，
-  //   同一行另两张下面留一大片空白，看着就像排版坏了。
-  //   现在失败只在折叠标题上写明"没跑通"，要点开才看原因 ——
-  //   这也正是她说的"内容多了就点展开"。
-  const open = '';
+  const hasDetails = !!(sg || rs);
+  if (!hasDetails) return '';
+  const failed = (rs && rs.status === 'failed') || (sg && sg.status === 'failed');
   const nSub = arr(sg && sg.subs).length;
-  const label = st === 'failed'
-    ? '没跑通 · 点开看原因'
-    : (nSub ? '展开细节（' + nSub + ' 小环）' : '展开细节');
-  return '<details class="stextra"' + open + '>'
-    + '<summary>' + esc(label) + '</summary>'
-    + '<div class="stextra-b">' + body + '</div>'
-    + '</details>';
+  const label = failed ? '查看失败原因' : (nSub ? '查看环节详情（' + nSub + ' 项）' : '查看环节详情');
+  return '<button class="btn btn-sm stmore" data-stepdetail="' + esc(stepId) + '">' + esc(label) + '</button>';
 }
 
 function renderRun() {
@@ -2593,7 +2567,9 @@ function renderRun() {
     // 卡片底色跟着阶段真实状态走，不只跟本机运行状态走。
     //   服务器模式本机从来不会 running，只看本机状态的话，跑完的卡片也不会变色。
     let cls = b.cls;
-    if (!cls && sg) {
+    if (remote && rs && ['done', 'failed', 'running', 'delegated', 'stopped'].includes(rs.status)) {
+      cls = rs.status === 'done' ? 'done' : (rs.status === 'failed' || rs.status === 'stopped' ? 'failed' : 'running');
+    } else if (!cls && sg) {
       if (sg.status === 'done') cls = 'done';
       else if (sg.status === 'running' || sg.status === 'delegated') cls = 'running';
       else if (sg.status === 'failed') cls = 'failed';
@@ -2611,7 +2587,11 @@ function renderRun() {
         + (rs.imported_at ? '（' + String(rs.imported_at).replace('T', ' ') + '）' : '');
       else if (rs && rs.status === 'failed') stateTxt = '服务器上没跑通'
         + (rs.code === null || rs.code === undefined ? '' : '（退出码 ' + rs.code + '）');
-      if (dl && dl.ok === false) stateTxt = '没送进会话';
+      // relayed：会话通道断了，但指令已落进本机队列，助手会取走执行。
+      //   这两种必须分开写：一个是"没交出去"，一个是"换条路交出去了"。
+      if (dl && dl.ok === false) stateTxt = dl.relayed
+        ? '已放进助手队列，会取走执行'
+        : '没送进会话';
       if (dl && dl.ok === true) stateTxt = '已送进会话，助手会接着做';
     }
     if ((sg && sg.status === 'handoff_unconfirmed') || (rs && rs.display_status === 'handoff_unconfirmed')) {
@@ -3070,7 +3050,7 @@ async function pokeFlow(stageId) {
 
   const brief = '/api/brief?step=' + encodeURIComponent(stageId)
     + (S.sessionId ? '&session=' + encodeURIComponent(S.sessionId) : '')
-    + (S.commitReq ? '&req=' + encodeURIComponent(S.commitReq) : '');
+    + (S.stepReq ? '&req=' + encodeURIComponent(S.stepReq) : '');
   const txt = '【来自 个性化分析助手】\n'
     + '要办的事：「' + (stepTitleCN(stageId) || stageId) + '」现在跑到哪了，请立刻回写一次。\n'
     + '1. 到服务器上看这一阶段的实际进程与最后写出的文件，不要凭记忆回答。\n'
@@ -3082,14 +3062,17 @@ async function pokeFlow(stageId) {
   // 卡片上也留一句：toast 会消失，而人点完按钮还站在这一张卡上。
   const box = document.getElementById('stq-' + stageId);
   if (box) {
-    box.innerHTML = r && r.ok
+    // handed：已交给宿主或已放进本机队列，两种都算交出去了。
+    //   以前只认 r.ok，队列那条路明明接通了也画成红色失败。
+    const handed = !!(r && (r.ok || r.relayed));
+    box.innerHTML = handed
       ? '<span class="qok">已让它报一次（' + esc(fmtClock(new Date().toISOString()))
-        + ' 送出）。回写之后这一栏会自己变。</span>'
+        + (r && r.ok ? ' 送出' : ' 放进队列，我会取走') + '）。回写之后这一栏会自己变。</span>'
       : '<span class="qbad">没送进会话：'
         + esc(String((r && (r.why || r.code)) || '通道没连上').replace(/[。．.]+$/, ''))
         + '。指令原文在顶部「指令队列」里可复制。</span>';
   }
-  if (r && r.ok) toast('已让它报一次，回写后这一栏会自己变。', 'good');
+  if (r && (r.ok || r.relayed)) toast(r.ok ? '已让它报一次，回写后这一栏会自己变。' : '会话通道没连上，已放进队列，我会取走执行。', 'good');
   else toast('没送进会话：' + String((r && (r.why || r.code)) || '通道没连上').replace(/[。．.]+$/, ''), 'bad');
 
   } catch (e) {
@@ -3407,18 +3390,25 @@ function renderDelegated() {
   const host = $('#delegatedHost'); if (!host) return;
   const dl = currentDelegated();
   if (!dl) { host.innerHTML = ''; return; }
-  const cls = dl.ok === true ? 'ok' : (dl.ok === false ? 'fail' : 'warn');
-  const mk = dl.ok === true ? '✓' : (dl.ok === false ? '×' : '·');
+  // relayed 是"会话通道没连上，但指令已经进了本机队列"，我取走执行就等于交出去了。
+  //   以前把它和真失败画成同一个红色，人看到"没送进"只能以为坏了、反复重点。
+  const relayed = !!(dl && dl.relayed);
+  const cls = dl.ok === true ? 'ok' : (relayed ? 'warn' : (dl.ok === false ? 'fail' : 'warn'));
+  const mk = dl.ok === true ? '✓' : (relayed ? '!' : (dl.ok === false ? '×' : '·'));
   host.innerHTML = '<div class="rz ' + cls + '"><span class="mk">' + mk + '</span><span><b>'
     + esc(dl.title) + '</b> <span class="dt">'
     + esc(dl.ok === true
       ? '已送进会话，它会接着做。'
-      : (dl.ok === false
-        ? ('没送进：' + String(dl.why || '通道没连上').replace(/[。．.]+$/, '')
-           + '。原文在下面，可自己发一次。')
-        : '正在送…'))
+      : (relayed
+        ? ('会话通道没连上，这段已经放进助手队列'
+           + (dl.queueId ? '（' + dl.queueId + '）' : '')
+           + '，我会取走执行，不用你再发一次。')
+        : (dl.ok === false
+          ? ('没送进：' + String(dl.why || '通道没连上').replace(/[。．.]+$/, '')
+             + '。原文在下面，可自己发一次。')
+          : '正在送…')))
     + '</span></span></div>'
-    + (dl.ok === false && dl.text
+    + (dl.ok === false && !relayed && dl.text
       ? '<details style="margin-top:6px"><summary class="small">指令原文（可复制）</summary>'
         + '<pre class="log" style="max-height:220px">' + esc(dl.text) + '</pre></details>'
       : '')
@@ -3587,17 +3577,25 @@ async function runPickedSteps() {
   }
 }
 
-async function runStep(id, reqNote, force) {
+function runAllWithOverwriteConfirm() {
+  if (sessionChanging) return;
+  const ok = window.confirm('重新运行全流程会覆盖当前运行目录中的结果。是否从第一环重新开始？');
+  if (!ok) return;
+  const req = 'chain-' + Date.now() + '-' + Math.random().toString(36).slice(2, 10);
+  runStep('all', null, true, { overwrite: true, req_id: req });
+}
+
+async function runStep(id, reqNote, force, extra = {}) {
   if (sessionChanging) return;
   const __recordScope = recordContext();
   try {
 
-  if (S.running && !S.needsRemote) return;
+  if (S.running && !S.needsRemote && !(extra && extra.overwrite)) return;
   // 同一步骤已有任务在跑：先说清后果，别让人以为只是排个队。
   //   这条对「按原样重跑」和「交给助手去跑」都生效 ——
   //   两个按钮都会真的提交一次作业，覆盖风险和入口无关。
   const busy = busyOf(id);
-  if (busy && !force) {
+  if (busy && !force && !(extra && extra.overwrite)) {
     showBusySheet(id, busy, function () { runStep(id, reqNote, true); });
     return;
   }
@@ -3609,6 +3607,8 @@ async function runStep(id, reqNote, force) {
   //   服务器模式下更明显：那一步本来就是"交出去、等回写"，页面不该自己判失败。
   try {
     const body = { step: id, gate_note: decidedSummary() };
+    if (extra && extra.overwrite) body.overwrite = true;
+    if (extra && extra.req_id) body.req_id = String(extra.req_id);
     // 再次交给助手时用户写的具体要求，单独一个字段往后传。
     //   不和 gate_note 混：一个是流程闸门的答案，一个是这次追加的要求，
     //   混在一起事后分不清哪句是当初定的。
@@ -3625,10 +3625,17 @@ async function runStep(id, reqNote, force) {
       //   短的那段带着 /api/brief 的地址，助手按地址取全文，一条不落地照做。
       const sendTxt = r.session_text || r.instruction || '';
       const res = await recordAwait(injectToSession(sendTxt, function () {}), __recordScope);
+      // 这一步的作业在服务端就已经排进执行队列了（r.delegated 本身就是"已入队"）。
+      //   注入会话只是顺带通知助手，不是被执行的前提。
+      //   以前把注入结果当成败判据：会话通道一断，页面就报"没送进"，人以为活没派出去，
+      //   实际作业已经躺在队列里、执行端每分钟都会来领。
       S.delegated.ok = !!res.ok;
+      S.delegated.execQueued = !!r.exec_queued;
       S.delegated.why = res.ok ? '' : (res.why || res.code || '');
       if (res.ok) {
         toast('已交给助手：' + S.delegated.title + '。跑完会写回。', 'good');
+      } else if (S.delegated.execQueued) {
+        toast('已排进执行队列，执行端会自动取走跑。会话通知没发出去，不影响这条作业。', 'good');
       } else {
         toast('指令没能送进会话：' + String(res.why || res.code || '通道没连上').replace(/[。．.]+$/, '')
           + (res.queued ? '。已入队，每小时自动重试，回写后停止。' : '。原文在下面，可自己发。'), 'bad');

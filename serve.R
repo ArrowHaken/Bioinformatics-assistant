@@ -399,6 +399,15 @@ exec_ts <- function(t = Sys.time()) format(t, "%Y-%m-%dT%H:%M:%S")
 #    2 小时没有任何心跳是"人没了"，不是"活得慢"。
 # ---------------------------------------------------------------------
 EXEC_STALE_SECS <- 2L * 3600L
+# 排队没人领的阈值。
+#   为什么必须单独一条：exec_reap 原来只回收 running，而"排队中"没有任何过期，
+#   于是一条 21:14 入队、从头到尾没人 claim 的任务会永远挂在 queued 上。
+#   后果不是它自己失败，而是它把整个分析的重跑入口锁死 ——
+#   run_chain.R 里那个"旧任务仍在执行或排队，等待它退出后才能安全重跑"的 409
+#   就是它发出来的。用户看到的就是点一键重跑一直被打回，而屏幕上没有任何
+#   在跑的东西。排队正常几秒到几分钟内就会被领走，半小时没人领只有一个解释：
+#   执行端根本没在盯这个队列。
+EXEC_QUEUE_STALE_SECS <- 30L * 60L
 
 exec_reap <- function(d = NULL, now = Sys.time()) {
   if (is.null(d)) d <- exec_read()
@@ -407,17 +416,23 @@ exec_reap <- function(d = NULL, now = Sys.time()) {
   changed <- FALSE
   for (i in seq_along(items)) {
     it <- items[[i]]
-    if (!identical(as.character(it$status %||% ""), "running")) next
+    st <- as.character(it$status %||% "")
+    if (!identical(st, "running") && !identical(st, "queued")) next
     t0 <- as.character(it$last_seen %||% "")
     if (!nzchar(t0)) t0 <- as.character(it$claimed_at %||% "")
+    if (!nzchar(t0)) t0 <- as.character(it$created_at %||% "")
     if (!nzchar(t0)) next
     ts <- suppressWarnings(as.POSIXct(t0, format = "%Y-%m-%dT%H:%M:%S"))
     if (is.na(ts)) next
     gap <- as.numeric(difftime(now, ts, units = "secs"))
-    if (gap < EXEC_STALE_SECS) next
+    limit <- if (identical(st, "queued")) EXEC_QUEUE_STALE_SECS else EXEC_STALE_SECS
+    if (gap < limit) next
     items[[i]]$status <- "failed"
     items[[i]]$finished_at <- exec_ts(now)
-    items[[i]]$error <- paste0(
+    items[[i]]$error <- if (identical(st, "queued")) paste0(
+      "排队 ", round(gap / 60, 0), " 分钟一直没人接手，已按过期处理，不再挡着重跑。",
+      "这不是这一步跑失败 —— 它根本没开始。直接重跑即可。")
+    else paste0(
       "执行端失联：最后一次报信是 ", t0, "，已 ", round(gap / 3600, 1),
       " 小时没有任何更新，任务未回写。这不是这一步本身跑失败 —— ",
       "它在服务器上的产物是否已生成，需要重新核一次。重跑这一步即可。")
@@ -2453,9 +2468,16 @@ serve_request <- function(con, req) {
     out <- sess_state(APP_DIR, sid)
     # 页面还需要「当前这台机器/路径」的公开视图（不含口令）
     out$place <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
-    # 这次有没有在等助手写回：记录自带，不用全局标记
-    out$pending_req <- tryCatch(sess_get_pending(APP_DIR, out$current %||% sid),
-                                error = function(e) NULL)
+    # 这次有没有在等助手写回：记录自带，不用全局标记。
+    #   两个槽位分开报（2026-11-12）：识别在等哪个号、步骤在等哪个号互不覆盖。
+    #   以前只有一个 pending_req，步骤下发会把它顶掉，识别结论被误判成旧数据。
+    .sid0 <- out$current %||% sid
+    out$pending_identify_req <- tryCatch(sess_get_pending(APP_DIR, .sid0, slot = "identify"),
+                                         error = function(e) NULL)
+    out$pending_step_req <- tryCatch(sess_get_pending(APP_DIR, .sid0, slot = "step"),
+                                     error = function(e) NULL)
+    # 旧字段保留指向识别槽：老页面读它判"还在等识别"，语义不变。
+    out$pending_req <- out$pending_identify_req
     return(send_json(con, 200, out))
   }
 
@@ -2847,12 +2869,16 @@ serve_request <- function(con, req) {
       }
       if (nzchar(cur_sid)) {
         tryCatch(sess_update(APP_DIR, cur_sid, list(
-          place = pub, mode = mode, run_dir = if (is.null(rd)) "" else rd,
-          pending_req = NULL)), error = function(e) NULL)
+          place = pub, mode = mode, run_dir = if (is.null(rd)) "" else rd)),
+          error = function(e) NULL)
+        # 只动 identify 槽。以前这里顺手把 pending_req 置空，
+        #   等于每次保存识别都把步骤的待办一起抹掉（两槽共用时的连带伤害）。
         if (identical(mode, "server")) {
-          tryCatch(sess_set_pending(APP_DIR, cur_sid, req_id), error = function(e) NULL)
+          tryCatch(sess_set_pending(APP_DIR, cur_sid, req_id, slot = "identify"),
+                   error = function(e) NULL)
         } else {
-          tryCatch(sess_clear_pending(APP_DIR, cur_sid), error = function(e) NULL)
+          tryCatch(sess_clear_pending(APP_DIR, cur_sid, slot = "identify"),
+                   error = function(e) NULL)
         }
       }
     }
@@ -3131,7 +3157,7 @@ serve_request <- function(con, req) {
       pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
       sid <- if (HAS_SESSIONS) tryCatch(sess_current_id(APP_DIR), error = function(e) "") else ""
       rq <- if (HAS_SESSIONS && nzchar(as.character(sid %||% "")))
-        as.character(sess_get_pending(APP_DIR, sid) %||% "") else ""
+        as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
       ins <- remote_step_instruction("config", pl, session_id = as.character(sid %||% ""), req_id = rq)
       # 把这次要写的设置附在指令后面 —— 不给内容，助手只能猜。
       setbits <- character(0)
@@ -3313,7 +3339,8 @@ serve_request <- function(con, req) {
     #   状态不再是空的：页面能显示"这一步交给谁了、在等什么"。
     if (isTRUE(st$runDirRemote)) {
       if (identical(stepId, "all")) {
-        out <- rc_begin(effective_sid, runDir, as.character(b$req_id %||% ""), owner_ctx)
+        out <- rc_begin(effective_sid, runDir, as.character(b$req_id %||% ""), owner_ctx,
+                        overwrite = isTRUE(b$overwrite))
         return(send_json(con, out$code, out$body))
       }
       active_chain <- rc_read(effective_sid)
@@ -3642,7 +3669,7 @@ serve_request <- function(con, req) {
       pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
       sid <- execSid
       rq <- if (HAS_SESSIONS && nzchar(as.character(sid %||% "")))
-        as.character(sess_get_pending(APP_DIR, sid) %||% "") else ""
+        as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
       note <- as.character(b$gate_note %||% "")
       # 「再次交给助手」时用户填的具体要求：附在已经定下的事后面。
       #   为什么单独一段而不是混进 gate_note：两者来源不同 ——
@@ -3754,6 +3781,10 @@ serve_request <- function(con, req) {
         # 上一步质检的检查结果：这一版只展示，不拦。
         #   要让它变成闸门，得单独一轮改动 + 明确说"现在开始拦"，
         #   不能一边说"不影响流程"一边偷偷卡住按钮。
+        # 作业是否真的进了执行队列。
+        #   页面拿它来判断"这件事到底派出去没有"：注入会话只是通知，
+        #   入队才是执行的前提，两者不能混成一句成败。
+        exec_queued = !is.null(enq),
         review_warn = if (nzchar(reviewWarn)) reviewWarn else NULL,
         prev_quality = prevQual,
         msg = "这一步要在服务器上跑，已把它交给助手执行；结果回写后这里会变成实际状态。")))
@@ -3801,8 +3832,36 @@ serve_request <- function(con, req) {
     chain_check <- rc_validate(b)
     if (!is.null(chain_check)) return(send_json(con, chain_check$code, chain_check$body))
     if (!DB_READY) return(send_json(con, 503, list(ok = FALSE, error = "日志数据库不可用，未接收回写")))
-    if (!db_run_log_authorized(DB_CON, owner_ctx_key(owner_ctx), sid_chk))
-      return(send_json(con, 403, list(ok = FALSE, code = "run_log_not_owner", error = "回写身份不属于这条分析记录")))
+    if (!db_run_log_authorized(DB_CON, owner_ctx_key(owner_ctx), sid_chk)) {
+      # 执行端回写：它不是人，拿不到平台身份。
+      #   任务本来就是这个应用自己创建、自己下发的，执行端手里有那条任务的 id ——
+      #   用它证明"我就是你派出去的那个执行端"，并只允许写回那条任务所属的记录。
+      #   以前这里一律 403：作业在服务器上真跑完了，页面却永远停在"已交接"，
+      #   日志里只有一行 run_log_not_owner，人看不出是身份问题。
+      exid <- trimws(as.character(b$exec_id %||% ""))
+      ok_exec <- FALSE
+      if (nzchar(exid)) {
+        hit <- Filter(function(it) identical(as.character(it$id %||% ""), exid),
+                      exec_read()$items %||% list())
+        if (length(hit)) {
+          it0 <- hit[[1]]
+          ok_exec <- identical(as.character(it0$session_id %||% ""), sid_chk) &&
+            as.character(it0$status %||% "") %in% c("running", "queued")
+          if (ok_exec) {
+            own <- tryCatch(db_scalar(DB_CON,
+              "SELECT owner_key FROM sessions WHERE session_id=?", list(sid_chk)),
+              error = function(e) NA)
+            if (length(own) == 1L && !is.na(own) && nzchar(as.character(own))) {
+              owner_ctx <- list(key = as.character(own), kind = "exec_task", external_id = exid)
+            } else {
+              ok_exec <- FALSE
+            }
+          }
+        }
+      }
+      if (!ok_exec)
+        return(send_json(con, 403, list(ok = FALSE, code = "run_log_not_owner", error = "回写身份不属于这条分析记录")))
+    }
     prev <- if (attempt_selected(APP_DIR, sid_chk, b$req_id)) remote_step_get(sid_step, sid = sid_chk) else attempt_results(APP_DIR, sid_chk, b$req_id)$steps[[sid_step]]
 
     # ---- 本题次绑定：结论性回写必须对得上这一次请求 ------------------
@@ -3846,7 +3905,7 @@ serve_request <- function(con, req) {
         got = sid_req, known_sessions = known)))
     }
     pending0 <- if (HAS_SESSIONS && nzchar(sid_chk))
-      tryCatch(sess_get_pending(APP_DIR, sid_chk), error = function(e) NULL) else NULL
+      tryCatch(sess_get_pending(APP_DIR, sid_chk, slot = "step"), error = function(e) NULL) else NULL
     pending0 <- as.character(pending0 %||% "")
     rq0 <- trimws(as.character(b$req_id %||% ""))
 
@@ -4335,10 +4394,11 @@ serve_request <- function(con, req) {
       sid <- cur_sid()
       ss <- sess_find(APP_DIR, sid)
       rr <- ss$identify$result %||% NULL
-      want <- as.character(sess_get_pending(APP_DIR, sid) %||% "")
+      # 只比识别槽。步骤/链条的号在这里出现，等于把别人的题次当成识别题次。
+      want <- as.character(sess_get_pending(APP_DIR, sid, slot = "identify") %||% "")
       have <- as.character(rr$req_id %||% "")
       bound <- isTRUE(rr$req_bound)
-      req_at <- as.character(sess_profile(APP_DIR, sid)$pending_at %||% "")
+      req_at <- as.character(sess_get_pending_at(APP_DIR, sid, slot = "identify") %||% "")
       imp_at <- as.character(rr$imported_at %||% "")
       after <- !nzchar(req_at) || !nzchar(imp_at) || imp_at >= req_at
       return(send_json(con, 200, list(ok = TRUE, session_id = sid,
@@ -4451,7 +4511,7 @@ serve_request <- function(con, req) {
       env_sid <- sid_req
       if (!nzchar(env_sid) && HAS_SESSIONS) env_sid <- sess_current_id(APP_DIR)
       pending_env <- if (HAS_SESSIONS && nzchar(env_sid))
-        as.character(sess_get_pending(APP_DIR, env_sid) %||% "") else ""
+        as.character(sess_get_pending(APP_DIR, env_sid, slot = "identify") %||% "") else ""
       if (!attempt_has(APP_DIR, env_sid, rq))
         return(send_json(con, 409, list(ok = FALSE, code = "req_id_mismatch",
                                        error = "体检请求号不属于当前待回写请求，未写入结果。")))
@@ -4459,7 +4519,9 @@ serve_request <- function(con, req) {
     }
     rb_attempt <- attempt_save(APP_DIR, sid_req, rq, "envcheck", list(result = obj, req_id = rq))
     attempt_release_output(APP_DIR, sid_req, rq)
-    if (!attempt_selected(APP_DIR, sid_req, rq))
+    # 体检结果按识别槽判选中：以前用步骤头比，识别结果一到就被判成"不是这一次"，
+    #   虽然 persisted 了却 selected=false，记录里那句结论写不进去。
+    if (!attempt_selected(APP_DIR, sid_req, rq, slot = "identify"))
       return(send_json(con, 200, list(ok = TRUE, persisted = TRUE, selected = FALSE,
         session = sid_req, session_id = sid_req, req_id = rq, readback = rb_attempt,
         readback_url = paste0("/api/attempts/result?session_id=", sid_req, "&req_id=", rq))))
@@ -4503,13 +4565,11 @@ serve_request <- function(con, req) {
                       error = function(e) list(ok = FALSE, error = conditionMessage(e)))
         if (isTRUE(r$ok)) {
           sess_saved <- sid
-          # 这里原来调 sess_clear_pending()。现在不清：
-          #   pending_req 有两处用途 —— ①页面显示"在等什么"；
-          #   ②/api/step/import 校验结论性回写（done/failed）是否属于本次题次。
-          #   体检结果一回写就清掉，等于把②的凭据提前销毁：紧接着的 done 回写
-          #   会被判成"这条记录当前没有待回写请求"，进度永远写不进去。
-          #   识别新鲜度不靠它（那处比的是 last_commit.id 与结果里的 req_id），
-          #   所以保持原值，由那一步的结论性回写收口。
+          # 识别回写后不清 identify 槽，是有意的：
+          #   /api/envcheck 判新鲜度要拿「这一次识别的请求号」和结果里的号对账，
+          #   一写回就清掉，那一栏立刻退回"没有结果"。
+          #   （2026-11-12 拆槽后这条更稳：步骤/链条只写自己的槽，
+          #   不会再像以前那样把识别号顶掉，识别结论也就不会莫名变成"识别中"。）
         }
       }
     }
@@ -5193,7 +5253,7 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, code = "instruction_not_owner", stage = "authorization", http_status = 403)))
     # pending_req is the per-session last commit (never use the global marker,
     # which can belong to a different record after a tab switch).
-    pending <- if (HAS_SESSIONS) sess_get_pending(APP_DIR, b$session_id) else NULL
+    pending <- if (HAS_SESSIONS) sess_get_pending(APP_DIR, b$session_id, slot = "step") else NULL
     if ((!query_only && !attempt_has(APP_DIR, b$session_id, b$req_id)))
       return(send_json(con, 409, list(ok = FALSE, code = "req_id_mismatch", stage = "registration", http_status = 409)))
     if (!scalar(b$text) || nchar(b$text, type = "bytes") > 2000000L ||
@@ -5643,8 +5703,10 @@ serve_request <- function(con, req) {
     task <- Filter(function(it) identical(it$id, want), exec_read()$items %||% list())
     if (length(task) && nzchar(as.character(task[[1]]$chain_id %||% ""))) {
       it <- task[[1]]
-      if (okk && !isTRUE(it$callback_received))
+      if (okk && (!isTRUE(it$callback_received) || !isTRUE(it$callback_accepted)))
         return(send_json(con, 409, list(ok = FALSE, code = "stage_callback_required")))
+      exec_set(want, list(status = if (okk) "done" else "failed",
+        finished_at = exec_ts(), error = if (okk) NULL else as.character(b$error %||% "")))
       if (!okk) rc_callback(list(session_id = it$session_id, req_id = it$chain_id,
         step = it$step, status = "failed", code = 1L), FALSE)
       return(send_json(con, 200, list(ok = TRUE)))
@@ -6096,7 +6158,7 @@ serve_request <- function(con, req) {
     rq <- qget(req$target, "req")
     if (!nzchar(rq)) {
       rq <- if (HAS_SESSIONS && nzchar(sid))
-        as.character(sess_get_pending(APP_DIR, sid) %||% "") else ""
+        as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
     }
     # ---- 取回「人已经定下的事」----------------------------------------
     #   为什么不从 URL 拿：它是交付那一刻应用的判断结果，不是执行端能提供的输入。

@@ -7,11 +7,11 @@ load_assignments <- function(path, names, env) {
   }
 }
 e <- new.env(parent = globalenv())
-load_assignments('serve.R', c('SPECIES_ALIASES', 'species_canon', 'flow_vars',
-                            'remote_step_instruction', 'flow_subs_of'), e)
+load_assignments('serve.R', c('SPECIES_ALIASES', 'species_canon', 'flow_record_server',
+                            'flow_vars', 'remote_step_instruction', 'flow_subs_of'), e)
 e$HAS_SESSIONS <- TRUE; e$HAS_REFERENCE <- FALSE; e$HAS_FLOW <- TRUE
 e$APP_DIR <- '/fixture'; e$pjoin <- file.path
-e$sess_find <- function(...) list(species = e$input_species)
+e$sess_find <- function(...) list(species = e$input_species, place = list(server = srv))
 e$flow_profile <- function() 'server'
 e$STEP_TASK <- list(enrich = list(title = '富集', ask = 'fixture'))
 e$supplement_for_stage <- function(...) list()
@@ -72,10 +72,18 @@ annot$get_opt <- function(flag) if (flag == '--lit-dict') '/tmp/ref.json' else N
 load_assignments('engine/sc-pipeline/scripts/02_annotate.R', c('reference', 'lit_dict'), annot)
 stopifnot(is.null(annot$reference), identical(annot$lit_dict, '/tmp/ref.json'))
 # Direct resolver callers must provide a single canonical string. No alias or first-value fallback.
-bad <- list('human', 'rat', '小鼠', ' Human ', 'mouce', 'mouse/path', '', ' ', NA_character_,
+bad <- list('human', 'rat', '小鼠', ' Human ', 'mouce', 'mouse/path', NA_character_,
             NULL, character(), c('Human', 'Rat'), c('Human', NA_character_),
             list('Human'), factor('Human'), matrix('Human'), TRUE, 1,
             structure('Human', class = 'fixture_species'))
+# Empty and whitespace values intentionally request auto-detection.
+for (value in c('', ' ')) {
+  V <- vars_for(value)
+  x <- flow_execution(flow_stage('enrich'), V)
+  stopifnot(x$ok, identical(x$script, '-e'), '--args' %in% x$argv,
+            identical(x$argv[match('--target', x$argv) + 1L],
+                      file.path('/tmp/work path', '_engine/sc-plot-kit/scripts/plot_all_v2.R')))
+}
 for (value in bad) {
   V$species <- value
   for (id in c('enrich', 'figs', 'doublet')) {
@@ -84,7 +92,7 @@ for (value in bad) {
               is.null(x$argv), is.null(x$command), is.null(flow_cmd(id, V)))
   }
 }
-for (unknown in c('mouce', 'mouse/path', '', ' ')) {
+for (unknown in c('mouce', 'mouse/path')) {
   V <- vars_for(unknown)
   stopifnot(!flow_execution(flow_stage('enrich'), V)$ok)
   text <- e$remote_step_instruction('enrich', list(server = srv), 'fixture-session', 'fixture-request')

@@ -45,6 +45,14 @@ test('already queued collapsed and poll callbacks cannot operate on B',async()=>
   const h=harness();h.run('renderRun=()=>{}; persistCollapsed(); startPolling()');await new Promise(r=>setImmediate(r));const queued=[...h.timers.values()];await h.run("switchSession('B')");const n=h.calls.length;
   for(const t of queued) await t.fn();await new Promise(r=>setImmediate(r));assert.equal(h.calls.length,n);
 });
+test('server writeback is authoritative and card details do not expand inline',()=>{
+  const h=harness();
+  h.run("S.needsRemote=true; S.steps=[{id:'doublet',title:'去双'}]; S.flow={stages:[{id:'doublet',title:'去双',status:'failed',subs:[{title:'DoubletFinder',status:'failed',note:'failed reason'}],artifacts:[],deps:[]}]}; S.remoteSteps={doublet:{id:'doublet',status:'done',log:'done'}}; S.running=true; S.step='doublet'; S.code=1; renderRun()");
+  assert.match(h.e('#stepsHost').innerHTML,/stcard done/);
+  assert.match(h.e('#stepsHost').innerHTML,/data-stepdetail="doublet"/);
+  assert.doesNotMatch(h.e('#stepsHost').innerHTML,/<details/);
+  assert.doesNotMatch(h.e('#stepsHost').innerHTML,/failed reason/);
+});
 test('renderRun refuses delegated evidence owned by another record',()=>{
   const h=harness();h.run("S.delegated={sessionId:'OTHER',title:'OLD',ok:true}; S.steps=[]; renderRun()");assert.doesNotMatch(h.e('#runState').textContent,/OLD/);
 });

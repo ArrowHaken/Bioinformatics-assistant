@@ -281,30 +281,129 @@ sess_get_identify <- function(app_dir, id = NULL) {
 #   Why per-record rather than one global "last commit":
 #     each record can have its own identify in flight. One global marker
 #     would make switching records look like "the request came back".
-sess_set_pending <- function(app_dir, id, req_id) {
-  if (is.null(id) || !nzchar(as.character(id))) return(list(ok = FALSE))
-  attempt_migrate(app_dir, id)
-  if (!is.null(req_id) && !attempt_register(app_dir, id, as.character(req_id)))
-    return(list(ok = FALSE, error = "attempt registration failed"))
-  prof <- sess_profile(app_dir, id)
-  if (!is.null(req_id)) sess_write_json(file.path(sess_dir(app_dir,id), "attempt-head.json"), list(req_id=as.character(req_id)))
-  prof$pending_req <- if (is.null(req_id)) NULL else as.character(req_id)
-  prof$pending_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
-  sess_profile_write(app_dir, id, prof)
-  list(ok = TRUE, pending_req = prof$pending_req)
+# ---- 待回写请求号：两个槽位 -------------------------------------------
+#   为什么要拆（2026-11-12，gina 报「识别过环境却一直显示识别中」）：
+#     原来只有一个 pending_req，识别和步骤共用。步骤/链条下发时把它覆盖成
+#     chain-...，而识别结果里的 req_id 还是 req-...。两边对不上，页面就把
+#     已经成功写回的识别结论判成「不是你这次的旧数据」，永远停在识别中。
+#     识别其实早跑成了（verdict=ready），坏的是这个共用槽位。
+#   现在：
+#     identify 槽  只由「保存并识别」写，只被 /api/envcheck 读
+#     step 槽      由步骤/链条下发写，只被步骤回写校验读
+#   旧键 pending_req / pending_at 保留只读兼容：按「这个号是不是识别号」归位。
+sess_pending_slot <- function(slot) {
+  s <- as.character(slot %||% "step")[1]
+  if (!s %in% c("identify", "step")) s <- "step"
+  s
 }
 
-sess_get_pending <- function(app_dir, id = NULL) {
+# 每个槽位自己的 attempt 头文件。
+#   step 沿用旧文件名，读旧数据不用迁移；identify 单开一份。
+attempt_head_name <- function(slot = "step") {
+  if (identical(sess_pending_slot(slot), "identify")) "attempt-head-identify.json" else "attempt-head.json"
+}
+
+sess_pending_keys <- function(slot) {
+  s <- sess_pending_slot(slot)
+  list(req = paste0("pending_", s, "_req"), at = paste0("pending_", s, "_at"))
+}
+
+# 旧单槽数据就地归位（只在读到时算，不写盘，避免读写竞争）
+sess_pending_split <- function(app_dir, id, prof) {
+  legacy <- as.character(prof$pending_req %||% "")
+  if (!nzchar(legacy)) return(prof)
+  ident_req <- as.character((sess_find(app_dir, id)$identify %||% list())$req_id %||% "")
+  at <- prof$pending_at %||% NULL
+  if (nzchar(ident_req) && identical(legacy, ident_req)) {
+    if (is.null(prof$pending_identify_req)) {
+      prof$pending_identify_req <- legacy
+      prof$pending_identify_at <- at
+    }
+  } else if (is.null(prof$pending_step_req)) {
+    prof$pending_step_req <- legacy
+    prof$pending_step_at <- at
+  }
+  prof
+}
+
+sess_set_pending <- function(app_dir, id, req_id, slot = "step") {
+  fail <- function(error) list(ok = FALSE, error = error)
+  if (is.null(id) || !nzchar(as.character(id))) return(fail("missing session id"))
+  slot <- sess_pending_slot(slot)
+  keys <- sess_pending_keys(slot)
+  tryCatch({
+    attempt_migrate(app_dir, id)
+    if (!is.null(req_id)) {
+      registered <- attempt_register(app_dir, id, as.character(req_id))
+      if (!isTRUE(registered$ok))
+        return(fail(paste0("attempt registration failed: ", sess_chr(registered$error, "unknown"))))
+    }
+    prof <- sess_pending_split(app_dir, id, sess_profile(app_dir, id))
+    if (!is.null(req_id)) {
+      # 每个槽位有自己的 attempt 头。识别与步骤各写各的，
+      #   否则后下发的那个会把前一个的选中标记顶掉，回写被判成「不是这一次」。
+      head_path <- file.path(sess_dir(app_dir, id), attempt_head_name(slot))
+      sess_write_json(head_path, list(req_id = as.character(req_id), slot = slot))
+      head <- sess_read_json(head_path)
+      if (is.null(head) || !identical(as.character(head$req_id), as.character(req_id)))
+        return(fail("attempt head writeback mismatch"))
+    }
+    prof[[keys$req]] <- if (is.null(req_id)) NULL else as.character(req_id)
+    prof[[keys$at]] <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+    sess_profile_write(app_dir, id, prof)
+    actual <- sess_profile(app_dir, id)
+    if (!identical(as.character(actual[[keys$req]] %||% ""), as.character(req_id %||% "")))
+      return(fail("pending profile writeback mismatch"))
+    list(ok = TRUE, slot = slot, pending_req = actual[[keys$req]])
+  }, error = function(e) fail(paste0("pending persistence failed: ", conditionMessage(e))))
+}
+
+sess_get_pending <- function(app_dir, id = NULL, slot = "step") {
+  if (is.null(id) || !nzchar(as.character(id))) id <- sess_current_id(app_dir)
+  if (!nzchar(id)) return(NULL)
+  slot <- sess_pending_slot(slot)
+  prof <- sess_profile(app_dir, id)
+  v <- as.character(prof[[sess_pending_keys(slot)$req]] %||% "")
+  if (nzchar(v)) return(v)
+  legacy <- as.character(prof$pending_req %||% "")
+  if (!nzchar(legacy)) return(NULL)
+  ident_req <- as.character((sess_find(app_dir, id)$identify %||% list())$req_id %||% "")
+  belongs_identify <- nzchar(ident_req) && identical(legacy, ident_req)
+  if (identical(slot, "identify")) return(if (belongs_identify) legacy else NULL)
+  if (belongs_identify) return(NULL)
+  legacy
+}
+
+sess_get_pending_at <- function(app_dir, id = NULL, slot = "step") {
   if (is.null(id) || !nzchar(as.character(id))) id <- sess_current_id(app_dir)
   if (!nzchar(id)) return(NULL)
   prof <- sess_profile(app_dir, id)
-  prof$pending_req
+  v <- as.character(prof[[sess_pending_keys(slot)$at]] %||% "")
+  if (nzchar(v)) return(v)
+  if (nzchar(as.character(prof$pending_req %||% ""))) {
+    old_at <- as.character(prof$pending_at %||% "")
+    if (nzchar(old_at)) return(old_at)
+  }
+  NULL
 }
 
-sess_clear_pending <- function(app_dir, id) {
+sess_clear_pending <- function(app_dir, id, slot = "step") {
+  slot <- sess_pending_slot(slot)
+  keys <- sess_pending_keys(slot)
   prof <- sess_profile(app_dir, id)
-  prof$pending_req <- NULL
-  prof$pending_at <- NULL
+  prof[[keys$req]] <- NULL
+  prof[[keys$at]] <- NULL
+  # 旧键只在它本来就属于这个槽位时一起清掉，别把另一槽的号删了
+  legacy <- as.character(prof$pending_req %||% "")
+  if (nzchar(legacy)) {
+    ident_req <- as.character((sess_find(app_dir, id)$identify %||% list())$req_id %||% "")
+    belongs_identify <- nzchar(ident_req) && identical(legacy, ident_req)
+    if ((identical(slot, "identify") && belongs_identify) ||
+        (identical(slot, "step") && !belongs_identify)) {
+      prof$pending_req <- NULL
+      prof$pending_at <- NULL
+    }
+  }
   sess_profile_write(app_dir, id, prof)
   invisible(TRUE)
 }

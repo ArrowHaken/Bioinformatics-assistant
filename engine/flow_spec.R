@@ -749,7 +749,7 @@ flow_execution <- function(st, V) {
     code <- paste0(code, "\nquit(status = tryCatch(species_exec_main(commandArgs(TRUE)), error = function(e) { message(conditionMessage(e)); 1L }))")
     raw <- if (nzchar(as.character(V$liny_data %||% "")) && nzchar(as.character(V$samples %||% "")))
       c("--species-raw-input", V$liny_data, V$samples) else character(0)
-    argv <- c(code, "--target", script, "--", argv, raw)
+    argv <- c(code, "--args", "--target", script, "--", argv, raw)
     script <- "-e"
   }
   list(ok = TRUE, step = st$id, script = script, argv = argv,

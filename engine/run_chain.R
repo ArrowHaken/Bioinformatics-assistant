@@ -51,14 +51,38 @@ rc_dispatch <- function(c) {
   ans$body$chain_id <- c$req_id
   ans
 }
-rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list()) {
+rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = FALSE) {
   c <- rc_read(sid)
   if (!is.null(c)) {
     same <- !nzchar(req_id) || identical(req_id, c$req_id)
     if (identical(c$status, "blocked") && same) return(rc_dispatch(c))
-    if (c$status %in% c("running", "starting") || same)
+    if (same && c$status %in% c("running", "starting", "done"))
       return(list(code = 200L, body = list(ok = TRUE, delegated = identical(c$status, "running"),
         duplicate = TRUE, chain_id = c$req_id, step = c$todo[[c$index]], chain_status = c$status)))
+    if (same && c$status %in% c("failed", "superseded")) {
+      # 上一次这条链没跑成，再点一键全跑就是「重跑」。
+      #   原来这里也回 duplicate=TRUE：页面拿到 ok 就画成"已交接"，
+      #   实际一条任务都没入队 —— 每一次点击都石沉大海，屏幕上却显示成功。
+      #   现在先把旧链标成被取代，再当新请求重开一轮。
+      c$status <- "superseded"
+      c$superseded_at <- exec_ts()
+      rc_write(c)
+      c <- NULL
+    }
+    if (!is.null(c) && !same && c$status %in% c("running", "starting", "blocked")) {
+      if (!isTRUE(overwrite))
+        return(list(code = 409L, body = list(ok = FALSE, code = "chain_in_progress")))
+      active <- Filter(function(it) identical(it$session_id, sid) &&
+        identical(it$chain_id, c$req_id) && it$status %in% c("queued", "running"),
+        exec_read()$items %||% list())
+      if (length(active))
+        return(list(code = 409L, body = list(ok = FALSE, code = "session_execution_busy",
+          error = "旧任务仍在执行或排队，等待它退出后才能安全重跑。")))
+      c$status <- "superseded"
+      c$superseded_by <- req_id
+      c$superseded_at <- exec_ts()
+      rc_write(c)
+    }
   }
   todo <- Filter(function(id) {
     st <- flow_stage(id, "server")
@@ -67,11 +91,16 @@ rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list()) {
   if (!length(todo)) return(list(code = 409L, body = list(ok = FALSE, code = "empty_remote_chain")))
   busy <- Filter(function(it) identical(it$session_id, sid) && it$status %in% c("queued", "running"), exec_read()$items %||% list())
   if (length(busy)) return(list(code = 409L, body = list(ok = FALSE, code = "session_execution_busy")))
-  if (!nzchar(req_id)) req_id <- paste0("chain-", exec_ts(), "-", paste(sample(c(letters, 0:9), 8, TRUE), collapse = ""))
+  if (!nzchar(req_id)) req_id <- paste0("chain-", gsub("[^A-Za-z0-9]", "", exec_ts()), "-", paste(sample(c(letters, 0:9), 8, TRUE), collapse = ""))
   if (isTRUE(HAS_SESSIONS)) {
-    saved <- sess_set_pending(APP_DIR, sid, req_id)
-    if (isFALSE(saved$ok) || !identical(as.character(sess_get_pending(APP_DIR, sid)), req_id))
-      return(list(code = 409L, body = list(ok = FALSE, code = "chain_request_not_saved")))
+    saved <- sess_set_pending(APP_DIR, sid, req_id, slot = "step")
+    if (isFALSE(saved$ok))
+      return(list(code = 409L, body = list(ok = FALSE, code = "chain_request_not_saved",
+        reason = as.character(saved$error %||% "pending persistence failed"))))
+    actual <- tryCatch(sess_get_pending(APP_DIR, sid, slot = "step"), error = function(e) NULL)
+    if (!identical(as.character(actual %||% ""), req_id))
+      return(list(code = 409L, body = list(ok = FALSE, code = "chain_request_not_saved",
+        reason = "pending request readback mismatch")))
   }
   c <- list(session_id = sid, run_dir = run_dir, req_id = req_id, todo = as.list(todo),
     index = 1L, status = "starting", completed = list(), owner_ctx = owner_ctx)
@@ -88,10 +117,7 @@ rc_validate <- function(b) {
     if (identical(rq, other$req_id) && !identical(sid, other$session_id)) return(bad("chain_session_mismatch"))
   }
   if (is.null(c)) return(NULL)
-  if (!identical(rq, c$req_id)) {
-    if (c$status %in% c("done", "failed")) return(NULL)
-    return(bad("chain_request_mismatch"))
-  }
+  if (!identical(rq, c$req_id)) return(bad("chain_request_mismatch"))
   step <- as.character(b$step %||% "")
   if (step %in% unlist(c$completed) && identical(b$status, "done"))
     return(list(code = 200L, body = list(ok = TRUE, duplicate = TRUE, chain_id = c$req_id)))
@@ -103,12 +129,15 @@ rc_callback <- function(b, accepted) {
   if (is.null(c) || !identical(c$status, "running") ||
       !identical(as.character(b$req_id %||% ""), c$req_id) ||
       !identical(as.character(b$step), c$todo[[c$index]])) return(NULL)
-  if (!b$status %in% c("done", "failed", "stopped")) return(NULL)
-  if (nzchar(as.character(b$sub %||% "")) && identical(b$status, "done")) return(NULL)
-  success <- isTRUE(accepted) && identical(b$status, "done") &&
+  has_sub <- nzchar(as.character(b$sub %||% ""))
+  sub_status <- as.character(b$sub_status %||% b$status)
+  sub_terminal <- has_sub && sub_status %in% c("failed", "stopped")
+  if (!b$status %in% c("done", "failed", "stopped") && !sub_terminal) return(NULL)
+  if (has_sub && identical(sub_status, "done")) return(NULL)
+  success <- !has_sub && isTRUE(accepted) && identical(b$status, "done") &&
     length(b$code) == 1L && !is.na(b$code) && identical(as.integer(b$code), 0L)
   for (it in exec_read()$items %||% list()) if (identical(it$chain_id, c$req_id) && identical(it$step, b$step))
-    exec_set(it$id, list(status = if (success) "done" else "failed", finished_at = exec_ts(), callback_received = TRUE))
+    exec_set(it$id, list(callback_received = TRUE, callback_accepted = if (has_sub) FALSE else success))
   if (!success) { c$status <- "failed"; rc_write(c); return(list(status = "failed")) }
   c$completed <- c(c$completed, list(b$step))
   if (c$index >= length(c$todo)) { c$status <- "done"; rc_write(c); return(list(status = "done")) }

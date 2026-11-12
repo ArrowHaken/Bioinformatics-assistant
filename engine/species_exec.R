@@ -62,9 +62,14 @@ species_from_seurat <- function(path) {
 }
 
 species_exec_main <- function(args = commandArgs(trailingOnly = TRUE)) {
-  if (length(args) < 4L || !identical(args[1L], '--target') || !identical(args[3L], '--'))
-    stop('用法：species_exec.R --target SCRIPT -- ORIGINAL_ARGS', call. = FALSE)
-  target <- args[2L]; argv <- args[-(1:3)]
+  # Rscript -e consumes its options before the expression. --args is required
+  # so wrapper flags cannot be parsed as Rscript options on older installations.
+  marker <- which(args == '--target')
+  if (length(marker) != 1L || marker != 2L || !identical(args[1L], '--args') ||
+      marker + 2L > length(args) || !identical(args[marker + 2L], '--'))
+    stop('用法：Rscript -e CODE --args --target SCRIPT -- ORIGINAL_ARGS', call. = FALSE)
+  target <- args[marker + 1L]
+  argv <- args[-seq.int(1L, marker + 2L)]
   raw_i <- which(argv == '--species-raw-input')
   raw_input <- raw_samples <- NULL
   if (length(raw_i)) {

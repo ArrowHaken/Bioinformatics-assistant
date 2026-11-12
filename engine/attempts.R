@@ -5,23 +5,35 @@ attempt_dir <- function(app_dir,sid,rq) {
   file.path(sess_dir(app_dir,sid),'attempts',rq)
 }
 attempt_register <- function(app_dir,sid,rq,origin='commit') {
-  if (!attempt_valid(sid) || !attempt_valid(rq) || is.null(sess_find(app_dir,sid))) return(FALSE)
+  if (!attempt_valid(sid)) return(list(ok=FALSE,error='invalid session id'))
+  if (!attempt_valid(rq)) return(list(ok=FALSE,error='invalid request id'))
+  if (is.null(sess_find(app_dir,sid))) return(list(ok=FALSE,error='session not found'))
   d <- attempt_dir(app_dir,sid,rq); f <- file.path(d,'attempt.json')
-  if (file.exists(f)) return(TRUE)
+  if (file.exists(f)) {
+    actual <- sess_read_json(f)
+    if (!is.null(actual) && identical(actual$session_id,sid) && identical(actual$req_id,rq))
+      return(list(ok=TRUE))
+    return(list(ok=FALSE,error='existing attempt binding mismatch'))
+  }
   dir.create(d,recursive=TRUE,showWarnings=FALSE,mode='0700')
+  if (!dir.exists(d)) return(list(ok=FALSE,error='attempt directory creation failed'))
   x <- list(session_id=sid,req_id=rq,origin=origin,registered_at=format(Sys.time(),'%Y-%m-%dT%H:%M:%S'))
   tmp <- tempfile('.register-', tmpdir=d)
+  on.exit(unlink(tmp),add=TRUE)
   sess_write_json(tmp,x); Sys.chmod(tmp,'0600')
   # Hard link commits without replacing an already registered immutable fact.
-  linked <- file.link(tmp,f); unlink(tmp)
+  linked <- file.link(tmp,f)
   actual <- sess_read_json(f)
-  !is.null(actual) && identical(actual$session_id,sid) && identical(actual$req_id,rq)
+  if (!is.null(actual) && identical(actual$session_id,sid) && identical(actual$req_id,rq))
+    return(list(ok=TRUE))
+  list(ok=FALSE,error=if (isTRUE(linked)) 'attempt readback mismatch' else 'attempt file commit failed')
 }
 attempt_migrate <- function(app_dir,sid) {
   # Only persisted server bindings may migrate; never register a client supplied req.
   s <- sess_find(app_dir,sid); if (is.null(s)) return(invisible(FALSE))
   p <- sess_profile(app_dir,sid)
-  refs <- c(list(p$pending_req,s$identify$req_id),lapply(s$steps %||% list(),function(x)x$req_id))
+  refs <- c(list(p$pending_req,p$pending_identify_req,p$pending_step_req,s$identify$req_id),
+            lapply(s$steps %||% list(),function(x)x$req_id))
   for (rq in refs) if (attempt_valid(rq)) attempt_register(app_dir,sid,rq,'trusted_legacy')
   invisible(TRUE)
 }
@@ -31,9 +43,15 @@ attempt_has <- function(app_dir,sid,rq) {
   x <- sess_read_json(file.path(attempt_dir(app_dir,sid,rq),'attempt.json'))
   !is.null(x) && identical(x$session_id,sid) && identical(x$req_id,rq)
 }
-attempt_selected <- function(app_dir,sid,rq) {
-  head <- sess_read_json(file.path(sess_dir(app_dir,sid),'attempt-head.json'))
-  identical(sess_chr(head$req_id %||% sess_get_pending(app_dir,sid)),sess_chr(rq))
+attempt_selected <- function(app_dir,sid,rq,slot='step') {
+  # 槽位要分开读（2026-11-12）：识别回写走 identify 槽的头，
+  #   还按步骤头比的话，识别结果一到就被判成"不是这一次的"，
+  #   于是 persisted 但 selected=false，记录里那句结论永远写不进去。
+  sch <- if (exists('sess_pending_slot',mode='function')) sess_pending_slot(slot) else 'step'
+  hn  <- if (exists('attempt_head_name',mode='function')) attempt_head_name(sch) else 'attempt-head.json'
+  head <- sess_read_json(file.path(sess_dir(app_dir,sid),hn))
+  pend <- if (exists('sess_get_pending',mode='function')) sess_get_pending(app_dir,sid,slot=sch) else NULL
+  identical(sess_chr(head$req_id %||% pend),sess_chr(rq))
 }
 attempt_results <- function(app_dir,sid,rq) {
   d <- file.path(attempt_dir(app_dir,sid,rq),'results')
