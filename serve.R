@@ -4078,7 +4078,7 @@ serve_request <- function(con, req) {
     #   为什么要单独一份：last_commit.json 是“当前标记”，每次写都覆盖；
     #   2026-11-18 那次争议里，只剩一个时间戳，既无法证实是人点的，
     #   也无法证实是哪个客户端发的。这里只追加、不做任何判定。
-    try({
+    tryCatch({
       ua <- as.character(req$headers[["user-agent"]] %||% "")
       ref <- as.character(req$headers[["referer"]] %||% "")
       org <- as.character(req$headers[["origin"]] %||% "")
@@ -4086,8 +4086,12 @@ serve_request <- function(con, req) {
       cat(paste0(jsonlite::toJSON(list(
         at = req_at, id = req_id, mode = mode,
         session_id = target_sid,
-        actor = if (is.na(who)) "" else who,
-        actor_kind = as.character(owner_ctx$kind %||% ""),
+        # 身份取不到时必须落空串，不能让整条审计写不进去。
+        #   为什么单独判长度：owner_ctx 为 NULL 时 owner_ctx_key 返回 character(0)，
+        #   is.na(character(0)) 是 logical(0)，直接进 if 会抛错，
+        #   而外层 tryCatch 会把这条审计整段吞掉 —— 恰恰在最该有记录的时候没记录。
+        actor = if (length(who) != 1L || is.na(who)) "" else who,
+        actor_kind = as.character((owner_ctx %||% list())$kind %||% ""),
         ua = substr(ua, 1, 300), origin = org, referer = substr(ref, 1, 500),
         host = as.character(pub_srv$host %||% ""),
         work_root = as.character(pub_srv$work_root %||% "")
