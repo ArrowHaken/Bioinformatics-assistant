@@ -4074,6 +4074,27 @@ serve_request <- function(con, req) {
                              host = as.character(pub_srv$host %||% ""),
                              work_root = as.character(pub_srv$work_root %||% ""))),
         silent = TRUE)
+    # 提交台账：谁、什么时候、从什么客户端发起了这次保存。
+    #   为什么要单独一份：last_commit.json 是“当前标记”，每次写都覆盖；
+    #   2026-11-18 那次争议里，只剩一个时间戳，既无法证实是人点的，
+    #   也无法证实是哪个客户端发的。这里只追加、不做任何判定。
+    try({
+      ua <- as.character(req$headers[["user-agent"]] %||% "")
+      ref <- as.character(req$headers[["referer"]] %||% "")
+      org <- as.character(req$headers[["origin"]] %||% "")
+      who <- tryCatch(as.character(owner_ctx_key(owner_ctx)), error = function(e) NA_character_)
+      cat(paste0(jsonlite::toJSON(list(
+        at = req_at, id = req_id, mode = mode,
+        session_id = target_sid,
+        actor = if (is.na(who)) "" else who,
+        actor_kind = as.character(owner_ctx$kind %||% ""),
+        ua = substr(ua, 1, 300), origin = org, referer = substr(ref, 1, 500),
+        host = as.character(pub_srv$host %||% ""),
+        work_root = as.character(pub_srv$work_root %||% "")
+      ), auto_unbox = TRUE), "\n"),
+        file = file.path(STATE_DIR, "commit_audit.jsonl"), append = TRUE)
+      try(Sys.chmod(file.path(STATE_DIR, "commit_audit.jsonl"), mode = "0600"), silent = TRUE)
+    }, error = function(e) NULL)
 
     # 2) 本机模式：把选好的目录设成运行目录。
     #    服务器模式下运行目录是服务器上的绝对路径，本机拿不到，

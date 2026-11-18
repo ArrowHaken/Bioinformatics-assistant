@@ -59,14 +59,31 @@ import_active_items <- function(step, session_id = "", req_id = "", items = NULL
   }, items)
 }
 
-# 回写自报的 exec_id 是否就是这一环在管的那个任务
+# 回写对应的是这一环的哪个在管任务
+#   两条路，优先度从上到下：
+#     ① 回写自报了 exec_id，且它确实是本环在管的一条 —— 照用。
+#     ② 没自报，但 step + session_id + req_id 已在服务端任务表里唯一命中一条 —— 认定就是它。
+#   为什么要有第②条：
+#     ②看起来像“放宽”，实际反而更严格。
+#     原来只认客户端自报的 exec_id，而 exec_id 本身也是客户端写进来的，
+#     并不比 req_id 更难伪造；反而得到的是“少报一个字段就卡死”。
+#     第②条的三个条件全部由服务端自己从任务表过滤得出，
+#     客户端无法决定命中哪一条；命中两条及以上仍然拒收。
+#   实测依据：2026-11-18 18:13 那次 doublet 回写 exec_id 为空，
+#     而那一环只有 ex-20261118154719-8664 一条在管任务，
+#     事实上完全可以唯一定位，却被当成了“不知道你是谁”，
+#     于是任务挂在 running 四小时，期间这一环所有回写都进不来。
 import_bound_exec <- function(b, items = NULL) {
-  exid <- txt(b$exec_id)
-  if (!nzchar(exid)) return(NULL)
   act <- import_active_items(b$step, b$session_id, b$req_id, items)
-  hit <- Filter(function(it) identical(as.character(it$id %||% ""), exid), act)
-  if (!length(hit)) return(NULL)
-  hit[[1]]
+  if (!length(act)) return(NULL)
+  exid <- txt(b$exec_id)
+  if (nzchar(exid)) {
+    hit <- Filter(function(it) identical(as.character(it$id %||% ""), exid), act)
+    if (!length(hit)) return(NULL)
+    return(hit[[1]])
+  }
+  if (length(act) == 1L) return(act[[1]])
+  NULL
 }
 
 # 派工目录必须与本次作业的工作根严格相等。
@@ -173,9 +190,13 @@ import_active_exec_guard <- function(b, items = NULL, sess_dir = "") {
   }
 
   if (is.null(ex0)) {
+    # 走到这里只剩一种情形：本环有多条在管任务，
+    #   回写又没自报 exec_id，服务端无法判定它在还哪一次的账。
+    #   单条在管时已经在 import_bound_exec 里认定，不会到这里。
     return(reject("exec_active_conflict", paste0(
-      "「", stp, "」这一环还有执行端的任务在管（", paste(ids, collapse = ", "),
-      "）。这条回写既不是从那个任务发出，也不含它的结果结构，",
+      "「", stp, "」这一环同时有 ", length(ids), " 条执行端任务在管（",
+      paste(ids, collapse = ", "), "）。这条回写没带 exec_id，",
+      "无法判定它在还哪一次，因此拒收；请在回写体里带上 exec_id。",
       "状态与开始时间都不改。计算仍在进行时，阶段状态由服务端按任务事实给出。")))
   }
 

@@ -43,6 +43,15 @@ const S = {
   //   常驻显示，不靠 toast —— toast 一闪就没了，而"这次到底有没有交给助手"
   //   是要一直摆在那让人核对的信息。
   autoInject: null, autoInjectBusy: false, autoInjectAt: 0,
+  // 「保存并识别」正在执行中，以及上一次开始的时间。
+  //   为什么需要两个字段，而不是一个"忙碌"就够：
+  //     ① 提交中按钮不禁用 —— 实测同一帧点两下会发两次请求，
+  //        第二发的请求号覆盖第一发，前一次的识别结果回来就被判成旧请求，白跑一趟。
+  //     ② 点完焦点还留在按钮上 —— 焦点在按钮上时，空格和回车等同于再点一次，
+  //        人没碰鼠标、只是翻个页，就会触发一次保存并识别。
+  //        实测：空格 1 次、回车 1 次、双击 2 次，全部打到 /api/place/commit。
+  //   所以既要进程内锁，也要时间窗：两者挡的不是同一种误触。
+  commitBusy: false, commitAt: 0,
   // 本次「保存并识别」的请求号（服务端生成）。
   //   它随注入文本一起交给助手，助手回写时原样带回，
   //   页面据此判断"手上的结果是这一次跑出来的"还是上一轮的旧数据。
@@ -6150,7 +6159,9 @@ function renderPlace() {
   //   之前信息齐全后它会变成「重新识别」，于是这一页上找不到"保存"这个动作 ——
   //   用户的原话是「没有保存识别按钮啊」。动作名不该因为状态而消失。
   h += '<div class="pl-actions">'
-    + '<button class="btn primary big" data-plcommit="1">保存并识别</button>'
+    + '<button class="btn primary big" data-plcommit="1"'
+    + (S.commitBusy ? ' disabled aria-busy="true"' : '') + '>'
+    + (S.commitBusy ? '识别中…' : '保存并识别') + '</button>'
     + '<span class="small">' + (d.mode === 'server'
         ? '保存并交给助手去识别'
         : '保存并自动识别')
@@ -6213,6 +6224,21 @@ function openPathPicker() {
 
 async function commitPlace() {
   if (sessionChanging) return;
+  // 防误触两道闸。为什么两道都要：
+  //   进程内锁挡"正在跑又点了一次"，时间窗挡"刚跑完连点两下"。
+  //   没有这两道时，同一帧点两下会真的发出两次提交，两个请求号前后覆盖。
+  if (S.commitBusy) return;
+  if (S.commitAt && Date.now() - S.commitAt < 1500) return;
+  S.commitBusy = true;
+  S.commitAt = Date.now();
+  // 点下去立刻把焦点挪走。
+  //   为什么必须做：按钮执行完不会被移走，焦点留在上面，
+  //   此后按一次空格或回车就等于再签一次字 —— 这正是"我没点鼠标却触发了"的形态。
+  try {
+    const b0 = document.querySelector('[data-plcommit]');
+    if (b0 && typeof b0.blur === 'function') b0.blur();
+  } catch (e) {}
+  renderPlace();
   const __recordScope = recordContext();
   try {
 
@@ -6334,6 +6360,10 @@ async function commitPlace() {
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
     throw e;
+  } finally {
+    // 无论成功、失败还是提前返回，锁都要解开，否则按钮永久卡在"识别中"。
+    S.commitBusy = false;
+    renderPlace();
   }
 }
 
