@@ -156,7 +156,10 @@ function resetRecordState() {
     flowOpen:{}, flowTimer:null, pollTimer:null, waitTimer:null, waitTries:0,
     waitReq:null, waitSince:0, staleEnvAt:'', execTasks:[], collapsed:{}, identified:false,
     needsRemote:false, references:null, variants:{}, variantsLoaded:null, lastQuery:{},
-    place:null, placeDraft:null, lastLogLen:0, readonly:false
+    place:null, placeDraft:null, lastLogLen:0, readonly:false,
+    // 注释依据两个按钮里圈在哪一个：saved=已确定选择，edit=修改选择。
+    //   默认 saved：之前定过的依据如果还完整，就不该让人以为要重选。
+    annotRefMode:'saved'
   });
   ['monitorTimes','logBox','logHint','delegatedHost','flowHost','stepsHost','artifactsHost'].forEach(id => {
     const el = document.getElementById(id); if (el) { el.textContent = ''; el.innerHTML = ''; }
@@ -1893,7 +1896,7 @@ async function answerDecision(id, useSuggested) {
    前两个是过程噪音（配置在保存选择时自动生成、答复进度在闸门区看得到），
    第三个暴露的是实现细节而不是用户要关心的事，都删掉了。 */
 function renderHead() {
-  // 状态行区分分析归属、回复路由与指令队列。
+  // 状态行区分分析归属与回复路由。
   //   工作路径删掉了 —— 那条路径又长又没人看，还把这行撑成两行。
   const sub = $('#subline');
   if (sub) {
@@ -2227,7 +2230,7 @@ function stageArtCount(sg, rs) {
 /* 通用浮层：卡片上的「任务完成详情」和失败的环节都走它。
    为什么自己建而不是用 index.html 里的 modal：
      这两处的内容是随步骤变的，塞进固定 DOM 会变成又一处要同步的地方。
-     建一次、用完删掉，和「指令队列」面板同一套做法。 */
+     建一次、用完删掉。 */
 /* 浮层可以叠：后开的盖在前面那个上面，关掉只回到上一级。
    为什么必须叠：「任务完成详情」里点缩略图看大图，关大图应该回到详情，
    而不是把详情一起关掉 —— 以前两者共用一个 #stSheet，点开大图就把详情替换掉了，
@@ -3130,9 +3133,13 @@ function renderRun() {
       //   把这些内容常驻摊开会把每张卡撑成一整屏，三个并排就变成三根长条。
       //   失败时默认展开 —— 出错了不需要再点一下才看得到原因。
       + stageFoldHTML(sg, rs, s.id)
-      // 参数与候选结果的位置：筛群（多套参数）、注释（多套依据）都落在这里。
+      // 参数与候选结果的位置：筛群的多套参数落在这里。
       //   放在按钮上方，因为"先定参数、再点跑"才是顺序。
-      + '<div class="varpanel" id="varpanel-' + esc(s.id) + '"></div>'
+      //   注释依据不放进这个异步面板：那个面板要等一次网络往返才填内容，
+      //   而卡片每 5 秒整块重建一次，中间那段空档就成了"按钮一直在闪"。
+      //   改由 annotRefBarHTML() 跟卡片同步生成，天生不会缺一段。
+      + (s.id === 'filter' ? '<div class="varpanel" id="varpanel-' + esc(s.id) + '"></div>' : '')
+      + (s.id === 'annotate' ? annotRefBarHTML() : '')
       + '<div class="stbtns">' + btns + '</div>'
       + '<div class="stqmsg" id="stq-' + esc(s.id) + '"></div>'
       + '</div>';
@@ -3571,7 +3578,7 @@ async function pokeFlow(stageId) {
         + (r && r.ok ? ' 送出' : ' 放进队列，我会取走') + '）。回写之后这一栏会自己变。</span>'
       : '<span class="qbad">没送进会话：'
         + esc(String((r && (r.why || r.code)) || '通道没连上').replace(/[。．.]+$/, ''))
-        + '。指令原文在顶部「指令队列」里可复制。</span>';
+        + '。可等会话通道恢复后再点一次。</span>';
   }
   if (r && (r.ok || r.relayed)) toast(r.ok ? '已让它报一次，回写后这一栏会自己变。' : '会话通道没连上，已放进队列，我会取走执行。', 'good');
   else toast('没送进会话：' + String((r && (r.why || r.code)) || '通道没连上').replace(/[。．.]+$/, ''), 'bad');
@@ -3752,26 +3759,76 @@ function variantListHTML(stage, items, chosen) {
   return h;
 }
 
+/* 注释依据的两个按钮：已确定选择 / 修改选择。
+   ---------------------------------------------------------------------
+   为什么单独一个同步函数（2026-11-18）：
+     以前这里是一块 async 面板，要等一次 /api/variants 往返才填内容，
+     而卡片每 5 秒整块重建一次 —— 重建后到返回前那段空档里按钮不存在，
+     所以人看到的是"按钮一直在闪，时有时无"。
+     改成跟卡片同一趟同步生成，逻辑上不可能缺那一段。
+   两个按钮是什么意思（按人话说）：
+     · 已确定选择：这一步该用哪份依据，之前就定过了，直接用它。
+       点它就表示"照这份跑"，圈亮在这一个上。
+     · 修改选择：还没定、或者想换一份。点它才弹三选一
+       （服务器上已有 / 我上传一份 / 文献库），跟环境识别那边同一套。
+       选完并配好，圈就移到这一个上，另一个灭。
+   亮着的那一个就是"这次跑会用的"。没配好的时候两个都不亮，
+   并且写明缺什么 —— 不给一个看不出来能不能跑的状态。 */
+function annotRefState() {
+  const d = S.placeDraft || {};
+  const rm = String(d.ref_mode || '');
+  const items = arr(S.references && S.references.items);
+  const chosen = String((S.references && S.references.chosen) || '');
+  const cur = items.filter(x => String(x.id || '') === chosen)[0] || null;
+  if (rm === 'path') {
+    const p0 = String(d.ref_path || '').trim();
+    return { mode: 'path', ready: !!p0, label: p0 ? ('服务器路径 ' + p0) : '还没填服务器上的路径' };
+  }
+  if (rm === 'upload') {
+    const nm = cur ? String(cur.name || cur.id || '') : (S.pendingRef ? String(S.pendingRef.name || '') : '');
+    return { mode: 'upload', ready: !!nm, label: nm ? ('已上传 ' + nm) : '还没上传文件' };
+  }
+  if (rm === 'lit') {
+    const a0 = String(d.ref_archive || '').trim();
+    return { mode: 'lit', ready: !!a0, label: a0 ? ('文献库存档号 ' + a0) : '还没填存档号' };
+  }
+  if (rm === 'none') return { mode: 'none', ready: true, label: '这一轮不需要注释依据' };
+  return { mode: '', ready: false, label: '还没选注释依据' };
+}
+
+function annotRefBarHTML() {
+  const st = annotRefState();
+  // 默认圈在「已确定选择」上：只要之前定过的依据还完整，就不该让人以为要重选。
+  //   显式点过「修改选择」才把圈移过去；改完再移回「已确定选择」。
+  const editing = String(S.annotRefMode || '') === 'edit';
+  const savedOn = st.ready && !editing;
+  const editOn = editing;
+  const tip = st.ready
+    ? (editing ? '改完并保存后，圈会回到「已确定选择」' : '这一步会按上面这份依据跑')
+    : ('还差一步：' + st.label + ' — 点「修改选择」去填');
+  return '<div class="annotrefbar" style="margin-top:6px">'
+    + '<div class="btnrow">'
+    + '<button class="btn btn-sm' + (savedOn ? ' primary' : '') + '"'
+    + ' data-annot-ref-mode="saved" title="沿用之前定好的注释依据">已确定选择</button>'
+    + '<button class="btn btn-sm' + (editOn ? ' primary' : '') + '"'
+    + ' data-annot-ref-mode="edit" title="换一份或第一次选">修改选择</button>'
+    + '</div>'
+    + '<div class="small" style="margin-top:5px;color:#5a6068">' + esc(tip) + '</div>'
+    + '</div>';
+}
+
 async function renderVarPanels() {
   const __recordScope = recordContext();
   try {
 
   const fp = $('#varpanel-filter');
-  const ap = $('#varpanel-annotate');
-  if (!fp && !ap) return;
+  if (!fp) return;
   await recordAwait(loadVariants(true), __recordScope);
   // 卡片里不再摆参数与候选列表。
   //   她的原话：「筛群的参数依据是要点击运行之后弹出的，并且最终显示到任务完成详情里」。
   //   卡片上常驻一块参数框，一来把卡片撑高（三列布局里最怕这个），
   //   二来让人以为"不填参数这步就跑不了"，实际它只在运行时才需要定。
   if (fp) fp.innerHTML = '';
-  // 注释这一步只需要一个入口按钮：依据从哪来（服务器 / 上传 / 查文献）
-  //   全在那张卡里，不在卡片上铺开。
-  if (ap) {
-    ap.innerHTML = '<div class="btnrow" style="margin-top:6px">'
-      + '<button class="btn btn-sm primary" data-annot-ref="1">选择注释依据</button>'
-      + '</div>';
-  }
 
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -5138,7 +5195,28 @@ document.addEventListener('click', e => {
   }
   if (t.closest('[data-filter-go]')) { confirmFilterParams(); return; }
 
-  /* ---- 注释：打开依据选择卡（服务器 / 上传 / 查文献三合一） ---- */
+  /* ---- 注释依据：两个按钮各管一件事 ---- */
+  const arm = t.closest('[data-annot-ref-mode]');
+  if (arm) {
+    const which = String(arm.getAttribute('data-annot-ref-mode') || '');
+    if (which === 'saved') {
+      // “已确定选择”：就是“照之前定的那份跑”。
+      //   不重弹选择卡（重弹等于把同一个决定问第二遍），
+      //   只把圈移回它身上，并确认那份依据还完整。
+      S.annotRefMode = 'saved';
+      const st = annotRefState();
+      if (!st.ready) { toast('还没配好：' + st.label + '。点「修改选择」去填。', 'bad'); renderRun(); return; }
+      renderRun();
+      toast('这一步将按上面那份依据跑。', 'good');
+      return;
+    }
+    // “修改选择”：先把圈移过来，再弹三选一。
+    S.annotRefMode = 'edit';
+    renderRun();
+    const dm = (S.placeDraft && S.placeDraft.ref_mode) || '';
+    openRefPicker('annotate', function () { S.annotRefMode = 'saved'; renderRun(); }, dm);
+    return;
+  }
   if (t.closest('[data-annot-ref]')) {
     // 页面上已经选过来源时，这个按钮就只做那一个问题的事。
     //   没选过才打开三选一的卡片（这时弹卡不是重复提问，是第一次问）。

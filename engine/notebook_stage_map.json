@@ -1,0 +1,49 @@
+{
+  "schema": "pa.notebook-stage-map.v1",
+  "purpose": "把笔记本（scRNA_analysis_GPU.ipynb）的章节编号翻译成应用的执行阶段。用户原话里的「跑到 08 之前」这类说法指的就是笔记本章节号，不是应用的阶段名；两套编号不重合，中间必须有这张对照表，否则只能拒绝。",
+  "source": {
+    "notebook": "zjz:C:/Users/17499/Desktop/个性化助手/scRNA_analysis_GPU.ipynb",
+    "cells": 171,
+    "outline_read_at": "2026-11-18",
+    "outline_method": "读 ipynb 的 markdown cell，取形如 ## 08. CellRatio 的一级标题；cell 序号即证据位置"
+  },
+  "app_profile": "server",
+  "app_stages": ["doublet", "merge", "markers", "filter", "final", "fullmark", "diff", "annotate", "figs", "enrich", "ppt", "pack"],
+  "sections": [
+    {"no": "01", "title": "ImportPackages", "cell": 1, "done_at_stage": null,
+     "note": "只加载环境，不产生分析产物。对应应用侧是 env 体检，不属于服务器阶段。"},
+    {"no": "02", "title": "ProjectConfig", "cell": 3, "done_at_stage": null,
+     "note": "填路径与项目名。对应应用侧 config，由应用生成 pipeline.json / gates.json。"},
+    {"no": "03", "title": "SampleConfig", "cell": 5, "done_at_stage": null,
+     "note": "登记样本、分组、配色。对应应用侧 config 的样本与分组字段。"},
+    {"no": "04", "title": "ReadData", "cell": 7, "done_at_stage": "doublet",
+     "note": "10x 读取、合并与缓存。去双阶段的输入就是它产出的 adata_raw.h5ad，阶段跑完这一步必然已完成。"},
+    {"no": "05", "title": "QC", "cell": 10, "done_at_stage": "doublet",
+     "note": "5.1 基础质控 + 5.2 双细胞检测 + 5.3 decontX。应用的 doublet 阶段标题就是「逐样本去双与质控」。"},
+    {"no": "06", "title": "DimensionReduction", "cell": 44, "done_at_stage": "merge",
+     "note": "PCA / Harmony / scVI 与邻居图。应用 merge 阶段做多样本整合。"},
+    {"no": "07", "title": "SelectClustering", "cell": 65, "done_at_stage": "diff",
+     "note": "7.1 配置 → 7.2 Leiden → 7.4 最终簇 → 7.5 FindMarkers → 7.5.1 上下调。对应应用 markers / filter / final / fullmark / diff 一整段，07 跑完落在 diff。"},
+    {"no": "08", "title": "CellRatio", "cell": 92, "done_at_stage": "annotate",
+     "note": "8.0.1 AnnotationConfig（注释字典）、8.0.2 ResolveAnnotation（celltype 判定）、8.0.3 候选 Marker。应用的 annotate 阶段就是「细胞类型注释」，写回 annot 列并产出 annot_result.xls。这一节是人工审核的天然位置。"},
+    {"no": "09", "title": "DiffEnrich", "cell": 115, "done_at_stage": "enrich",
+     "note": "按细胞类型做差异与 GO/KEGG 富集。应用 enrich 阶段。"},
+    {"no": "10", "title": "AnnotationPlots", "cell": 138, "done_at_stage": "figs",
+     "note": "注释相关的出图。应用 figs 阶段。"},
+    {"no": "11", "title": "TargetGene", "cell": 154, "done_at_stage": "figs",
+     "note": "目标基因表达图，仍属出图。"},
+    {"no": "12", "title": "Celltype FC Top25", "cell": 169, "done_at_stage": "figs",
+     "note": "每类 Top25 倍数变化图，仍属出图。"}
+  ],
+  "review_boundary": {
+    "stage": "annotate",
+    "note": "08 是唯一会发生「细胞类型判定」的地方，也是用户说「注释完给我审核」指向的位置。任何以 08 及之后为终点的范围，都必须同时把 annotation_gate 打开。"
+  },
+  "phrases": [
+    {"pattern": "跑到0?8之前|到0?8前|before\\s*0?8", "until": "08", "inclusive": false},
+    {"pattern": "跑到0?7之前|做完0?7", "until": "07", "inclusive": true},
+    {"pattern": "跑到0?9之前", "until": "09", "inclusive": false},
+    {"pattern": "注释完.*审核|审核.*注释", "gate": true}
+  ],
+  "unknown_policy": "章节号不在上表里、或该章节的 done_at_stage 为 null 时，不猜：保留原话，拒绝把范围翻译成阶段，交回人确认。"
+}

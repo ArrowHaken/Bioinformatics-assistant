@@ -529,13 +529,140 @@ intent_json_unique <- function(x) {
 }
 
 # A bounded single app step is not a bounded downstream all-run plan.
+# 这条记录自己的可执行阶段顺序。
+#   为什么必须按记录取，不能固定成一条常量（2026-11-18）：
+#     服务器档真实在跑的是 flow_spec 的 server 档
+#     （doublet → merge → markers → filter → final → fullmark → diff →
+#      annotate → figs → enrich → ppt → pack）；
+#     本机档才是应用的 CHAIN_ORDER（env → decide → … → pack）。
+#     两套 id 几乎不重合，只有 ppt / pack 同名。
+#     以前这里只认本机那一套，后果是：任何服务器记录只要存了一条执行范围
+#     限制（例如用户原话里的「跑到 08 之前」），就永远过不去这道闸门 ——
+#     记录建得出来，活一步也派不出去，而且回的是「执行阶段必须是明确的
+#     应用阶段 ID」，跟这条记录真实能跑什么完全对不上。
+#   取不到记录、或取不到流程定义时，退回原来那条固定链条：
+#     宁可保守拒绝，也不能把一条不认识的阶段名当成合法放行。
+intent_stage_chain <- function(app_dir, sid) {
+  rec <- NULL
+  if (exists('sess_find', mode = 'function'))
+    rec <- tryCatch(sess_find(app_dir, sid), error = function(e) NULL)
+  mode <- trimws(as.character((rec %||% list())$mode %||% ''))
+  if (identical(mode, 'server') && exists('FLOW_ORDER', mode = 'function')) {
+    ord <- tryCatch(FLOW_ORDER('server'), error = function(e) character(0))
+    if (is.character(ord) && length(ord)) return(ord)
+  }
+  INTENT_APP_CHAIN
+}
+
+# 审核闸门卡在「注释」这一步及其之后。
+#   本机档的注释发生在主流程下段，常量一直写成前四步，保持原样不动；
+#   服务器档有独立的 annotate 阶段，卡点就在它之前。
+#   这样「要不要先人工审核」这件事按记录自己的阶段判断，而不是按另一套
+#   id 的下标去比 —— 用另一套下标比，服务器记录会连第一步都被判成越界。
+intent_review_prefix <- function(chain) {
+  i <- match('annotate', chain)
+  if (!is.na(i) && i > 1L) return(chain[seq_len(i - 1L)])
+  chain[seq_len(min(4L, length(chain)))]
+}
+
+# 笔记本章节号 → 应用阶段。
+#   为什么要有这张表（2026-11-18）：
+#     用户说的话来自笔记本（scRNA_analysis_GPU.ipynb），不是应用的阶段名。
+#     他说「跑到 08 之前」，08 是笔记本章节号，应用的阶段叫 diff / annotate。
+#     两套编号没有任何字面重合，之前只能拒绝，等于把判断推回给人。
+#     现在把对照读成数据（engine/notebook_stage_map.json），由这里翻译。
+#   为什么不写死在代码里：对照关系来自那份 notebook 的真实章节，
+#     换了 notebook 或改了章节，改数据文件就行，不用动判定逻辑。
+intent_notebook_map <- function(app_dir) {
+  f <- file.path(app_dir, 'engine', 'notebook_stage_map.json')
+  if (!file.exists(f)) return(NULL)
+  tryCatch(jsonlite::fromJSON(paste(readLines(f, warn = FALSE), collapse = '\n'),
+                              simplifyVector = FALSE), error = function(e) NULL)
+}
+
+# 把「08」「8」「跑到 08 之前」翻成这条记录自己的阶段 id；翻不出就返回 NULL。
+#   只认两种写法：阶段名本身，或「章节号」与「章节号 + 之前/前」。
+#   认不出的（比如「注释完」「随便跑到哪」）一律 NULL，由上层给出可执行的下一步，
+#   不在这里猜一个看起来合理的阶段 —— 猜错的代价是少跑或多跑一整段分析。
+intent_resolve_bound <- function(app_dir, bound, chain) {
+  b <- trimws(as.character(bound %||% ''))
+  if (!nzchar(b)) return(NULL)
+  if (b %in% chain) return(b)
+  m <- regmatches(b, regexpr('[0-9]+', b))
+  if (!length(m)) return(NULL)
+  no <- suppressWarnings(as.integer(m))
+  if (is.na(no) || no < 1L) return(NULL)
+  # 「之前」= 不含这一节，取上一节做完的阶段。
+  before <- grepl('之前|前|before', b, ignore.case = TRUE)
+  map <- intent_notebook_map(app_dir)
+  if (is.null(map) || !length(map$sections)) return(NULL)
+  want <- if (before) no - 1L else no
+  if (want < 1L) return('config')
+  for (s in map$sections) {
+    if (is.null(s$no)) next
+    if (!identical(suppressWarnings(as.integer(s$no)), as.integer(want))) next
+    st <- as.character(s$done_at_stage %||% '')
+    # 01-03 只做配置，没有分析阶段；说「到 03 为止」就等于只做配置。
+    if (!nzchar(st)) return('config')
+    if (st %in% chain || identical(st, 'config')) return(st)
+    return(NULL)
+  }
+  NULL
+}
+
+# 把已保存的分析限制写成执行端能照做的一段话。
+#   这些限制以前是「挡住派活」，现在是「随指令下发」：
+#   改哪几个 cell、注释时能不能合并相邻群，本来就该由拿到 notebook 和相关表
+#   的那一端按实际情况判断。应用这边硬判，判不准只能拒绝，等于把活推回给人。
+#   run_enqueue 会把这段话并进 gate_note，跟着指令一起下发。
+intent_constraint_note <- function(app_dir, sid) {
+  path <- if (exists('sess_profile_f', mode = 'function')) sess_profile_f(app_dir, sid) else
+    file.path(app_dir, 'state', 'sessions', sid, 'profile.json')
+  if (!file.exists(path)) return('')
+  profile <- tryCatch(intent_json_read(path), error = function(e) NULL)
+  if (!is.list(profile)) return('')
+  it <- profile[['intent']]
+  if (!is.list(it)) return('')
+  chain <- intent_stage_chain(app_dir, sid)
+  out <- character(0)
+  sc <- it[['scope']]; rf <- it[['reference']]; an <- it[['annotation']]
+  if (is.list(sc) && !is.null(sc[['run_until']])) {
+    raw <- as.character(sc[['run_until']])[1]
+    st <- intent_resolve_bound(app_dir, raw, chain)
+    if (!is.null(st)) {
+      out <- c(out, if (identical(st, 'config')) '这次只做配置，不进入分析阶段。'
+        else paste0('这次做到 ', st, ' 阶段为止（原话：', raw,
+                    '），到这个阶段停，不要往后跑。'))
+    } else {
+      out <- c(out, paste0('执行范围原话是「', raw,
+                           '」，没有对应的应用阶段；先按这个范围自己核对再动手，核对不了就停下回写原因。'))
+    }
+  }
+  if (is.list(sc) && isTRUE(sc[['annotation_gate']]))
+    out <- c(out, '细胞类型注释这一环的结果要先交人审核，审核通过前不要继续往下跑。')
+  if (is.list(rf) && !is.null(rf[['modified_cells']])) {
+    cells <- rf[['modified_cells']]
+    ids <- paste(as.character(unlist(cells)), collapse = '、')
+    out <- c(out, paste0('参考 notebook 要改动的 cell 是 ', ids,
+      '，只改这些，其他 cell 保持原样；按你手上那份 notebook 的实际编号核对后动手。'))
+  }
+  if (is.list(an) && !is.null(an[['merge_adjacent']]))
+    out <- c(out, if (isTRUE(an[['merge_adjacent']]))
+      '注释时空间位置相邻的大群可以合并成一类。' else '注释时不要把相邻的群合并。')
+  if (is.list(an) && !is.null(an[['policy']]))
+    out <- c(out, paste0('注释策略：', as.character(an[['policy']])[1], '。'))
+  paste(out, collapse = ' ')
+}
+
 intent_execution_gate <- function(app_dir, sid, requested_step = NULL) {
   allow <- list(ok = TRUE, fields = list())
   deny <- function(code, fields = character(), message) list(ok = FALSE,
     code = code, fields = as.list(fields), error = message)
   scalar_text <- function(x) is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
+  chain <- intent_stage_chain(app_dir, sid)
   if (!is.null(requested_step) && !scalar_text(requested_step))
-    return(deny('intent_step_invalid', message = '执行阶段必须是明确的应用阶段 ID。'))
+    return(deny('intent_step_invalid', message = paste0(
+      '执行阶段必须是这条记录自己的阶段 ID：', paste(chain, collapse = '、'), '。')))
   path <- if (exists('sess_profile_f', mode = 'function')) sess_profile_f(app_dir, sid) else
     file.path(app_dir, 'state', 'sessions', sid, 'profile.json')
   if (!file.exists(path)) return(allow)
@@ -556,36 +683,47 @@ intent_execution_gate <- function(app_dir, sid, requested_step = NULL) {
   if (!is.null(bound) && !scalar_text(bound)) return(unreadable())
   if (!is.null(review) && !(is.logical(review) && length(review) == 1L && !is.na(review)))
     return(unreadable())
+  # 只有这两项需要「翻成可验证计划」；其余限制是随指令下发的要求，不算待解计划。
   fields <- character()
   if (!is.null(bound)) fields <- c(fields, 'scope.run_until')
   if (isTRUE(review)) fields <- c(fields, 'scope.annotation_gate')
-  if (!is.null(rf[['modified_cells']])) fields <- c(fields, 'reference.modified_cells')
-  if (!is.null(an[['merge_adjacent']])) fields <- c(fields, 'annotation.merge_adjacent')
-  unimplemented <- function(fields) deny('intent_constraints_unimplemented', fields,
-    '已保存的分析限制尚未转成可验证执行计划，未启动或委派任务。')
-  # Compatibility callers without a step must retain the conservative contract.
+  # 改哪几个 cell、注释能不能合并相邻群，不再是硬闸门（2026-11-18）。
+  #   原来这两项一律拒绝，理由是「还没转成可验证执行计划」。实际效果是：
+  #   用户说得出、应用存得下、活一步派不出去，只能回头问人。
+  #   这两件事本来就有能判断的一方 —— 拿到 notebook 与相关表的执行端。
+  #   现在改成写进指令下发（intent_constraint_note），让人写的要求真的走到执行端。
+  #   保留的硬闸门只剩两类，都是「多跑一步就会覆盖人的判断」：
+  #     · 执行范围（往后的阶段必须停）
+  #     · 注释审核（注释结果要先给人看）
+  #   Compatibility callers without a step must retain the conservative contract.
   if (is.null(requested_step)) {
-    if (length(fields)) return(unimplemented(fields))
+    if (length(fields)) return(deny('intent_constraints_pending',
+      fields, '已保存的分析限制尚未转成可验证执行计划，未启动或委派任务。'))
     return(allow)
   }
-  unsupported <- intersect(fields, c('reference.modified_cells', 'annotation.merge_adjacent'))
-  if (length(unsupported)) return(unimplemented(unsupported))
-  # Only named scope constraints require app-chain IDs; legacy flow IDs stay executor-owned.
+  # Only named scope constraints require this record's stage IDs; unknown ids stay refused.
   if ((!is.null(bound) || isTRUE(review)) &&
-      !requested_step %in% c(INTENT_APP_CHAIN, 'config', 'all'))
-    return(deny('intent_step_invalid', message = '执行阶段必须是明确的应用阶段 ID。'))
-  if (!is.null(bound) && !bound %in% INTENT_APP_CHAIN)
-    return(unimplemented('scope.run_until'))
+      !requested_step %in% c(chain, 'config', 'all'))
+    return(deny('intent_step_invalid', message = paste0(
+      '执行阶段必须是这条记录自己的阶段 ID：', paste(chain, collapse = '、'), '。')))
+  # 范围原话翻成阶段：笔记本编号（08）、阶段名（annotate）都认。
+  #   翻不出来时不再拒绝派活，而是让这一步照常走、把原话随指令一起下发，
+  #   由执行端按它手上的 notebook 核对。理由是用户说得清楚，只是说法不是
+  #   应用内部的 id；拒绝等于把可执行的活变成一次追问。
+  bound_stage <- if (is.null(bound)) NULL else intent_resolve_bound(app_dir, bound, chain)
   if (identical(requested_step, 'all') && length(fields))
     return(deny('intent_scope_requires_bounded_plan', fields,
       '带范围限制的全部执行需要显式有界计划，未启动或入队。'))
   # No approval endpoint exists here; force and saved approval-looking fields confer no authority.
-  if (isTRUE(review) && !requested_step %in% INTENT_APP_CHAIN[1:4])
+  if (isTRUE(review) && !requested_step %in% intent_review_prefix(chain))
     return(deny('annotation_review_required', 'scope.annotation_gate',
       '此阶段必须先完成人工注释审核，未启动或入队。'))
-  if (!is.null(bound) && (!requested_step %in% INTENT_APP_CHAIN ||
-      match(requested_step, INTENT_APP_CHAIN) > match(bound, INTENT_APP_CHAIN)))
-    return(deny('intent_scope_outside_plan', 'scope.run_until',
-      '请求阶段超出已保存的执行范围，未启动或入队。'))
+  # 只在「翻得出阶段」时按范围拦；翻不出的原话交给指令下发，不再借此挡住派活。
+  if (!is.null(bound_stage) && !identical(bound_stage, 'config')) {
+    if (!requested_step %in% chain ||
+        match(requested_step, chain) > match(bound_stage, chain))
+      return(deny('intent_scope_outside_plan', 'scope.run_until',
+        '请求阶段超出已保存的执行范围，未启动或入队。'))
+  }
   allow
 }

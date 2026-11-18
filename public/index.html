@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>个性化分析助手</title>
-<link rel="stylesheet" href="app.20261109log2.css?v=20261116-fixedsize">
+<link rel="stylesheet" href="app.20261109log2.css?v=20261118-noqbtn">
 <link rel="stylesheet" href="analysis-controls.css?v=20261116-fixedsize">
 <link rel="stylesheet" href="sidebar-layout.css?v=20261113">
 </head>
@@ -15,7 +15,7 @@
     <!-- 顶栏三行：
            ① 大标题
            ② 页签（当前分析 / 历史分析 / 脚本数据库）
-           ③ 状态（分析名称 / 绑定会话 / 指令队列）
+           ③ 状态（分析名称 / 绑定会话）
          右侧动作跟着页签那一行靠右，排成「存档与步骤回滚 · 产物下载 · 新建分析」。
          为什么把动作放在大标题下面那一行：她说"这一串按钮都在大标题的下方"，
          而状态信息归状态行，两者不该混在一行。 -->
@@ -39,7 +39,6 @@
       <span id="subline">正在连接本地服务…</span>
       <div class="tally" id="tally"></div>
       <div id="whoamiHint"></div>
-      <button class="btn btn-sm qbtn" id="injectHint" style="display:none"></button>
     </div>
 
   </div>
@@ -351,8 +350,8 @@
      真实会话。它和上面那条 compose 通道是两条独立的路 —— 一条不通不代表
      另一条不通，所以两条都要在，谁先连上用谁。 -->
 <script src="catsco-artifact-bridge.js?v=20261025origin"></script>
-<script src="app-shell.20261028a.js?v=20261111-execqueued"></script>
-<script src="app.js?v=20261118-fetchrank"></script>
+<script src="app-shell.20261028a.js?v=20261118-noqbtn"></script>
+<script src="app.js?v=20261118-noqbtn"></script>
 <script src="fetch-device.js?v=20261117-fetch-device"></script>
 <script src="analysis-controls.js?v=20261116-fixedsize"></script>
 <script src="app-handoff.js?v=20261110-parallel"></script>

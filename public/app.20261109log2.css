@@ -1117,64 +1117,9 @@ input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px
 .rrlab{display:block;font-size:var(--fs-5);color:var(--ink2);margin-bottom:6px}
 .rrhint{font-size:var(--fs-6);color:var(--ink3);margin-top:6px;line-height:1.6}
 
-/* ---------- 指令队列按钮与面板 ---------- */
-.qbtn{display:inline-flex;align-items:center;gap:6px;color:var(--err);
-  border-color:#f0d3d0;background:var(--err-soft)}
-.qbtn:hover{background:#fbe0de;border-color:#e7bdb8}
-.qbtn-bad{color:#fff;background:var(--err);border-color:var(--err)}
-.qdot{display:inline-block;min-width:16px;padding:0 5px;border-radius:999px;
-  background:var(--err);color:#fff;font-size:var(--fs-glyph);font-weight:var(--fw-glyph);text-align:center}
-.qbtn-bad .qdot{background:#fff;color:var(--err)}
+/* ---------- 顶栏会话号 ---------- */
 #whoamiHint{font-size:var(--fs-6);color:var(--ink3);max-width:180px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-
-.qp{position:fixed;right:16px;top:58px;z-index:200;width:400px;max-height:74vh;
-  display:flex;flex-direction:column;background:var(--surface);
-  border:1px solid var(--line);border-radius:var(--r);box-shadow:0 16px 40px rgba(16,24,20,.18);
-  font-family:var(--font-sans);font-size:var(--fs-4);color:var(--ink)}
-.qp-h{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line-soft)}
-.qp-h b{font-size:var(--fs-3);font-weight:var(--fw-3)}
-.qp-h-r{margin-left:auto;display:flex;gap:6px}
-.qp-tabs{display:flex;flex-wrap:wrap;gap:6px;align-items:center;
-  padding:9px 14px;border-bottom:1px solid var(--line-soft);background:#fafbfa}
-.qp-tag{font-size:var(--fs-6);font-weight:var(--fw-6);padding:2px 8px;border-radius:999px;background:#eef1ee;color:var(--ink2)}
-.qp-wait{background:var(--wait-soft);color:var(--wait)}
-.qp-sent{background:var(--info-soft);color:var(--info)}
-.qp-run{background:var(--info-soft);color:var(--info)}
-.qp-dead{background:var(--err-soft);color:var(--err)}
-.qp-done{background:var(--done-soft);color:var(--done)}
-.qp-toggle{margin-left:auto;display:flex;align-items:center;gap:4px;
-  font-size:var(--fs-6);color:var(--ink3);cursor:pointer}
-.qp-list{flex:1 1 auto;overflow:auto;padding:6px 14px 10px}
-.qp-empty{padding:26px 0;text-align:center;color:var(--ink3);font-size:var(--fs-5)}
-.qp-item{padding:10px 0;border-bottom:1px solid var(--line-soft)}
-.qp-item:last-child{border-bottom:none}
-.qp-r1{display:flex;align-items:baseline;gap:8px}
-.qp-title{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-  font-size:var(--fs-4);font-weight:var(--fw-strong);color:var(--ink)}
-.qp-st{flex:0 0 auto;font-size:var(--fs-6);font-weight:var(--fw-6);
-  padding:1px 7px;border-radius:999px;background:#eef1ee;color:var(--ink2)}
-.qp-wait .qp-st{background:var(--wait-soft);color:var(--wait)}
-.qp-sent .qp-st{background:var(--info-soft);color:var(--info)}
-.qp-run .qp-st{background:var(--info-soft);color:var(--info)}
-.qp-dead .qp-st{background:var(--err-soft);color:var(--err)}
-.qp-done .qp-st{background:var(--done-soft);color:var(--done)}
-.qp-drop{opacity:.5}
-.qp-r2{font-size:var(--fs-6);color:var(--ink3);margin-top:2px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.qp-r3{font-size:var(--fs-6);color:var(--err);margin-top:2px;
-  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.qp-ops{display:flex;gap:6px;margin-top:6px}
-.qp-op{border:1px solid var(--line);background:#fff;color:var(--ink2);
-  border-radius:7px;padding:2px 10px;font-size:var(--fs-6);font-weight:var(--fw-6);
-  cursor:pointer;font-family:var(--font-sans)}
-.qp-op:hover{background:#fafbfa;border-color:#ccd4ce}
-.qp-op:disabled{opacity:.45;cursor:not-allowed}
-.qp-del{color:var(--err);border-color:#f0d3d0}
-.qp-del:hover{background:var(--err-soft)}
-.qp-f{padding:8px 14px;border-top:1px solid var(--line-soft);
-  font-size:var(--fs-6);color:var(--ink3);background:#fafbfa}
-@media (max-width:520px){.qp{right:8px;left:8px;width:auto}}
 
 /* ---------- 步骤卡片里的产物 ---------- */
 .starts{display:flex;flex-wrap:wrap;gap:5px;align-items:center;margin:8px 0 2px;
@@ -1254,13 +1199,6 @@ input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px
 
 /* 产物标签：状态不同，措辞不同。失败态的标签给一点提醒色。 */
 .startsk.warn{color:#8a5a00}
-
-/* 队列徽标：把"待发"和"已停"分开。
-   红色只表示真的送不进去了；还在排队的用中性蓝，不再和"跑失败"抢同一个颜色。 */
-.qbtn-wait{color:var(--info);border-color:#cfe0f2;background:var(--info-soft)}
-.qbtn-wait:hover{background:#e6f0fa;border-color:#b7d0e8}
-.qbtn-wait .qdot{background:var(--info);color:#fff}
-.qtag{font-size:var(--fs-6);opacity:.85;margin-left:2px;white-space:nowrap;font-weight:var(--fw-6)}
 
 /* ---------- 步骤卡 v2：信息分层、按钮统一、环节两态 ---------- */
 /* 卡片只留四行。原来从上往下堆着：说明句、状态、环节、产物清单、折叠详情。

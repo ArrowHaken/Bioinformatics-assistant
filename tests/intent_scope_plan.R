@@ -27,9 +27,13 @@ for (i in seq_along(chain)) {
   old <- intent_execution_gate(root,sid)
   stopifnot(!old$ok, identical(unlist(old$fields),c('scope.run_until')))
 }
+# 2026-11-18 起，翻不成阶段的执行范围原话不再挡住派活，改为随指令下发。
+# 这里没有 notebook 对照表（root 下没有 engine/），所以 '08' 等一律解析成 NULL：
+# 步骤照常放行，「all」仍要求显式有界计划。
 for (bound in c('08','08之前','before 08','pipeline1 ','annotation','stage08','config','all')) {
   put(list(scope=list(run_until=bound)))
-  for (step in c('env','pipeline1','all')) expect(step,'intent_constraints_unimplemented')
+  for (step in c('env','pipeline1')) expect(step)
+  expect('all','intent_scope_requires_bounded_plan')
 }
 put(list(scope=list(annotation_gate=TRUE), approval=TRUE,
   annotation=list(approved=TRUE)))
@@ -47,8 +51,14 @@ for (restriction in list(list(reference=list(modified_cells=list(3,5))),
   for (sc in list(NULL,list(run_until='pipeline1',annotation_gate=TRUE))) {
     restriction$scope <- sc
     put(restriction)
-    for (step in c(chain,'config','all','enrich','annotate','read'))
-      expect(step,'intent_constraints_unimplemented')
+    # 2026-11-18：改 cell 与合并相邻群不再挡住派活（随指令下发，由执行端判断）。
+    # 这一步本身仍要过范围与审核闸门，所以只断言「不再是那个未实施码」。
+    r1 <- intent_execution_gate(root, sid, requested_step='env')
+    stopifnot(!identical(r1$code,'intent_constraints_pending'),
+              !identical(r1$code,'intent_constraints_unimplemented'))
+    # 「all」要不要有界计划，取决于这一步记录里有没有带命名范围或审核闸门；
+    # 只有改 cell / 合并相邻群时它不算有界范围，可以整体跑。
+    if (is.null(sc)) expect('all') else expect('all','intent_scope_requires_bounded_plan')
   }
 }
 put(list(scope=list(annotation_gate=FALSE)))
@@ -142,10 +152,10 @@ for (force in c(FALSE,TRUE)) {
 for (restriction in list(list(reference=list(modified_cells=list(3,5))),
                          list(annotation=list(merge_adjacent=FALSE)))) {
   put(restriction)
-  route('env','intent_constraints_unimplemented',TRUE)
+  route('env')
 }
 put(list(scope=list(run_until='08')))
-route('env','intent_constraints_unimplemented',TRUE)
+route('env')
 for (json in list(NULL,'{}','{"intent":{}}',
                  '{"intent":{"scope":{"annotation_gate":false}}}')) {
   if (is.null(json)) unlink(profile) else writeLines(json,profile)

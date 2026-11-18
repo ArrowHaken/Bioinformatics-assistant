@@ -925,6 +925,19 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
       rq <- if (HAS_SESSIONS && nzchar(as.character(sid %||% "")))
         as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
       note <- as.character(b$gate_note %||% "")
+      # 已保存的分析限制随这一步的指令一起下发（2026-11-18）。
+      #   为什么要在这里并进去：改哪几个 cell、注释能不能合并相邻群、
+      #   范围原话怎么理解，这些说清楚的对象是拿到 notebook 和相关表的执行端。
+      #   应用这边把它判成「没转成计划」就挡掉，用户就得回头再解释一遍，
+      #   而解释完还是回到同一步。写成一段话下发，活能往下走，
+      #   判断留在能判断的地方，出错时也有原话可对。
+      if (exists("intent_constraint_note", mode = "function")) {
+        cnote <- tryCatch(intent_constraint_note(APP_DIR, as.character(sid %||% "")),
+                          error = function(e) "")
+        if (is.character(cnote) && length(cnote) == 1L && nzchar(cnote))
+          note <- paste0(if (nzchar(note)) paste0(note, "；") else "",
+                         "【这条记录已保存的要求】", cnote)
+      }
       # 「再次交给助手」时用户填的具体要求：附在已经定下的事后面。
       #   为什么单独一段而不是混进 gate_note：两者来源不同 ——
       #   gate_note 是流程闸门的客观答案，这一条是这一次人工追加的要求。

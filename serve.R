@@ -2399,6 +2399,22 @@ remote_step_instruction <- function(stepId, pl = NULL, session_id = "", req_id =
            "  脚本比对时已统一转成大写，符号能对上。移植/嵌合实验里人源与鼠源细胞共存也是常规情况。",
            "· 不要因为物种或组织标注不一致而停下、不要自行更换表格、不要另找一份「更合适」的替代。",
            "· 也不要自行扩充或编造 marker。表里有什么就用什么；不够就照实留空并在报告里说明。")
+    # 依据来源单独写一句。
+    #   为什么要写：三种来源（服务器现成 / 用户上传 / 文献库）在执行端看起来都只是一个绝对路径，
+    #   但待遇不同：上传的要先落盘才能读，文献库的要先取存档。
+    #   不写清就会出现“路径已经给了，为什么文件不在”。
+    srcCn <- switch(as.character(V$reference_source %||% ""),
+                    server = "服务器上现成的那一份（原件，不需要下发）",
+                    uploaded = "用户上传的那一份（需按上面给的落盘路径写入后再读）",
+                    lit = "按文献库检索得到的那一份（已经存档，直接用）",
+                    "")
+    if (nzchar(srcCn))
+      L <- c(L, paste0("· 依据来源：", srcCn, "。文件名：",
+                       as.character(V$reference_name %||% "（未登记名字）"),
+                       "。不要因为路径长、目录名不像就去猜另一份。"))
+    if (!nzchar(as.character(V$reference_xlsx %||% "")))
+      L <- c(L, paste0("· 注意：本次还没有绑定任何依据，上面命令里的 {reference_xlsx} 会原样留着。",
+                    "请先停下回报，不要自己找一份顶上。"))
   }
 
   if (nzchar(req_id)) L <- c(L, "", paste0("本次请求号：", req_id,
