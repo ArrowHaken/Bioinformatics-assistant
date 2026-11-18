@@ -131,7 +131,12 @@ SERVER_STAGES <- list(
     id = "final", title = "终版比例统计", skill = "liny-final",
     note = "基于剔完的对象算每样本细胞数、每簇比例。",
     script = "{work_root}/final_run.R",
-    args = character(0),
+    # final 有两个必需输入：运行目录本身，以及本次已确认的参数文件。
+    #   原来这里是空向量，flow_execution 忠实返回空 argv，作业收到 0 个
+    #   位置参数、脚本第一句就 stop —— 2026-11-13 22:10 那次就是这样秒退的。
+    #   参数文件必须显式下发，不靠脚本内部默认值：默认值会在「人没选」
+    #   和「选了但没传」之间模糊掉，事后无法区分。
+    args = c("{work_root}", "--param", "{work_root}/8.final/final_params.json"),
     # final_object.rds 必须列进来：注释环（annotate）吃的就是它，
     #   而且它真实存在于服务器上（798 MB，见历史 artifacts.json）。
     #   原来这里只写了两个 xls，于是「传对象给下游」变成了隐式约定 ——
@@ -168,7 +173,9 @@ SERVER_STAGES <- list(
     note = "对终版对象算全量 marker 与 top15。",
     script = "{work_root}/full_marker.R",
     args = character(0),
-    artifacts = c("9.full/all_markers_full.xls", "9.full/top15_markers_full.xls"),
+    # 与 FLOW_REVIEW$fullmark 保持一致：真实产出在 8.final。
+    #   两处写不同的路径，页面和判定就会各说各话。
+    artifacts = c("8.final/all_markers.xls", "8.final/top15_markers.xls"),
     deps = c("8.final"),
     # ---- 已由终版覆盖：保留流程位置，但不再重算 ----
     #   为什么保留而不是删掉：
@@ -204,7 +211,7 @@ SERVER_STAGES <- list(
     note = "Microplastics vs Mock 的全量差异表。",
     script = "{work_root}/full_diff.R",
     args = character(0),
-    artifacts = c("9.full/diff_MP_vs_Mock_full.xls"),
+    artifacts = c("8.final/diff_MP_vs_Mock_by_cluster.xls"),
     deps = c("8.final"),
     # 同上：终版已按簇逐个做过组间差异（8.final/diff_MP_vs_Mock_by_cluster.xls），
     #   而且比这里定义的"一张全量表"更细。不再重算。
@@ -390,11 +397,15 @@ SERVER_STAGES <- c(SERVER_STAGES, list(
     id = "pack", title = "打包交付物", skill = "sc-ppt-kit", source = "app",
     note = "把出图与 PPT 打成一个 zip，落 11.report/analysis_results.zip。",
     script = "zip",
+    # manifest 必须一起压进包里：它是「每页图来自哪张源图、hash 是多少」的凭证。
+    #   只把 manifest 登记成产物而不压进 zip，包内就无法自证图文同源。
     args = c("-r", "-q", "{work_root}/11.report/analysis_results.zip",
-             "{work_root}/10.figs", "{work_root}/11.report/analysis_report.pptx"),
+             "{work_root}/10.figs", "{work_root}/11.report/analysis_report.pptx",
+             "{work_root}/11.report/analysis_report.pptx.manifest.json"),
     outdir = "11.report",
     artifacts = c("11.report/analysis_results.zip"),
-    deps = c("10.figs", "11.report/analysis_report.pptx"),
+    deps = c("10.figs", "11.report/analysis_report.pptx",
+             "11.report/analysis_report.pptx.manifest.json"),
     subs = list(
       list(id = "stage", title = "收集产物"),
       list(id = "zip", title = "打 zip 并校验")
@@ -434,6 +445,18 @@ SERVER_MISSING <- character(0)
 FLOW_REVIEW <- list(
   doublet = list(
     products = c("1.doublet/{samples}.rds"),
+    # Audit evidence is separate from biological products. Exact allowlisting is
+    # consumed by the verdict compatibility candidate, never a blanket RDS exemption.
+    audit_products = c(
+      "1.doublet/audit/manifest.json",
+      "1.doublet/audit/summary.json",
+      "1.doublet/audit/worker-observed.json",
+      "1.doublet/audit/{samples}.cells.tsv",
+      "1.doublet/audit/{samples}.meta.rds",
+      "1.doublet/audit/{samples}.pk_sweep.tsv",
+      "1.doublet/audit/{samples}.singlet_qc.tsv",
+      "1.doublet/audit/{samples}.pre_qc_counts.rds"
+    ),
     # 逐样本环节：产物件数必须等于样本数，且每个样本各一份。
     #   为什么必须声明这一条：只写 {samples} 通配的话，判定器只能回答
     #   「有没有至少一件 .rds」，回答不了「七份是不是都交齐了」，
@@ -442,6 +465,16 @@ FLOW_REVIEW <- list(
     per_sample = TRUE,
     samples_key = "samples",
     min_bytes = 1024,
+    # 本步除样本 rds 之外还会写一张辅助统计表，必须在这里显式列明。
+    #   为什么：不列明的话，判定器只认识"每个样本一个 rds"这一种产物，
+    #   会把这张表当成"不属于样本清单的文件"判 fail（实测就是这么拒的）。
+    #   辅助表不套 rds 的最小体积下限（123 字节是正常的），
+    #   改按表结构核验：行数 = 样本数，每行样本名与声明清单一致。
+    aux_tables = list(
+      list(rel = "1.doublet/sample_raw_cellnumber.xls",
+           columns = c("sample", "raw_number"),
+           rows_key = "samples")
+    ),
     required_columns = character(0),
     invariants = c("去双后细胞数 <= 输入细胞数", "每个样本各一份 rds，件数等于样本数"),
     skill = "liny-doublet",
@@ -464,53 +497,139 @@ FLOW_REVIEW <- list(
     analysis = list(rules = c("markers_not_empty", "markers_not_all_genes"))
   ),
   filter = list(
-    products = c("7.after_drop/merged_after_drop.rds"),
+    # 三件产物都要列出来：脚本实际会写这三份。
+    #   改前只列了 rds，于是两张统计表既不被核验，又被下面 1MB 的下限判死 ——
+    #   一次完全正常的筛群也会以「产物小于最小体积」失败。
+    products = c("7.after_drop/merged_after_drop.rds",
+                 "7.after_drop/cluster_stats_after_drop.xls",
+                 "7.after_drop/recluster_params_used.xls"),
+    # 1MB 只对 rds 这类二进制对象有意义。
+    #   两张小统计表按 aux_tables 走结构核验（列名 + 行数），
+    #   不再用字节数表达「非空」—— 0.4KB 的参数表是正常的。
     min_bytes = 1048576,
+    aux_tables = list(
+      list(rel = "7.after_drop/cluster_stats_after_drop.xls",
+           columns = c("cluster", "n", "pct"),
+           rows_from = "clusters_after"),
+      list(rel = "7.after_drop/recluster_params_used.xls",
+           columns = c("item", "value"),
+           min_rows = 8L),
+      # 这张表不是「只列被剔的簇」，而是上游全部簇的逐簇标记表
+      #   （04_filter.R 写出 cluster / n / dropped）。
+      #   列进 aux_tables 有两个作用：按列名与行数做结构核验；
+      #   同时不再被 rds 的 1MB 下限卡（keep_all 时它只有 401 字节）。
+      list(rel = "7.after_drop/dropped_clusters.xls",
+           columns = c("cluster", "n", "dropped"),
+           rows_from = "clusters_before")
+    ),
+    required_columns = character(0),
     invariants = c("剔除后细胞数 <= 剔除前"),
     skill = "liny-filter",
-    analysis = list(rules = c("dropped_samples_recorded"))
+    # 这一条原来叫 dropped_samples_recorded，但脚本只剔簇、不剔整份样本，
+    #   名字和实际语义对不上，而且这条规则从来没实现过（一律 unknown）。
+    #   现在按脚本真实行为改成：核「这一轮用到的重聚类参数确实被记录下来」，
+    #   并明确它只是技术一致性检查，不判断筛群选择在生物学上是否正确。
+    analysis = list(rules = c("drop_params_recorded", "drop_flags_match_dispatch"))
   ),
+  # 产物名与列名都按 final_run.R 的真实写出核对过，不是照历史文档抄的：
+  #   :73  cell_ratio_by_cluster.xls   （stats，含 cluster/n_cells/pct 与逐样本列）
+  #   :81  cell_count_by_sample.xls    （smp，列是 sample/group/n_cells/pct）
+  #   :93  all_markers.xls             （全量 marker）
+  #   :95  top15_markers.xls           （每簇 top15）
+  #   :147 diff_MP_vs_Mock_by_cluster.xls
+  #   :154 final_object.rds
   final = list(
     products = c("8.final/cell_ratio_by_cluster.xls",
                  "8.final/cell_count_by_sample.xls",
-                 "8.final/final_object.rds"),
+                 "8.final/final_object.rds",
+                 "8.final/all_markers.xls",
+                 "8.final/top15_markers.xls",
+                 "8.final/diff_MP_vs_Mock_by_cluster.xls",
+                 # 参数文件也是产物：它是「页面选了什么」在集群上的落点。
+                 #   不列进来的后果：判定器拿不到它的 md5，
+                 #   也就无法证明脚本读到的是这一份。
+                 "8.final/final_params.json"),
+    # 小表不套字节下限：改按列名与行数核（见 aux_tables）。
+    #   rds 单列一个门槛，用 min_bytes_rds 表达 —— 128 字节对几百 MB 的对象
+    #   等于没有门槛，一个空壳文件也能过。
     min_bytes = 128,
+    min_bytes_rds = 1048576,
     required_columns = c("cluster"),
+    # 列规则只落在比例表上。不写这一行的后果实测过：规则会套到
+    #   cell_count_by_sample.xls（列是 sample/group/n_cells/pct），
+    #   于是正常结果也判「缺 cluster 列」。
+    columns_file = "cell_ratio_by_cluster.xls",
+    aux_tables = list(
+      list(rel = "8.final/cell_count_by_sample.xls",
+           columns = c("sample", "group", "n_cells", "pct"),
+           min_rows = 1L),
+      # 参数文件是 JSON，不套表结构检查，也不套 RDS 体积下限；
+      #   它的内容由 final_params_consistent 逐字段核。
+      list(rel = "8.final/final_params.json", no_struct = TRUE)
+    ),
     invariants = c("各样本细胞数合计 = 总细胞数", "各簇比例合计 = 1"),
     skill = "liny-final",
-    analysis = list(rules = c("ratio_sums_to_one"))
+    # final_params_consistent 必须登记在这里。
+    #   不登记的后果：函数写得再对，真实验收时也根本不会被调用 ——
+    #   review$analysis$rules 才是判定器实际遍历的清单。
+    analysis = list(rules = c("ratio_sums_to_one", "final_params_consistent"))
   ),
   fullmark = list(
-    products = c("9.full/all_markers_full.xls", "9.full/top15_markers_full.xls"),
+    # 真实产出在 8.final（final_run.R:93/:95），9.full 下的同名文件
+    #   从来没有脚本写过 —— full_marker.R 在服务器和引擎里都不存在。
+    #   所以这里不能再让人去点一个不存在的脚本：声明为已被 final 覆盖，
+    #   并点名真正顶替它的两份实产物。
+    products = c("8.final/all_markers.xls", "8.final/top15_markers.xls"),
     min_bytes = 128,
     required_columns = c("cluster"),
+    columns_file = "top15_markers.xls",
     invariants = c("marker 表非空"),
     skill = "liny-markers",
     analysis = list(rules = c("markers_not_all_genes")),
-    # 已由 final 覆盖：这一环的产物可以由 8.final 的同名内容顶替。
-    covered_by = "final"
+    covered_by = "final",
+    covered_artifacts = c("8.final/all_markers.xls", "8.final/top15_markers.xls"),
+    covered_evidence = c("final_run.R:93 all_markers.xls", "final_run.R:95 top15_markers.xls")
   ),
   diff = list(
-    products = c("9.full/diff_MP_vs_Mock_full.xls"),
+    # 实际产物名是 8.final/diff_MP_vs_Mock_by_cluster.xls（final_run.R:147）。
+    #   原来声明的 9.full/diff_MP_vs_Mock_full.xls 根本不会被写出，
+    #   于是「点一下就跑」永远失败，而失败记录又会盖掉「已覆盖」的显示。
+    products = c("8.final/diff_MP_vs_Mock_by_cluster.xls"),
     min_bytes = 128,
     required_columns = c("cluster"),
     invariants = c("差异基因非空"),
     skill = "liny-diff",
     analysis = list(rules = c("diff_not_all_genes")),
-    covered_by = "final"
+    covered_by = "final",
+    covered_artifacts = c("8.final/diff_MP_vs_Mock_by_cluster.xls"),
+    covered_evidence = c("final_run.R:147 diff_MP_vs_Mock_by_cluster.xls")
   ),
   annotate = list(
     products = c("9.annot/annotated.rds", "9.annot/annot_result.xls",
-                 "9.annot/celltype_count.xls"),
+                 "9.annot/celltype_count.xls", "9.annot/reference_parse.json"),
     min_bytes = 128,
     # 这一条是本清单里唯一被真实数据打红过的列检查：
     #   注释环 RC=1 的直接原因就是 annot_result.xls 缺 Positive Markers 列。
-    required_columns = c("cluster", "cell_type", "Positive Markers"),
+    # 列名按 02_annotate.R 真实写出的表头登记，不照旧文档抄。
+    #   旧值是 cluster / cell_type / Positive Markers —— 那是「以为应该有」的列，
+    #   真实表里一列都没有：脚本写的是 celltype，Positive Markers 是参考表里的列，
+    #   不是注释结果里的列。判据按想象写，正常产物也会被判缺列。
+    required_columns = c("cluster", "celltype", "n_hit", "hit_genes", "reason"),
     # 列检查只针对这一张表。
     #   为什么不写这一行会出事：required_columns 会被套到本环全部产物上，
     #   annotated.rds 是二进制对象、没有表头，于是「正常结果」也会被判缺列。
     #   判据写错比产物错更危险 —— 它会把对的判成错的，逼着人放宽规则。
     columns_file = "annot_result.xls",
+    # 两张辅助表按结构核验，不用字节数表达「非空」：
+    #   celltype_count 要三列齐全且合计等于对象细胞数；
+    #   reference_parse 是解析元数据（JSON），只核存在与可解析。
+    aux_tables = list(
+      list(rel = "9.annot/celltype_count.xls",
+           columns = c("celltype", "n_cells", "typed")),
+      list(rel = "9.annot/reference_parse.json", no_struct = TRUE)
+    ),
+    # 守恒口径按真实结构写：每簇一行（无 marker 的簇也要有行），
+    #   类型数不超过簇数（含未定型）。
     invariants = c("每个簇都有且只有一个细胞类型", "细胞类型数 <= 簇数"),
     skill = "sc-pipeline",
     analysis = list(rules = c("markers_in_dictionary", "celltype_count_in_range"),
@@ -519,7 +638,30 @@ FLOW_REVIEW <- list(
   ),
   figs = list(
     products = c("10.figs/1.cluster", "10.figs/3.cell_ratio", "10.figs/4.diff_enrich"),
+    # 目录型产物必须显式声明。
+    #   为什么不能靠"末尾有没有扩展名"去猜："1.cluster" 的 ".cluster"
+    #   长得像扩展名，于是目录被当成文件，回写清单里明明有 4 张 png，
+    #   判据却说缺件 —— 这是判据自己错，不是产物缺。
+    # 六套图目录都要显式声明：漏一套就等于放行"整套图没出"。
+    product_dirs = c("10.figs/0.QC", "10.figs/1.cluster", "10.figs/2.markgene",
+                     "10.figs/3.cell_ratio", "10.figs/4.diff_enrich", "10.figs/5.annot"),
+    # 小表按条目逐项核结构、键、跨表汇总与上游绑定（见 engine/figs_audit.R）。
+    tables_audit = "figs_tables",
     min_bytes = 1024,
+    # 这几张是正常的小表：几百字节是完整的，套 1024 下限会把对的判成错的。
+    #   所以不降全局阈值，而是逐表声明结构契约：列名、行数、必要时与 counts 对齐。
+    #   空表、截断、少样本、少类型仍然会被列名与行数卡住。
+    aux_tables = list(
+      list(rel = "10.figs/0.QC/cell_number_stat.xls",
+           columns = c("sample", "cell_number"), min_rows = 1),
+      list(rel = "10.figs/3.cell_ratio/cell_number_group.xls",
+           columns = c("cell_type", "lvl", "cell_number", "rate"), min_rows = 1),
+      list(rel = "10.figs/3.cell_ratio/cell_number_sample.xls",
+           columns = c("cell_type", "lvl", "cell_number", "rate"), min_rows = 1),
+      list(rel = "10.figs/4.diff_enrich/diff/diff_skipped.xls",
+           columns = c("cell_type", "status", "n_group1", "n_group2", "reason"),
+           min_rows = 0)
+    ),
     invariants = c("每套图至少一张 png", "UMAP 与 dotplot 都存在"),
     skill = "sc-plot-kit",
     analysis = list(rules = c("figures_non_empty", "umap_present"))
@@ -532,15 +674,22 @@ FLOW_REVIEW <- list(
     analysis = list(rules = c("enrich_not_empty"))
   ),
   ppt = list(
-    products = c("11.report/analysis_report.pptx"),
+    # manifest 是这一环自己产出的来源清单，pack 要拿它做上游绑定，
+    #   所以它必须进放行清单；但它只有 9.6KB，不能被 pptx 的体积下限误判。
+    products = c("11.report/analysis_report.pptx",
+                 "11.report/analysis_report.pptx.manifest.json"),
     min_bytes = 102400,
+    min_bytes_skip = c("11.report/analysis_report.pptx.manifest.json"),
     invariants = c("pptx 可被 zipfile 打开", "ppt/slides/slide*.xml 数量 > 0",
                    "每张 slide 至少一个图片引用"),
     skill = "sc-ppt-kit",
     analysis = list(rules = c("slides_match_fig_count"))
   ),
   pack = list(
-    products = c("11.report/analysis_results.zip"),
+    # manifest 是包内容的一部分：它记录每页图的来源与哈希。
+    #   不进产物清单，就等于允许「包里有图、但无法核对图与报告同源」。
+    products = c("11.report/analysis_results.zip",
+                 "11.report/analysis_report.pptx.manifest.json"),
     min_bytes = 1024,
     invariants = c("zip 内含 10.figs 全部图", "zip 内含 analysis_report.pptx"),
     skill = "sc-ppt-kit",
@@ -668,6 +817,26 @@ flow_stage <- function(id, profile = c("server", "local")) {
 # 服务器档的命令：脚本 + 参数，直白拼出来。
 #   qsub 的包装与 chain.sh 里一致：-q all.q -cwd -o/-e 写 log/ -v LD_LIBRARY_PATH。
 # One resolver for prompt and queue. It performs no analysis or remote IO.
+flow_doublet_audit_registry <- list(
+  "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/soupX_doublefinder.audit.v1.R" = "f400775a49e47a8e79096a5dee1ccaf5e5493108e8e07400561dfcb7ef26ce75",
+  "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/RunDF.audit.v1.R" = "41f122c5d326770052cb1fd4724505a5dbbf0d0edde2ed38601b8325a2907568",
+  "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/audit_helpers.R" = "d95e9aed57022a4b9f9b82076599273fbaa73ca188ed34c24c800f5c36698d06",
+  "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/01_packages.original.R" = "10ab4ac8b9dc81842625458d6afbb665b48493300af02caf91e0e4d298d626ba",
+  "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/observe_doublet.R" = "dc8f5fe597090e895fc408ee800b08dcb2692644d6e37f343101c7b82395e56a"
+)
+flow_doublet_audit_stage <- function(st, V) {
+  if (!identical(st$id, "doublet") ||
+      !identical(st$script, "{script_root}/script/soupX_doublefinder.R"))
+    return(list(ok=TRUE, stage=st, params=NULL))
+  root <- as.character(V$work_root %||% "")
+  if (length(root)!=1L || is.na(root) || !startsWith(root,"/") || root=="/" ||
+      grepl("//|/\\.\\.?(/|$)|[\\\\]",root) || endsWith(root,"/"))
+    return(list(ok=FALSE,errors="doublet audit requires canonical task run_dir"))
+  st$script <- "/share/home/hhhong1/rachel_doublet_audit_v1/scripts/soupX_doublefinder.audit.v1.R"
+  list(ok=TRUE,stage=st,params=list(doublet_audit_version="v1",
+       doublet_audit_scripts=flow_doublet_audit_registry))
+}
+
 flow_execution <- function(st, V) {
   if (is.null(st) || is.null(st$script))
     return(list(ok = FALSE, errors = "阶段未登记可执行脚本"))
@@ -690,6 +859,9 @@ flow_execution <- function(st, V) {
                       if (length(arts)) paste0("（", paste(arts, collapse = "、"), "）") else "",
                       "，不需要再执行；它不是可运行的一步，点它只会重复失败。")))
   }
+  audit_stage <- flow_doublet_audit_stage(st, V)
+  if (!isTRUE(audit_stage$ok)) return(audit_stage)
+  st <- audit_stage$stage
   templates <- c(st$script, st$args %||% character(0))
   tokens <- unique(unlist(regmatches(templates, gregexpr("\\{[A-Za-z_][A-Za-z0-9_]*\\}", templates))))
   keys <- unique(c("rscript", gsub("[{}]", "", tokens)))
@@ -753,6 +925,7 @@ flow_execution <- function(st, V) {
     script <- "-e"
   }
   list(ok = TRUE, step = st$id, script = script, argv = argv,
+       params = audit_stage$params,
        command = paste(vapply(c(flow_interp(script, V), script, argv),
                               shQuote, "", type = "sh"), collapse = " "))
 }

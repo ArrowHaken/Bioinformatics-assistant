@@ -101,28 +101,31 @@ for (scope in list(list(run_until='pipeline1'),list(annotation_gate=TRUE))) {
   for (step in legacy) expect(step,'intent_step_invalid')
   for (step in bad_shape) expect(step,'intent_step_invalid')
 }
-# Use the actual /api/run prefix, appending a sentinel at the first downstream boundary.
-# Never synthesize a replacement gate invocation: this also verifies caller wiring.
-src <- readLines('serve.R',warn=FALSE)
-a <- grep('^  if \\(p == "/api/run"',src)[1]
-b <- grep('    # ---- 对账不一致',src)[1]
-stopifnot(!is.na(a),!is.na(b),b>a)
+# Use the shared run_enqueue implementation; append a sentinel at the first
+# downstream boundary. This verifies caller wiring after the /api/run extraction.
 e <- new.env(parent=globalenv())
-e$APP_DIR <- root; e$HAS_SESSIONS <- TRUE; e$runDir <- '/tmp/fixture'
-e$p <- '/api/run'; e$req <- list(method='POST'); e$con <- NULL
-e$cur_sid <- function() sid
-e$send_json <- function(con,status,body) list(status=status,body=body)
+e$APP_DIR <- root; e$HAS_SESSIONS <- TRUE
+e$read_state <- function() list(runDir='/tmp/fixture',runDirRemote=FALSE)
+e$record_session_target <- function(...) list(ok=TRUE,sid=sid)
+e$record_access <- function(...) list(ok=TRUE,ctx=list(
+  run_dir='/tmp/fixture',run_dir_remote=FALSE,mode='local',place=list()))
+e$DB_CON <- NULL; e$DB_READY <- FALSE; e$HAS_FLOW <- FALSE
+e$HAS_CONTRACT <- TRUE; e$HAS_NOTEBOOK <- FALSE
 e$downstream <- 0L
-e$enqueue_task <- function(...) stop('enqueue must not be reached by prefix fixture')
-e$launch <- e$enqueue_task
-f <- eval(parse(text=c('function(){',src[a:(b-1)],
-  'downstream <<- downstream + 1L; return(list(status=299L,body=list(ok=TRUE)))','}','}')),envir=e)
+e$contract_check <- function(...) {
+  e$downstream <- e$downstream + 1L
+  list(issues=list())
+}
+e$launch_step <- function(...) {
+  e$downstream <- e$downstream + 1L
+  list(ok=TRUE)
+}
+sys.source('engine/run_enqueue.R',envir=e)
 route <- function(step,code=NULL,force=FALSE) {
-  e$body_json <- function() list(step=step,session_id=sid,force=force)
   e$downstream <- 0L
-  r <- f()
-  if (is.null(code)) stopifnot(r$status==299L,e$downstream==1L)
-  else stopifnot(r$status==409L,r$body$code==code,e$downstream==0L)
+  r <- e$run_enqueue(body=list(step=step,session_id=sid,force=force),owner_ctx=list(key='fixture'),current_sid=sid,via='/api/run')
+  if (is.null(code)) stopifnot(r$pa_status==200L,e$downstream>0L)
+  else stopifnot(r$pa_status==409L,r$pa_body$code==code,e$downstream==0L)
 }
 put(list(scope=list(run_until='pipeline1')))
 for (force in c(FALSE,TRUE)) {

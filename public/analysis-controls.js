@@ -4,10 +4,10 @@
   const byId = id => document.getElementById(id);
   const runs = byId('runsBar');
   const dashboard = byId('parallelDashboard');
-  const notebookNote = byId('notebookStatus');
+  const notebookNote = byId('nbStatus');
   let runBusy = false, runTimer = null, runController = null, notebookBusy = false;
   window.runSummaries = new Map();
-  const text = (node, value) => { node.textContent = String(value == null ? '' : value); };
+  const text = (node, value) => { if (node) node.textContent = String(value == null ? '' : value); };
   const element = (tag, value, cls) => {
     const node = document.createElement(tag);
     if (value != null) text(node, value);
@@ -46,6 +46,11 @@
     const button = element('button', null, 'ac-run'); button.type = 'button';
     button.dataset.runSid = String(item.session_id);
     button.appendChild(element('strong', item.name || item.session_id));
+    if (item.readonly === true) button.appendChild(element('span', '只读查看'));
+    const lifecycle = String(item.lifecycle || '');
+    const lifecycleText = lifecycle === 'queued' ? '排队中'
+      : (lifecycle === 'running' && item.is_actively_running === true ? '运行中' : '状态待核实');
+    button.appendChild(element('span', lifecycleText, 'ac-lifecycle'));
     button.appendChild(element('span', '环节 ' + (item.stage_index == null ? '未知' : item.stage_index) + '/' + (item.stage_total == null ? '未知' : item.stage_total)));
     button.appendChild(element('span', '耗时 ' + duration(item.elapsed_seconds)));
     button.appendChild(element('span', '预计剩余 ' + duration(item.eta_seconds)));
@@ -57,7 +62,15 @@
     button.addEventListener('click', async () => {
       if (sessionChanging || !item.session_id) return;
       button.disabled = true;
-      try { await switchSession(String(item.session_id)); if (String(S.sessionId) === String(item.session_id)) switchTab('cur'); }
+      try {
+        if (item.readonly === true) {
+          if (typeof openReadOnlySession === 'function') await openReadOnlySession(String(item.session_id));
+          switchTab('cur');
+        } else {
+          await switchSession(String(item.session_id));
+          if (String(S.sessionId) === String(item.session_id)) switchTab('cur');
+        }
+      }
       finally { button.disabled = false; text(notebookNote, ''); refreshRuns(); }
     });
     return button;
@@ -70,9 +83,10 @@
       if (document.hidden) return;
       const items = Array.isArray(data.items) ? data.items : [];
       window.runSummaries = new Map(items.map(item => [String(item.session_id), item]));
-      const active = items.filter(item => item.is_actively_running === true && item.lifecycle === 'running');
+      const active = items.filter(item => item.is_actively_running === true
+        || ['queued', 'running'].includes(String(item.lifecycle || '')));
       const wasHidden = dashboard.hidden;
-      dashboard.hidden = active.length < 2;
+      dashboard.hidden = active.length === 0;
       if (dashboard.hidden || wasHidden) dashboard.open = false;
       text(byId('parallelSummary'), '并行分析 · ' + active.length + ' 条运行中');
       const focusedSid = runs.contains(document.activeElement) ? document.activeElement.dataset.runSid : null;
@@ -96,67 +110,84 @@
     if (document.hidden) { if (runController) runController.abort(); }
     else refreshRuns();
   });
-  const notebookButtons = [byId('btnBuildNotebook'), byId('btnDownloadNotebook')];
-  async function notebookAction(build) {
+  /* ---- 产物面板的三个页签 -----------------------------------------
+     查看各环节产物 / 执行快照 / 打包notebook。
+     三个面板互斥：一次只显示一个，高亮跟着走。
+     为什么不再用「再点一次收起」：收起后三个都不亮，人会以为坏了；
+     而且产物清单本来就是这一页的默认内容，没有"什么都不显示"的状态。 */
+  const panels = { art: 'panelArt', snap: 'panelSnap', nb: 'panelNb' };
+  const openPanel = which => {
+    Object.keys(panels).forEach(k => {
+      const el = byId(panels[k]);
+      if (el) el.hidden = (k !== which);
+    });
+    document.querySelectorAll('#artToolbar .artpt').forEach(b => {
+      b.classList.toggle('on', b.dataset.artpanel === which);
+    });
+  };
+  document.querySelectorAll('#artToolbar .artpt').forEach(b => {
+    b.addEventListener('click', () => {
+      const which = b.dataset.artpanel;
+      if (!which || !byId(panels[which])) return;
+      openPanel(which);
+    });
+  });
+
+  /* 两个「生成」按钮的产物各自单独记状态。
+     为什么不能共用一个标记：执行快照与 notebook 是两个入口，
+     一个生成过不代表另一个可用；混成一个就会出现"没做却说做好了"。 */
+  const built = { snap: false, nb: false };
+  const statusNode = { snap: byId('snapStatus'), nb: byId('nbStatus') };
+
+  const snapButtons = [byId('btnBuildNotebook'), byId('btnDownloadNotebook')];
+  const nbButtons = [byId('btnBuildNb'), byId('btnDownloadNb')];
+
+  async function notebookAction(kind, build) {
     if (notebookBusy) return;
-    if (sessionChanging || !S.sessionId) { text(notebookNote, '请先选择一条分析记录。'); return; }
+    const note = statusNode[kind];
+    if (sessionChanging || !S.sessionId) { text(note, '请先选择一条分析记录。'); return; }
+    // 下载必须先有产物：没有就明说「请先生成」，不让人对着没反应的按钮反复点。
+    if (!build && !built[kind]) {
+      const msg = kind === 'snap' ? '请先生成执行快照' : '请先生成 notebook';
+      text(note, msg);
+      if (typeof toast === 'function') toast(msg, 'bad');
+      return;
+    }
     const sid = String(S.sessionId), generation = recordContext();
     const current = () => recordCurrent(generation) && !sessionChanging && String(S.sessionId) === sid;
-    notebookBusy = true; notebookButtons.forEach(button => { button.disabled = true; });
-    text(notebookNote, (build ? '正在生成' : '正在下载') + '记录 ' + sid + ' 的 notebook…');
+    const group = kind === 'snap' ? snapButtons : nbButtons;
+    notebookBusy = true; group.forEach(button => { if (button) button.disabled = true; });
+    text(note, (build ? '正在生成' : '正在下载') + '记录 ' + sid + ' 的 ' + (kind === 'snap' ? '执行快照' : 'notebook') + '…');
     try {
       if (build) {
         const data = await request('/api/notebook/build', {session_id: sid});
         if (!current()) return;
         if (String(data.session_id) !== sid) throw new Error('服务返回了不同记录，已忽略');
-        text(notebookNote, '记录 ' + sid + ' 已生成。' + (data.note || '') + ' 可点击下载 notebook。');
+        built[kind] = true;
+        text(note, '记录 ' + sid + ' 已生成。' + (data.note || '') + ' 可以下载了。');
       } else {
         const blob = await request('/api/notebook/download?session=' + encodeURIComponent(sid), undefined, {blob: true});
         if (!current()) return;
         const url = URL.createObjectURL(blob), anchor = element('a');
-        anchor.href = url; anchor.download = 'analysis-' + sid.replace(/[^a-zA-Z0-9_-]/g, '_') + '.ipynb';
+        const suffix = kind === 'snap' ? '_execution_snapshot' : '';
+        anchor.href = url;
+        anchor.download = 'analysis-' + sid.replace(/[^a-zA-Z0-9_-]/g, '_') + suffix + '.ipynb';
         document.body.appendChild(anchor);
         try { anchor.click(); } finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-        text(notebookNote, '记录 ' + sid + ' 的 notebook 已交给浏览器下载。');
+        text(note, '记录 ' + sid + ' 的 ' + (kind === 'snap' ? '执行快照' : 'notebook') + ' 已交给浏览器下载。');
       }
-    } catch (error) { if (current()) text(notebookNote, 'Notebook：' + error.message); }
-    finally {
-      notebookBusy = false; notebookButtons.forEach(button => { button.disabled = false; });
-      if (!current()) text(notebookNote, '记录已切换，已忽略旧记录的 notebook 响应。');
+    } catch (error) {
+      if (current()) text(note, (kind === 'snap' ? '执行快照：' : 'Notebook：') + error.message);
+    } finally {
+      notebookBusy = false; group.forEach(button => { if (button) button.disabled = false; });
+      if (!current()) text(note, '记录已切换，已忽略旧记录的响应。');
     }
   }
-  byId('btnBuildNotebook').addEventListener('click', () => notebookAction(true));
-  byId('btnDownloadNotebook').addEventListener('click', () => notebookAction(false));
-  async function declaredReplay(build) {
-    if (notebookBusy || sessionChanging || !S.sessionId) return;
-    const sid = String(S.sessionId), generation = recordContext();
-    const current = () => recordCurrent(generation) && !sessionChanging && String(S.sessionId) === sid;
-    notebookBusy = true;
-    text(notebookNote, '正在校验记录 ' + sid + ' 的显式重放清单…');
-    try {
-      if (build) {
-        const file = byId('replayManifest').files[0];
-        if (!file || file.size > 1024 * 1024) throw new Error('请选择不超过 1MB 的 JSON 清单');
-        const manifest = JSON.parse(await file.text());
-        if (!current()) return;
-        const data = await request('/api/notebook/replay/build', {session_id: sid, manifest});
-        if (!current()) return;
-        if (String(data.session_id) !== sid) throw new Error('记录不匹配');
-        text(notebookNote, '已打包授权清单。仅包含声明文件；完整科学分析尚未验证。');
-      } else {
-        const blob = await request('/api/notebook/replay/download?session=' + encodeURIComponent(sid), undefined, {blob: true});
-        if (!current()) return;
-        const url = URL.createObjectURL(blob), anchor = element('a');
-        anchor.href = url; anchor.download = 'analysis-' + sid.replace(/[^a-zA-Z0-9_-]/g, '_') + '-declared-replay.ipynb';
-        document.body.appendChild(anchor);
-        try { anchor.click(); } finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-        text(notebookNote, '授权清单 notebook 已交给浏览器下载，运行后逐项核对产物。');
-      }
-    } catch (_) { if (current()) text(notebookNote, '清单打包或下载未通过。请核对记录绑定、文件授权和本次执行结果。'); }
-    finally { notebookBusy = false; if (!current()) text(notebookNote, '记录已切换，已忽略旧记录的清单响应。'); }
-  }
-  byId('btnBuildReplay').addEventListener('click', () => declaredReplay(true));
-  byId('btnDownloadReplay').addEventListener('click', () => declaredReplay(false));
+  if (byId('btnBuildNotebook')) byId('btnBuildNotebook').addEventListener('click', () => notebookAction('snap', true));
+  if (byId('btnDownloadNotebook')) byId('btnDownloadNotebook').addEventListener('click', () => notebookAction('snap', false));
+  if (byId('btnBuildNb')) byId('btnBuildNb').addEventListener('click', () => notebookAction('nb', true));
+  if (byId('btnDownloadNb')) byId('btnDownloadNb').addEventListener('click', () => notebookAction('nb', false));
+
   window.addEventListener('pagehide', () => { clearTimeout(runTimer); if (runController) runController.abort(); });
   refreshRuns();
 })();

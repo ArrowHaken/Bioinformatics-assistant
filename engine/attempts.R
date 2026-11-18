@@ -53,21 +53,71 @@ attempt_selected <- function(app_dir,sid,rq,slot='step') {
   pend <- if (exists('sess_get_pending',mode='function')) sess_get_pending(app_dir,sid,slot=sch) else NULL
   identical(sess_chr(head$req_id %||% pend),sess_chr(rq))
 }
+# 一步结果的取值顺序是显式的，不靠 mtime 猜真假：
+#   1) 有效恢复记录（旧 terminal 的 sha 对得上）且其新终态槽位已存在 → 用槽位；
+#   2) 有效恢复记录存在 → 用恢复记录（运行中）；
+#   3) 旧 terminal；
+#   4) 普通投影。
+#   为什么必须显式：恢复之后再写 running 心跳时，普通投影会变新；
+#   若按 mtime 择优，就会把旧 failed 复活。
+attempt_base <- function(d, key) file.path(d, key)
+
+attempt_value <- function(app_dir, sid, rq, key) {
+  d <- file.path(attempt_dir(app_dir,sid,rq),'results')
+  if (startsWith(key,'step--')) {
+    stp <- substring(key, 7)
+    base <- attempt_base(d, key)
+    if (exists('recover_read_recovery', mode='function')) {
+      rec <- tryCatch(recover_read_recovery(base), error=function(e) NULL)
+      if (!is.null(rec)) {
+        slot <- tryCatch(recover_slot_path(base, rec), error=function(e) "")
+        if (nzchar(slot) && file.exists(slot)) {
+          v <- sess_read_json(slot); if (!is.null(v)) return(v)
+        }
+        # 恢复之后的运行心跳写在新一代文件里，原始两份文件不动。
+        run_f <- sub('\\.terminal-r-', '.running-r-', slot)
+        if (nzchar(run_f) && file.exists(run_f)) {
+          v <- sess_read_json(run_f); if (!is.null(v)) return(v)
+        }
+        return(rec)
+      }
+    }
+    term <- paste0(base,'.terminal.json')
+    if (file.exists(term)) { v <- sess_read_json(term); if (!is.null(v)) return(v) }
+    reg <- paste0(base,'.json')
+    if (file.exists(reg)) { v <- sess_read_json(reg); if (!is.null(v)) return(v) }
+    return(NULL)
+  }
+  term <- file.path(d, paste0(key,'.terminal.json'))
+  if (file.exists(term)) { v <- sess_read_json(term); if (!is.null(v)) return(v) }
+  reg <- file.path(d, paste0(key,'.json'))
+  if (file.exists(reg)) sess_read_json(reg) else NULL
+}
+
+# 只从真实产物文件名推 key：terminal 与 recovered 归到它们所属的那一代，
+# 代际槽位（terminal-r-*）不作为独立步骤出现。
+attempt_keys <- function(d) {
+  fs <- list.files(d, pattern='\\.json$', full.names=FALSE)
+  keys <- character(0)
+  for (f in fs) {
+    k <- sub('\\.json$','',f)
+    if (grepl('\\.terminal$', k)) k <- sub('\\.terminal$','',k)
+    else if (grepl('\\.recovered$', k)) k <- sub('\\.recovered$','',k)
+    else if (grepl('\\.terminal-r-[0-9a-f]+$', k)) next
+    else if (grepl('\\.running-r-[0-9a-f]+$', k)) next
+    keys <- c(keys, k)
+  }
+  unique(keys)
+}
+
 attempt_results <- function(app_dir,sid,rq) {
   d <- file.path(attempt_dir(app_dir,sid,rq),'results')
   x <- sess_read_json(file.path(attempt_dir(app_dir,sid,rq),'result.json')) %||% list()
-  for (f in list.files(d,pattern='\\.json$',full.names=TRUE)) {
-    if (grepl('\\.terminal\\.json$',f)) next
-    terminal <- sub('\\.json$','.terminal.json',f)
-    v <- sess_read_json(if(file.exists(terminal)) terminal else f); if (is.null(v)) next
-    key <- sub('\\.json$','',basename(f))
-    if (startsWith(key,'step--')) { x$steps <- x$steps %||% list(); x$steps[[substring(key,7)]] <- v }
-    else x[[key]] <- v
-  }
-  # A crash may happen after terminal commit but before the ordinary file rename.
-  for(f in list.files(d,pattern='\\.terminal\\.json$',full.names=TRUE)) {
-    key <- sub('\\.terminal\\.json$','',basename(f)); v <- sess_read_json(f)
-    if(startsWith(key,'step--')) { x$steps <- x$steps %||% list(); x$steps[[substring(key,7)]] <- v }
+  for (key in attempt_keys(d)) {
+    v <- attempt_value(app_dir, sid, rq, key); if (is.null(v)) next
+    if (startsWith(key,'step--')) {
+      x$steps <- x$steps %||% list(); x$steps[[substring(key,7)]] <- v
+    } else x[[key]] <- v
   }
   x
 }
@@ -77,21 +127,38 @@ attempt_save <- function(app_dir,sid,rq,kind,value,step=NULL) {
   key <- if (identical(kind,'step')) paste0('step--',step) else kind
   f <- file.path(d,paste0(key,'.json'))
   terminal <- file.path(d,paste0(key,'.terminal.json'))
-  old <- sess_read_json(if(file.exists(terminal)) terminal else f)
+  # 已被纠正的那一代：运行态写入落到新一代文件，
+  #   原始 step--<step>.json 与 .terminal.json 两份 hash 必须保持不变 ——
+  #   它们是这次故障的原始凭据，改动等于销毁证据。
+  rec_slot <- ''
+  if (kind=='step' && exists('recover_new_slot', mode='function'))
+    rec_slot <- tryCatch(recover_new_slot(app_dir,sid,rq,step), error=function(e) '')
+  run_f <- f
+  if (nzchar(rec_slot)) run_f <- sub('\\.terminal-r-', '.running-r-', rec_slot)
+  old <- attempt_value(app_dir,sid,rq,key)
   if (is.null(old)) { prev <- attempt_results(app_dir,sid,rq); old <- if (kind=='step') prev$steps[[step]] else prev[[kind]] }
   if (kind=='step' && sess_chr(old$status) %in% c('done','failed','stopped')) return(old)
   tmp <- tempfile('.result-',tmpdir=d); on.exit(unlink(tmp),add=TRUE)
   sess_write_json(tmp,value); Sys.chmod(tmp,'0600')
   if (kind=='step' && sess_chr(value$status) %in% c('done','failed','stopped')) {
     # No lock/TTL: first terminal is an immutable atomic hard-link fact.
+    # 已被纠正的那一代：新终态写进恢复记录指定的槽位，
+    #   旧 terminal 保持不可覆盖；槽位同样只用 file.link，第一次写入即定型。
+    slot <- rec_slot
+    if (nzchar(slot)) {
+      suppressWarnings(file.link(tmp, slot))
+      rb <- sess_read_json(slot)
+      if (is.null(rb)) stop('recovered terminal commit failed')
+      return(rb)
+    }
     suppressWarnings(file.link(tmp,terminal))
     rb <- sess_read_json(terminal)
     if (is.null(rb)) stop('terminal commit failed')
     # Result aggregation reads terminal even if this process dies now.
     return(rb)
   }
-  if (!file.rename(tmp,f)) stop('result commit failed')
-  if (kind=='step' && file.exists(terminal)) return(sess_read_json(terminal))
+  if (!file.rename(tmp,run_f)) stop('result commit failed')
+  if (kind=='step') { cv <- attempt_value(app_dir,sid,rq,key); if (!is.null(cv)) return(cv) }
   rb <- sess_read_json(f)
   expected <- jsonlite::fromJSON(jsonlite::toJSON(value,auto_unbox=TRUE,null='null',digits=NA),simplifyVector=FALSE)
   if (!isTRUE(all.equal(expected,rb,check.attributes=FALSE))) stop('result readback mismatch')

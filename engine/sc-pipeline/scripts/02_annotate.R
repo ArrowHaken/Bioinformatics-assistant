@@ -137,52 +137,56 @@ if (!is.null(lit_dict)) {
   if (!file.exists(reference)) stop("reference 表不存在: ", reference, call. = FALSE)
   ext <- tolower(tools::file_ext(reference))
   if (ext %in% c("xlsx", "xls")) {
-    if (!requireNamespace("readxl", quietly = TRUE)) {
-      stop("读 Excel 需要 readxl 包，未安装。请先 install.packages('readxl')，\n",
-           "  或把 reference 另存为 tsv 后用同样参数传入。不提供静默替代。", call. = FALSE)
+    # ---- 2026-11-13 改：Excel 解析统一走 lib/ref_table.R ----
+    #   为什么挪出去：这里的旧逻辑是按"行"认表的 —— 先是固定表头行号，后来改成
+    #   "表头上面一行就是简称行"。后者遇到这张表直接把列名（Positive Markers、
+    #   Literature Marker References 之类）当成细胞类型收进了词典。
+    #   这类错不会报错，只会让注释结果悄悄变错，事后极难发现。
+    #   现在解析只有一份实现（lib/ref_table.R::ref_table_parse），生产脚本与
+    #   测试脚本跑同一份代码，口径写在函数里：
+    #     按列名定位列 → 类型 key 优先 Subclass Level 3、为空才回退全称 →
+    #     只取 Positive Markers → 同名不同层级不合并 → 参考文献区不进词典。
+    #   打分、阈值、输出列一概不动；这里只把解析结果换成统一结构。
+    source(file.path(.this_dir, "lib", "ref_table.R"), local = FALSE)
+    ref_tbl <- ref_table_parse(reference)
+    LOG("表头行: ", ref_tbl$meta$header_row,
+        " | 数据区行数: ", ref_tbl$meta$n_data_rows,
+        " | 参考文献区起: ", ref_tbl$meta$ref_block_row,
+        " | 类型 key: ", ref_tbl$meta$n_keys)
+    if (length(ref_tbl$meta$conflicts) > 0) {
+      LOG("注意：", length(ref_tbl$meta$conflicts), " 个 key 的全称不一致，未合并（详见 meta$conflicts）")
     }
-    sheets <- readxl::excel_sheets(reference)
-    raw <- readxl::read_excel(reference, sheet = sheets[1], col_names = FALSE)
-    raw <- as.data.frame(raw, stringsAsFactors = FALSE)
-    # ---- 表头不再写死第 6 行 ----
-    #   为什么改：原来固定 hdr_idx <- 6，理由是"官方表表头在第 6 行"。
-    #   而 read_excel 会先去掉顶部空行，于是同一份文件读进来的行号整体上移：
-    #   数据框的第 6 行其实是 Excel 的第 7 行（Podocyte 那行数据），
-    #   全称行里自然找不到 'Positive Markers'，报"请确认表结构"。
-    #   这不是表的问题，是"按位置找"这种写法的必然结果 ——
-    #   换一份带小标题、多一行少一行空行的表，同样的错会再来一次。
-    #   现在改成按内容找：哪一行写着 Positive Markers，哪一行就是表头。
-    find_hdr <- function(df) {
-      for (i in seq_len(min(nrow(df), 30))) {
-        v <- as.character(unlist(df[i, ]))
-        v <- v[!is.na(v)]
-        if (any(grepl("Positive Markers", v, ignore.case = TRUE))) return(i)
-      }
-      NA_integer_
+    if (ref_tbl$meta$n_unmarked > 0) {
+      LOG("注意：", ref_tbl$meta$n_unmarked, " 个类型 Positive Markers 为空，保留但不参与打分：",
+          paste(head(ref_tbl$meta$unmarked_keys, 8), collapse = ", "))
     }
-    hdr_idx <- find_hdr(raw)
-    if (is.na(hdr_idx))
-      stop("在 reference 表里找不到 'Positive Markers' 列，请确认表结构。\n",
-           "  （已按内容逐行查找前 30 行；这说明这份表确实不是注释依据表，\n",
-           "    或者它的 marker 列名不是 Positive Markers。）", call. = FALSE)
-
-    full_names <- as.character(unlist(raw[hdr_idx, ]))
-    prev_names <- if (hdr_idx > 1) as.character(unlist(raw[hdr_idx - 1, ])) else rep(NA_character_, ncol(raw))
-    # 上一行是不是"简称行"，看它有没有实质内容；全是空或只有一两个词，就说明没有简称行。
-    prev_ok <- sum(!is.na(prev_names) & nzchar(trimws(prev_names))) >= max(3, ncol(raw) / 3)
-    short_names <- if (prev_ok) prev_names else full_names
-    pos_row <- which(grepl("Positive Markers", full_names, ignore.case = TRUE))[1]
-    LOG("表头所在行（数据框内）：", hdr_idx, "；简称行", if (prev_ok) "有" else "没有（用全称）")
     lst <- list()
-    for (j in seq_along(short_names)) {
-      key <- if (!is.na(short_names[j]) && nzchar(short_names[j])) short_names[j] else full_names[j]
-      if (is.na(key) || !nzchar(key)) next
-      cells <- as.character(unlist(raw[(hdr_idx + 1):nrow(raw), j]))
-      cells <- cells[!is.na(cells) & nzchar(cells) & cells != "NA"]
-      mk <- unlist(strsplit(paste(cells, collapse = ","), "[,;，；\\s]+"))
-      lst[[key]] <- list(markers = unique(mk), refs = "", full = full_names[j])
+    for (e in ref_tbl$entries) {
+      lst[[e$key]] <- list(
+        markers = if (is.na(e$positive[1])) character(0) else as.character(e$positive),
+        refs    = if (length(e$refs)) paste(e$refs, collapse = ", ") else "",
+        full    = if (is.na(e$full_name)) e$key else e$full_name
+      )
     }
     dict <- norm_dict(lst)
+    # 参考表解析元数据落成真实产物，不只留在日志里：
+    #   报告要能回答「这份词典来自哪张表、哪一行、按哪些列读出来的」，
+    #   只在内存与日志里就没法事后核对。
+    tryCatch({
+      meta_out <- ref_tbl$meta
+      meta_out$entries <- lapply(ref_tbl$entries, function(e) list(
+        key = e$key, full_name = e$full_name, level3 = e$level3,
+        level1 = e$level1, source_rows = as.integer(e$source_rows),
+        # 阳性 marker 原文一并写出：判定层要按类型逐条核对命中是否属于本类型，
+        #   只有条数等于没给证据。
+        positive = as.character(e$positive),
+        n_positive = length(e$positive), refs = as.character(e$refs)))
+      meta_out$reference_path <- reference
+      writeLines(jsonlite::toJSON(meta_out, auto_unbox = TRUE, pretty = TRUE,
+                                  null = "null"),
+                 file.path(outdir, "reference_parse.json"))
+      LOG("参考表解析元数据已写出: ", file.path(outdir, "reference_parse.json"))
+    }, error = function(e) LOG("参考表元数据写出失败（不影响主流程）: ", conditionMessage(e)))
   } else {
     tb <- read.delim(reference, stringsAsFactors = FALSE, check.names = FALSE)
     if (!all(c("celltype", "markers") %in% tolower(colnames(tb)))) {
@@ -269,10 +273,26 @@ res <- data.frame()
 unmatched <- character(0)
 low_conf  <- character(0)
 
-for (cl in levels(factor(as.character(top$cluster)))) {
+# 遍历真实对象的簇全集，而不是只遍历「差异表里出现过的簇」。
+#   差异表只收有显著 marker 的簇；某簇在对象里存在、但没达到显著阈值时，
+#   它根本不出现在 top 里。按 top 遍历会让这种簇直接从结果中消失 ——
+#   下游按簇号对齐时看到的是「少了几个簇」，而「少了」和「判不出类型」
+#   是两件完全不同的事，混在一起就没法追。
+all_cl <- sort(unique(as.character(obj$seurat_clusters)))
+for (cl in all_cl) {
   g <- toupper(as.character(top$gene[top$cluster == cl]))
   g <- g[!is.na(g) & nzchar(g)]
-  if (length(g) == 0) { unmatched <- c(unmatched, cl); next }
+  if (length(g) == 0) {
+    # 簇存在但没有可用 marker：写一行 NA 并说明原因，不跳过。
+    unmatched <- c(unmatched, cl)
+    res <- rbind(res, data.frame(cluster = cl, celltype = NA_character_, score = 0,
+                                 second = NA_character_, score2 = 0, n_hit = 0L,
+                                 hit_genes = "", hit_genes_all = "",
+                                 full_name = "", refs = "",
+                                 reason = "该簇没有可用于打分的 marker（未进入显著差异表）",
+                                 stringsAsFactors = FALSE))
+    next
+  }
 
   sc <- lapply(dict, function(e) score_one(g, e))
   score_v <- vapply(sc, function(x) x$score, numeric(1))
@@ -282,7 +302,8 @@ for (cl in levels(factor(as.character(top$cluster)))) {
     unmatched <- c(unmatched, cl)
     res <- rbind(res, data.frame(cluster = cl, celltype = NA_character_, score = 0,
                                  second = NA_character_, score2 = 0, n_hit = 0L,
-                                 hit_genes = "", full_name = "", refs = "",
+                                 hit_genes = "", hit_genes_all = "",
+                                 full_name = "", refs = "",
                                  reason = "词典里没有任何一个 marker 命中",
                                  stringsAsFactors = FALSE))
     next
@@ -310,6 +331,9 @@ for (cl in levels(factor(as.character(top$cluster)))) {
                                  score = round(s1, 3), second = b2, score2 = round(s2, 3),
                                  n_hit = n1,
                                  hit_genes = paste(head(sc[[b1]]$hit, 8), collapse = ","),
+                                 # 完整命中串：判定层要看"是不是本类型的基因"，
+                                 #   截断到 8 个会把后面的证据丢掉。
+                                 hit_genes_all = paste(sc[[b1]]$hit, collapse = ","),
                                  full_name = "", refs = "", reason = reason,
                                  stringsAsFactors = FALSE))
     next
@@ -319,10 +343,28 @@ for (cl in levels(factor(as.character(top$cluster)))) {
                                score = round(s1, 3), second = b2, score2 = round(s2, 3),
                                n_hit = n1,
                                hit_genes = paste(head(sc[[b1]]$hit, 8), collapse = ","),
+                               hit_genes_all = paste(sc[[b1]]$hit, collapse = ","),
                                full_name = dict[[b1]]$full,
                                refs = paste(dict[[b1]]$refs, collapse = ","),
                                reason = "",
                                stringsAsFactors = FALSE))
+}
+# 展示前 8 个命中基因，n_hit 仍是完整命中数。
+#   把「展示条数」当成「命中条数」验收，会逼人要么少报命中、要么拉长展示，
+#   两种都是错的。这里把展示条数与是否截断明确记下。
+res$n_hit_shown <- vapply(seq_len(nrow(res)), function(i) {
+  v <- as.character(res$hit_genes[i])
+  if (is.na(v) || !nzchar(v)) 0L else length(strsplit(v, ",", fixed = TRUE)[[1]])
+}, integer(1))
+res$hit_genes_truncated <- as.integer(res$n_hit > res$n_hit_shown)
+# hit_genes_all 的条数应与 n_hit 一致；不一致说明命中串被截过，属实现错误。
+res$n_hit_all <- vapply(seq_len(nrow(res)), function(i) {
+  v <- as.character(res$hit_genes_all[i])
+  if (is.na(v) || !nzchar(v)) 0L else length(strsplit(v, ",", fixed = TRUE)[[1]])
+}, integer(1))
+if (any(res$n_hit_all != as.integer(res$n_hit))) {
+  LOG("注意：有 ", sum(res$n_hit_all != as.integer(res$n_hit)),
+      " 行 hit_genes_all 条数与 n_hit 不一致（应为完整命中串）")
 }
 write.table(res, file.path(outdir, "annot_result.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
 if (length(unmatched) > 0) {
@@ -345,8 +387,17 @@ n_na <- sum(is.na(obj$annot))
 if (n_na > 0) {
   LOG("注意：", n_na, " 个细胞所在群未判出类型，annot 为 NA（保留 NA，不用近似类型填充）。")
 }
-cnt <- as.data.frame(table(obj$annot, useNA = "ifany"))
+# 计数表按契约输出 celltype / n_cells / typed 三列。
+#   原来直接写 table() 结果，列名是 Var1 / Freq —— R 的内部命名，不是契约；
+#   且未定型细胞容易漏在外，加起来对不上总数。
+cnt <- as.data.frame(table(obj$annot, useNA = "ifany"), stringsAsFactors = FALSE)
+names(cnt) <- c("celltype", "n_cells")
+cnt$celltype <- ifelse(is.na(cnt$celltype), "unassigned", as.character(cnt$celltype))
+cnt$typed <- ifelse(cnt$celltype == "unassigned", "no", "yes")
+cnt <- cnt[order(cnt$celltype != "unassigned", cnt$celltype), ]
 write.table(cnt, file.path(outdir, "celltype_count.xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+LOG("计数表合计 ", sum(cnt$n_cells), " 细胞（未定型 ",
+    sum(cnt$n_cells[cnt$celltype == "unassigned"]), "），对象总数 ", ncol(obj), " 细胞")
 
 saveRDS(obj, file.path(outdir, "annotated.rds"))
 LOG("已保存: ", file.path(outdir, "annotated.rds"))
@@ -363,7 +414,20 @@ LOG("已保存: ", file.path(outdir, "annotated.rds"))
 #     "跑完了"和"结果能用"是两件事，必须分开说，而且要留下痕迹。
 # ---------------------------------------------------------------------
 n_clu   <- length(unique(obj$seurat_clusters))
-n_typed <- length(unique(na.omit(as.character(res$celltype))))
+# 两个量必须分开算，历史上混成一个变量，导致报告写错：
+#   n_typed_clusters = 判出类型的簇数（报告里的「x/32 个群已定类型」用它）
+#   n_celltypes      = 不同细胞类型个数（报告里的「判出类型数」用它）
+# 实测一轮：32 簇里 20 簇定型、归入 15 种类型、12 簇未定型。
+#   若只写 15/32，读者会以为只有 15 个簇定了型。
+# 显式掩码：R 里 nzchar(NA) 默认是 TRUE，直接 sum(nzchar(...)) 会把
+#   未定型（NA）当成"已定型"计入，本轮会算出 32 而不是 20。
+#   空串同样不算类型，所以两个量都只在 !is.na 且非空白 的掩码内统计。
+.ct_raw <- trimws(as.character(res$celltype))
+.ct_ok  <- !is.na(.ct_raw) & nzchar(.ct_raw)
+n_typed_clusters <- sum(.ct_ok)
+n_celltypes <- length(unique(.ct_raw[.ct_ok]))
+# 兼容旧变量名：质量分档历史上按「类型数」判断，保持同一含义。
+n_typed <- n_celltypes
 na_pct  <- if (ncol(obj) > 0) round(100 * n_na / ncol(obj), 1) else NA_real_
 
 # 质量分档：只看能确定性判定的东西，不猜"生物学上对不对"。
@@ -381,11 +445,13 @@ qual <- if (!is.na(na_pct) && na_pct > bad_na_pct) {
 
 qual_note <- switch(qual,
   LOW = paste0("未定型细胞 ", na_pct, "%（阈值 ", bad_na_pct, "%），",
-               "只有 ", n_typed, "/", n_clu, " 个群判出类型。",
+               "只有 ", n_typed_clusters, "/", n_clu, " 个群判出类型（共 ",
+               n_celltypes, " 种类型）。",
                "这份注释只能当参考，不能作为交付结论；要改善需补厚词典或提高 marker 质量。"),
   PARTIAL = paste0("未定型细胞 ", na_pct, "%，部分群没定下来。可作为参考，",
                    "涉及未定型群的差异与富集结论要谨慎。"),
-  OK = paste0("未定型细胞 ", na_pct, "%，", n_typed, "/", n_clu, " 个群已定类型。"))
+  OK = paste0("未定型细胞 ", na_pct, "%，", n_typed_clusters, "/", n_clu,
+              " 个群已定类型，归入 ", n_celltypes, " 种细胞类型。"))
 
 LOG("质量判定: ", qual, " —— ", qual_note)
 cat("ANNOT_QUALITY", qual, "\n")
@@ -400,7 +466,9 @@ rep_lines <- c(
   paste0("- marker 参数: min.pct=", min_pct, ", logfc.threshold=", logfc,
          ", 候选池 top_n=", top_n, ", 最少命中=", min_score, ", 置信比=", min_ratio),
   paste0("- 聚类数: ", n_clu),
-  paste0("- 判出类型数: ", n_typed),
+  paste0("- 已定类型群数: ", n_typed_clusters, "/", n_clu,
+         "（未定型 ", n_clu - n_typed_clusters, " 群）"),
+  paste0("- 不同细胞类型数: ", n_celltypes),
   paste0("- 未匹配群（命中不足）: ", if (length(unmatched)) paste(unmatched, collapse = ", ") else "无"),
   paste0("- 分不开的群（第一名不领先）: ", if (length(low_conf)) paste(low_conf, collapse = ", ") else "无"),
   paste0("- 未判型细胞数: ", n_na, "（", na_pct, "%）"),
@@ -432,7 +500,8 @@ writeLines(jsonlite::toJSON(list(
   quality = qual,
   note = qual_note,
   clusters = n_clu,
-  typed_clusters = n_typed,
+  typed_clusters = n_typed_clusters,
+  celltypes = n_celltypes,
   untyped_cells = n_na,
   untyped_pct = na_pct,
   threshold_pct = bad_na_pct,

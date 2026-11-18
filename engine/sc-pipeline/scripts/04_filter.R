@@ -103,15 +103,23 @@ if (file.exists(PARAM)) {
 
 # ---- 剔除清单 ----
 DROP <- character(0)
-if (!is.null(pj) && length(pj$drop_clusters)) {
+# 「明确空清单」与「没有决定」必须分开。
+#   改前用 length(pj$drop_clusters) 判断，合法空数组 drop_clusters:[] 的
+#   length 是 0，于是被判成缺参数直接停下 —— 而人明明已经选了全部保留。
+#   反过来，缺字段时也不能默认全保留：那等于替人做了一个删除决定。
+has_drop_field <- !is.null(pj) && !is.null(pj$drop_clusters)
+if (has_drop_field) {
   DROP <- as.character(unlist(pj$drop_clusters))
-  DROP <- DROP[nzchar(trimws(DROP))]
-  LOG("剔除清单来自参数文件：", if (length(DROP)) paste(DROP, collapse = ",") else "（空 = 全部保留）")
+  DROP <- trimws(DROP)
+  DROP <- DROP[nzchar(DROP)]
+  LOG("剔除清单来自参数文件：",
+      if (length(DROP)) paste(DROP, collapse = ",") else "（明确为空 = 全部保留）")
 } else if (has_flag("--keep-all")) {
   LOG("命令行给了 --keep-all：不剔除任何簇")
 } else {
   # 没有清单、也没说保留谁，就停。不替人猜。
   stop("CHECK_FAIL 缺少剔除参数：", PARAM,
+       "\n  参数文件里没有 drop_clusters 字段，等于这一轮没有做过删除决定。",
        "\n  这一版不使用写死的清单：照抄上一轮的簇号，换个对象跑删掉的就是别的细胞。\n",
        "  请在应用里定下要删哪些簇，重新下发；确实一个都不删，请显式给 --keep-all。",
        call. = FALSE)

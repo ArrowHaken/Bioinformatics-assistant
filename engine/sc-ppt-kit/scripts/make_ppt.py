@@ -29,6 +29,7 @@ import argparse
 import datetime as _dt
 import fnmatch
 import glob as _glob
+import hashlib
 import json
 import os
 import re
@@ -201,7 +202,7 @@ def _paragraphs(txbody_inner):
 
 
 def _paragraph_ppr(para):
-    m = re.search(r"<a:pPr>.*?</a:pPr>|<a:pPr\s*/>", para, re.S)
+    m = re.search(r"<a:pPr\b[^>]*(?:/>|>.*?</a:pPr>)", para, re.S)
     if m:
         return m.group(0)
     m = re.search(r"<a:pPr(?:\s[^>]*)?/>", para)
@@ -229,12 +230,15 @@ def rewrite_txbody(shape_xml, paragraphs):
     lead_empty = 0
     tail_empty = 0
     tmpl_ppr = []
+    tmpl_rpr = []
     seen_text = False
     for para in paras:
         has_text = "<a:t>" in para
         if has_text:
             seen_text = True
             tmpl_ppr.append(_paragraph_ppr(para))
+            run_pr = re.search(r"<a:rPr\b[^>]*(?:/>|>.*?</a:rPr>)", para, re.S)
+            tmpl_rpr.append(run_pr.group(0) if run_pr else "<a:rPr/>")
         else:
             if not seen_text:
                 lead_empty += 1
@@ -242,15 +246,29 @@ def rewrite_txbody(shape_xml, paragraphs):
                 tail_empty += 1
     if not tmpl_ppr:
         tmpl_ppr = [""]
+        tmpl_rpr = ["<a:rPr/>"]
 
     new_paras = []
     for idx, item in enumerate(paragraphs):
         text = item.get("text", "")
         ppr = tmpl_ppr[idx] if idx < len(tmpl_ppr) else tmpl_ppr[-1]
         ppr = _set_ppr_size(ppr, item.get("sz"))
-        new_paras.append("<a:p>" + ppr + "<a:r><a:t>" + xml_text(text) + "</a:t></a:r></a:p>")
+        rpr = tmpl_rpr[idx] if idx < len(tmpl_rpr) else tmpl_rpr[-1]
+        if item.get("sz") is not None:
+            if re.search(r'\bsz="\d+"', rpr):
+                rpr = re.sub(r'\bsz="\d+"', 'sz="%d"' % int(item['sz']), rpr, count=1)
+            else:
+                rpr = rpr.replace('<a:rPr', '<a:rPr sz="%d"' % int(item['sz']), 1)
+        new_paras.append("<a:p>" + ppr + "<a:r>" + rpr + "<a:t>" + xml_text(text) + "</a:t></a:r></a:p>")
 
-    new_inner = ("<a:p/>" * lead_empty) + "".join(new_paras) + ("<a:p/>" * tail_empty)
+    # CT_TextBody requires bodyPr before paragraphs. Preserve the template's
+    # body properties/list style; dropping them makes PowerPoint reject the deck
+    # even though a generic XML parser can read it.
+    body_pr = re.search(r"<a:bodyPr\b[^>]*(?:/>|>.*?</a:bodyPr>)", inner, re.S)
+    list_style = re.search(r"<a:lstStyle\b[^>]*(?:/>|>.*?</a:lstStyle>)", inner, re.S)
+    prefix = (body_pr.group(0) if body_pr else "<a:bodyPr/>")
+    prefix += list_style.group(0) if list_style else "<a:lstStyle/>"
+    new_inner = prefix + ("<a:p/>" * lead_empty) + "".join(new_paras) + ("<a:p/>" * tail_empty)
     return shape_xml[:m.start()] + "<p:txBody>" + new_inner + "</p:txBody>" + shape_xml[m.end():]
 
 
@@ -355,6 +373,65 @@ def iter_image_candidates(root, max_depth=3):
     return out
 
 
+def _pretty_cmp(raw):
+    """把 MicroplasticsvsMock 这类比较名还原成可读形式。
+
+    比较名一律从文件名解析，不写死任何分组名；解析不出就原样返回，
+    由调用方决定退回原 stem。这里只做字符串整理，不做任何推断。
+    """
+    m = re.match(r"^(.+?)vs(.+)$", str(raw or "").strip(), re.I)
+    if m:
+        return "%s vs %s" % (m.group(1).strip(), m.group(2).strip())
+    return str(raw or "").strip()
+
+
+def example_label(path):
+    """从最终选中的图给出"本页示例"短标签。
+
+    为什么必须由选中路径派生：示例图是按 patterns 通配选出来的，
+    实际落到哪个簇、哪个细胞类型、哪一对比较由产物决定。若文字写死
+    "簇 1"或写死分组名，选中的却是别的图，读者照着核对就会得出不同结论。
+    这里只做名称解析，不重新计算、不推断任何科学结论。
+    """
+    if not path:
+        return ""
+    stem = os.path.splitext(os.path.basename(str(path)))[0]
+    m = re.match(r"^featureplot_cluster(\d+)$", stem, re.I)
+    if m:
+        return "本页示例：簇%s的 marker 特征图" % m.group(1)
+    m = re.match(r"^violin_cluster(\d+)$", stem, re.I)
+    if m:
+        return "本页示例：簇%s的 marker 小提琴图" % m.group(1)
+    # 差异/富集图命名：<细胞类型>_<比较名>_<GO_BP|KEGG|volcano>。
+    # 注意 GO_BP 自带下划线，不能直接 rsplit 三段，必须先剥已知后缀。
+    low = stem.lower()
+    kind = ""
+    for suffix, kname in (("_go_bp", "GO_BP"), ("_kegg", "KEGG"), ("_volcano", "volcano")):
+        if low.endswith(suffix):
+            kind = kname
+            stem = stem[: -len(suffix)]
+            break
+    if kind:
+        ct, sep, cmp_raw = stem.rpartition("_")
+        if sep and ct.strip():
+            ct_disp = ct.replace("_", " ").strip()
+            cmp_disp = _pretty_cmp(cmp_raw)
+            if kind == "GO_BP":
+                return "本页示例：%s（%s）的 GO BP 富集" % (ct_disp, cmp_disp)
+            if kind == "KEGG":
+                return "本页示例：%s（%s）的 KEGG 富集" % (ct_disp, cmp_disp)
+            return "本页示例：%s（%s）的火山图" % (ct_disp, cmp_disp)
+        # 剥了后缀却拆不出细胞类型：仍可给出比较名，但不编细胞类型。
+        if "vs" in stem.lower():
+            tail = {"GO_BP": "的 GO BP 富集", "KEGG": "的 KEGG 富集"}.get(kind, "的火山图")
+            return "本页示例：%s%s" % (_pretty_cmp(stem), tail)
+        return "本页示例：%s" % os.path.splitext(os.path.basename(str(path)))[0]
+    # 解析不出且像差异图：直接展示去掉扩展名的原 stem，宁可朴素也不猜。
+    if "vs" in stem.lower():
+        return "本页示例：%s" % stem
+    return ""
+
+
 def find_image_file(candidates, patterns):
     """按 patterns 顺序在候选目录（含其子目录）里递归找图。
 
@@ -363,13 +440,13 @@ def find_image_file(candidates, patterns):
       fallback=True  表示只能靠纯通配（如 *.png）兜底，报告里要明确标注期望名与替代名。
     """
     tried = []
-    best_fallback = None
     for pattern in patterns:
         needle = pattern.lower()
-        strict = set(needle) - set("*?[]")
-        if not strict:
-            # 纯通配（*.png / *），只作兜底，不当作确定命中
-            pass
+        # An extension is not a figure identity. Never substitute an arbitrary
+        # PNG for a missing volcano, annotation or enrichment figure.
+        stem = os.path.splitext(os.path.basename(needle))[0]
+        if not re.search(r"[a-z0-9\u4e00-\u9fff]", stem):
+            continue
         for cand in candidates:
             if not cand or not os.path.isdir(cand):
                 continue
@@ -378,14 +455,16 @@ def find_image_file(candidates, patterns):
                     if fnmatch.fnmatch(os.path.basename(p).lower(), needle)]
             if not hits:
                 continue
+            # 排序优先级沿用原来三条（png 优先、路径短优先、文件名短优先），
+            #   末尾补"最终相对路径字典序"做 tie-breaker。
+            #   为什么必须补：同长度候选原来靠 os.walk 的遍历顺序决定，
+            #   而遍历顺序不保证稳定 —— 同一份产物两次生成可能选中不同图，
+            #   报告却写着同一个示例，读者据此核对会得出不同结论。
             hits.sort(key=lambda p: (0 if p.lower().endswith(".png") else 1,
-                                     len(os.path.relpath(p, cand)), len(os.path.basename(p))))
-            if strict:
-                return hits[0], tried, False
-            if best_fallback is None:
-                best_fallback = hits[0]
-    if best_fallback is not None:
-        return best_fallback, tried, True
+                                     len(os.path.relpath(p, cand)),
+                                     len(os.path.basename(p)),
+                                     os.path.relpath(p, cand).replace(os.sep, "/")))
+            return hits[0], tried, False
     return None, tried, False
 
 
@@ -472,6 +551,24 @@ def analyze_table(rows, spec):
     if header_idx is None:
         return result
     header = rows[header_idx]
+    # The plotting stage writes one sample per row (sample, cell_number).
+    # Transpose only when the other headers are recognized metric names;
+    # preserve the original wide table format used by existing templates.
+    known_metrics = {norm_key(k) for mr in table_spec.get("metric_rows", [])
+                     for k in mr.get("keys", [])}
+    metric_columns = [i for i in range(1, len(header))
+                      if norm_key(header[i]) in known_metrics]
+    if metric_columns:
+        data_rows = [r for r in rows[header_idx + 1:] if r and str(r[0]).strip()]
+        samples = [str(r[0]).strip() for r in data_rows]
+        if len(samples) != len(set(samples)):
+            raise SystemExit("样本统计表存在重复样本，停止生成")
+        wide = [[header[0]] + samples]
+        for i in metric_columns:
+            if any(len(r) <= i or not str(r[i]).strip() for r in data_rows):
+                raise SystemExit("样本统计表有缺失指标，停止生成")
+            wide.append([header[i]] + [r[i] for r in data_rows])
+        return analyze_table(wide, spec)
     result["samples"] = [c for c in header[1:] if str(c).strip() != ""]
 
     metric_rows = table_spec.get("metric_rows", [])
@@ -512,7 +609,7 @@ def summarize(table_info, stats_json):
                 return row_map[norm_key(label)]
         return []
 
-    filtered = [to_float(v) for v in _values("高质量细胞数")]
+    filtered = [to_float(v) for v in _values("本次对象细胞数", "高质量细胞数")]
     filtered = [v for v in filtered if v is not None]
     raw = [to_float(v) for v in _values("原始细胞数")]
     raw = [v for v in raw if v is not None]
@@ -583,6 +680,8 @@ def build_plan(spec, args, dir_index, report):
             table_source = table_path
 
     table_info = analyze_table(table_rows or [], spec)
+    if table_rows and (not table_info["samples"] or not table_info["rows"]):
+        raise SystemExit("样本统计表没有可识别的样本和指标，停止生成")
     summary = summarize(table_info, stats_json)
 
     plan = []
@@ -601,6 +700,7 @@ def build_plan(spec, args, dir_index, report):
             "required_assets": [],
             "fallbacks": [],
             "table": None,
+            "dir_note": table_spec.get("dir_note", ""),
             "skipped": False,
         }
 
@@ -876,6 +976,14 @@ class DeckWriter(object):
         else:
             for para in body.get("paragraphs", []):
                 paragraphs.append({"text": para["text"], "sz": para.get("sz")})
+        # 示例页标注：按本页最终选中的图追加一行短标签。
+        #   只对能解析出簇号或细胞类型的图生效；解析不出就不加，不编造。
+        for _im in (page.get("images") or []):
+            _lab = example_label(_im.get("path"))
+            if _lab:
+                paragraphs.append({"text": _lab, "sz": 1400})
+                break
+
         sh = find_shape(shapes, name=slots["body_copy"])
         if sh is None:
             raise SystemExit("模板不符合预期：缺少正文形状 %s" % slots["body_copy"])
@@ -1276,6 +1384,39 @@ def main(argv=None):
     if os.path.isdir(out_path):
         out_path = os.path.join(out_path, "analysis_report_%s.pptx" % args.date.replace("-", ""))
     n_slides = writer.assemble(out_path, args.title, report_lines)
+
+    # Keep a traceable mapping from slide content to the exact source files.
+    # This is a companion artifact, not a claim that biological interpretation
+    # or visual layout has been reviewed.
+    def file_digest(path, algorithm):
+        digest = hashlib.new(algorithm)
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    source_slides = []
+    for entry in plan:
+        if entry["skipped"]:
+            continue
+        images = [{"source_rel": os.path.relpath(img["path"], args.result_dir).replace(os.sep, "/"),
+                   "description": img["descr"], "media_part": img["media_part"],
+                   "md5": file_digest(img["path"], "md5"),
+                   "sha256": file_digest(img["path"], "sha256")}
+                  for img in entry["images"]]
+        source_slides.append({"slide": len(source_slides) + 1, "spec_page": entry["no"],
+                              "title": entry["title"], "type": entry["type"], "images": images})
+    manifest = {"schema": "sc-ppt-sources-v1", "pptx": os.path.basename(out_path),
+                "pptx_md5": file_digest(out_path, "md5"),
+                "pptx_sha256": file_digest(out_path, "sha256"),
+                "slides": source_slides, "summary": summary}
+    table_source = next((entry["table"]["source"] for entry in plan
+                         if not entry["skipped"] and entry["table"]), None)
+    if table_source and os.path.isfile(table_source):
+        manifest["sample_table"] = {"source_rel": os.path.relpath(table_source, args.result_dir).replace(os.sep, "/"),
+                                    "md5": file_digest(table_source, "md5")}
+    with open(out_path + ".manifest.json", "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, ensure_ascii=False, indent=2)
 
     log("已生成：%s" % out_path)
     log("页数：%d（计划 %d 页，跳过 %d 页）" % (n_slides, len(plan), len(plan) - rendered))

@@ -830,9 +830,13 @@
     window.addEventListener('focus', function () { retryDue(); refreshStatus(); });
     // 那行字必须能点开：只说"待补发 1 条"却不给入口，等于让人干看着。
     //   DOM 可能还没就绪，所以用委托绑在 document 上，页头重绘也不丢。
+    //   用 closest 而不是判断 ev.target：按钮里有 span（数字与状态标签），
+    //   点在文字上时 target 是那个 span，不是按钮 —— 于是"点中间没反应、
+    //   点边缘才有反应"。实测就是这样被当成按钮坏了。
     document.addEventListener('click', function (ev) {
       var t = ev.target;
-      if (t && t.id === 'injectHint') { ev.preventDefault(); showPanel(); }
+      var hit = t && t.closest ? t.closest('#injectHint') : null;
+      if (hit) { ev.preventDefault(); showPanel(); }
     });
     // 启动就查一次：关掉很久再打开，积压的那几条要立刻补上，不等一小时。
     refreshStatus().then(function () { return retryDue(); }).then(refreshStatus);

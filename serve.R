@@ -30,9 +30,17 @@ suppressWarnings(options(stringsAsFactors = FALSE, scipen = 999, warn = -1))
 
 # ---- 找自己的位置 ----
 APP_DIR <- tryCatch({
-  a <- commandArgs(trailingOnly = FALSE)
-  f <- sub("^--file=", "", a[grep("^--file=", a)])
-  if (length(f)) normalizePath(dirname(f[1]), winslash = "/") else normalizePath(getwd(), winslash = "/")
+  # Standalone maintenance entry points (engine/exec_reaper.R) source this file
+  # for its definitions. They pass the app root explicitly so --file= points at
+  # the maintenance script rather than serve.R.
+  forced <- getOption("pa.app_dir", Sys.getenv("PA_APP_DIR", unset = ""))
+  if (is.character(forced) && length(forced) == 1L && nzchar(forced)) {
+    normalizePath(forced, winslash = "/", mustWork = TRUE)
+  } else {
+    a <- commandArgs(trailingOnly = FALSE)
+    f <- sub("^--file=", "", a[grep("^--file=", a)])
+    if (length(f)) normalizePath(dirname(f[1]), winslash = "/") else normalizePath(getwd(), winslash = "/")
+  }
 }, error = function(e) normalizePath(getwd(), winslash = "/"))
 
 PUBLIC_DIR <- file.path(APP_DIR, "public")
@@ -137,6 +145,46 @@ if (HAS_DECISIONS) source(DECISIONS_FILE, local = TRUE)
 
 # 会话意图：把「一段话」变成一条记录的校验与落地。
 #   依赖 sessions.R（要建记录），所以必须在它之后加载。
+ANNOT_REVIEW_FILE <- file.path(ENGINE_DIR, "annotation_review.R")
+if (file.exists(ANNOT_REVIEW_FILE)) source(ANNOT_REVIEW_FILE, local = TRUE)
+EVIDENCE_MERGE_FILE <- file.path(ENGINE_DIR, "evidence_merge.R")
+if (file.exists(EVIDENCE_MERGE_FILE)) source(EVIDENCE_MERGE_FILE, local = TRUE)
+
+DECISION_GATE_FILE <- file.path(ENGINE_DIR, "decision_gate.R")
+if (file.exists(DECISION_GATE_FILE)) source(DECISION_GATE_FILE, local = TRUE)
+
+EVIDENCE_CHECK_FILE <- file.path(ENGINE_DIR, "evidence_check.R")
+if (file.exists(EVIDENCE_CHECK_FILE)) source(EVIDENCE_CHECK_FILE, local = TRUE)
+
+# 覆盖判定单独成文件：要能用真实反例逐条测，不能内联在流程拼装里。
+COVER_RULES_FILE <- file.path(ENGINE_DIR, "cover_rules.R")
+if (file.exists(COVER_RULES_FILE)) source(COVER_RULES_FILE, local = TRUE)
+# 产物清单补录准入：跨 req 不得改写、bytes 不可变、新条目须有验收绑定。
+ART_SUPP_FILE <- file.path(ENGINE_DIR, "artifact_supplement.R")
+if (file.exists(ART_SUPP_FILE)) source(ART_SUPP_FILE, local = TRUE)
+# 活跃执行保护：终态回写必须绑定在管任务的 exec_id，
+#   未绑定的 done/failed 一律拒收，也不许改 started_at。
+# 图的小表守恒审计：单独一份，便于用真实表逐条测正反例。
+FIGS_AUDIT_FILE <- file.path(ENGINE_DIR, "figs_audit.R")
+HAS_FIGS_AUDIT <- file.exists(FIGS_AUDIT_FILE)
+if (HAS_FIGS_AUDIT) source(FIGS_AUDIT_FILE, local = TRUE)
+# 新鲜度豁免：只有一个窄口子（pack 复用 PPT 的来源清单）。
+FRESHNESS_FILE <- file.path(ENGINE_DIR, "freshness.R")
+HAS_FRESHNESS <- file.exists(FRESHNESS_FILE)
+if (HAS_FRESHNESS) source(FRESHNESS_FILE, local = TRUE)
+
+# pack 那个 ZIP 的归属判定：绑定本次数字作业，而不是跨机比较时间。
+PACK_BIND_FILE <- file.path(ENGINE_DIR, "pack_binding.R")
+HAS_PACK_BINDING <- file.exists(PACK_BIND_FILE)
+if (HAS_PACK_BINDING) source(PACK_BIND_FILE, local = TRUE)
+EXEC_GUARD_FILE <- file.path(ENGINE_DIR, "exec_guard.R")
+HAS_EXEC_GUARD <- file.exists(EXEC_GUARD_FILE)
+if (HAS_EXEC_GUARD) source(EXEC_GUARD_FILE, local = TRUE)
+# 误报纠正（候选）：只处理"无任何执行证据的失败投影"，旧 attempt 文件不删不改。
+EXEC_RECOVER_FILE <- file.path(ENGINE_DIR, "exec_recover.R")
+HAS_EXEC_RECOVER <- file.exists(EXEC_RECOVER_FILE)
+if (HAS_EXEC_RECOVER) source(EXEC_RECOVER_FILE, local = TRUE)
+
 INTENT_FILE <- file.path(ENGINE_DIR, "intent_bridge.R")
 HAS_INTENT <- file.exists(INTENT_FILE)
 if (HAS_INTENT) source(INTENT_FILE, local = TRUE)
@@ -207,6 +255,7 @@ if (HAS_LEDGER_OUT) source(LEDGER_OUT_FILE, local = TRUE)
 MIRROR_FILE <- file.path(ENGINE_DIR, "mirror.R")
 HAS_MIRROR <- file.exists(MIRROR_FILE)
 if (HAS_MIRROR) source(MIRROR_FILE, local = TRUE)
+source(file.path(ENGINE_DIR, "fetch_client.R"), local = TRUE)
 
 CONTRACT_FILE <- file.path(ENGINE_DIR, "contract.R")
 HAS_CONTRACT <- file.exists(CONTRACT_FILE)
@@ -243,11 +292,30 @@ HAS_VERDICT <- file.exists(VERDICT_FILE)
 AGENT_GATE_FILE <- file.path(ENGINE_DIR, "agent_gate.R")
 HAS_AGENT_GATE <- file.exists(AGENT_GATE_FILE)
 if (HAS_AGENT_GATE) source(AGENT_GATE_FILE, local = TRUE)
+# Worker identity is deliberately separate from agent tokens: a worker may take
+# queue/mirror work, but must never inherit the agent's record-write authority.
+WORKER_AUTH_FILE <- file.path(ENGINE_DIR, "worker_auth.R")
+HAS_WORKER_AUTH <- file.exists(WORKER_AUTH_FILE)
+if (HAS_WORKER_AUTH) source(WORKER_AUTH_FILE, local = TRUE)
 if (HAS_DB) source(DB_FILE, local = TRUE)
 if (HAS_VERDICT) source(VERDICT_FILE, local = TRUE)
 if (file.exists(REWORK_FILE)) source(REWORK_FILE, local = TRUE)
 if (file.exists(POLLER_FILE)) source(POLLER_FILE, local = TRUE)
 if (file.exists(DB_API_FILE)) source(DB_API_FILE, local = TRUE)
+# 管理员与两个隔离开关。
+#   必须排在 record_access.R 之前：记录权限判定要问「隔离开着吗」，
+#   而那个问题的答案只在这个文件里读一次。
+ADMIN_POLICY_FILE <- file.path(ENGINE_DIR, "admin_policy.R")
+HAS_ADMIN_POLICY <- file.exists(ADMIN_POLICY_FILE)
+if (HAS_ADMIN_POLICY) source(ADMIN_POLICY_FILE, local = TRUE)
+
+RECORD_ACCESS_FILE <- file.path(ENGINE_DIR, "record_access.R")
+if (file.exists(RECORD_ACCESS_FILE)) source(RECORD_ACCESS_FILE, local = TRUE)
+# Shared execution admission path for /api/run, /api/agent/dispatch and
+# post-commit intent auto_dispatch. Keep the full gate sequence in one file.
+RUN_ENQUEUE_FILE <- file.path(ENGINE_DIR, "run_enqueue.R")
+HAS_RUN_ENQUEUE <- file.exists(RUN_ENQUEUE_FILE)
+if (HAS_RUN_ENQUEUE) source(RUN_ENQUEUE_FILE, local = TRUE)
 # 合规检查器：reviewer.R 降级后的产物，只回答「用的 skill 与脚本对不对」。
 COMPLIANCE_FILE <- file.path(ENGINE_DIR, "compliance.R")
 if (file.exists(COMPLIANCE_FILE)) source(COMPLIANCE_FILE, local = TRUE)
@@ -281,11 +349,13 @@ STEP_ORDER <- if (HAS_FLOW) {
 # 状态（只记运行目录；其余都在 run-dir 下的文件里）
 # =====================================================================
 write_json_file <- function(path, obj) {
-  dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
-  con <- file(path, open = "wb")
-  writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null", digits = NA))), con)
-  close(con)
+  # sessions.R is loaded before request handling; use its verified atomic writer
+  # for view state and execution queues as well, never truncate a live JSON file.
+  if (!exists("sess_write_json", mode = "function"))
+    stop("atomic_json_writer_unavailable")
+  sess_write_json(path, obj)
 }
+
 read_state <- function() {
   if (!file.exists(STATE_FILE)) return(list(runDir = NULL))
   st <- tryCatch(jsonlite::fromJSON(read_text_any(STATE_FILE), simplifyVector = FALSE),
@@ -366,6 +436,108 @@ EXEC_FILE <- file.path(STATE_DIR, "exec_tasks.json")
 #   为什么要它：执行端跑在别人的电脑上，应用这边看不见它。
 #   没有心跳，"点了没反应"就分不清是"没人取活"还是"取了在跑"。
 EXEC_HB_FILE <- file.path(STATE_DIR, "exec_heartbeat.json")
+# 阶段三起心跳按 worker 分文件；旧的全局文件只在迁移期留作证据，不再作为
+# 在线判据。任何伪造 by 字段的请求都无法改动这里的 worker 文件。
+EXEC_HB_DIR <- file.path(STATE_DIR, "exec_heartbeats")
+EXEC_HB_FRESH_SECS <- 180L
+EXEC_WORKER_OFFLINE_SECS <- 30L * 60L
+
+exec_hb_dir <- function() {
+  d <- get0("EXEC_HB_DIR", ifnotfound = "")
+  if (is.character(d) && length(d) == 1L && nzchar(d)) d else
+    file.path(STATE_DIR, "exec_heartbeats")
+}
+
+exec_worker_file_id <- function(worker_id) {
+  w <- trimws(as.character(worker_id %||% ""))
+  if (!nzchar(w)) return("")
+  gsub("[^A-Za-z0-9._:-]", "_", w)
+}
+
+exec_worker_hb_path <- function(worker_id) {
+  w <- exec_worker_file_id(worker_id)
+  if (!nzchar(w)) return("")
+  file.path(exec_hb_dir(), paste0(w, ".json"))
+}
+
+exec_default_pool_id <- function() {
+  if (exists("worker_default_pool", mode = "function"))
+    return(tryCatch(worker_default_pool(APP_DIR), error = function(e) "default"))
+  p <- trimws(Sys.getenv("PA_WORKER_POOL", unset = ""))
+  if (nzchar(p)) p else "default"
+}
+
+exec_parse_ts <- function(x) {
+  s <- trimws(as.character(x %||% ""))
+  if (!nzchar(s)) return(as.POSIXct(NA))
+  suppressWarnings(as.POSIXct(s, format = "%Y-%m-%dT%H:%M:%S"))
+}
+
+exec_worker_hb_read <- function(worker_id) {
+  p <- exec_worker_hb_path(worker_id)
+  if (!nzchar(p) || !file.exists(p)) return(NULL)
+  x <- tryCatch(jsonlite::fromJSON(read_text_any(p), simplifyVector = FALSE),
+                error = function(e) NULL)
+  if (!is.list(x)) return(NULL)
+  x$worker_id <- as.character(x$worker_id %||% worker_id)
+  x
+}
+
+exec_worker_hb_all <- function() {
+  d <- exec_hb_dir()
+  if (!dir.exists(d)) return(list())
+  fs <- list.files(d, pattern = "[.]json$", full.names = TRUE)
+  out <- list()
+  for (f in fs) {
+    x <- tryCatch(jsonlite::fromJSON(read_text_any(f), simplifyVector = FALSE),
+                  error = function(e) NULL)
+    if (is.list(x) && nzchar(as.character(x$worker_id %||% ""))) out[[length(out) + 1L]] <- x
+  }
+  out
+}
+
+exec_worker_hb_write <- function(worker_id, pool_id = NULL, version = "", note = "",
+                                 now = Sys.time()) {
+  w <- worker_clean_id(worker_id, "worker_id")
+  p <- worker_clean_id(pool_id %||% worker_default_pool(APP_DIR), "pool_id")
+  hb <- list(worker_id = w, pool_id = p, at = exec_ts(now),
+             version = as.character(version %||% ""),
+             note = as.character(note %||% ""))
+  write_json_file(exec_worker_hb_path(w), hb)
+  hb
+}
+
+exec_latest_heartbeat <- function(worker_id = "", pool_id = "", hbs = NULL) {
+  if (is.null(hbs)) hbs <- exec_worker_hb_all()
+  w <- trimws(as.character(worker_id %||% ""))
+  p <- trimws(as.character(pool_id %||% ""))
+  best <- NULL; bt <- as.POSIXct(NA)
+  for (hb in hbs) {
+    if (nzchar(w) && !identical(as.character(hb$worker_id %||% ""), w)) next
+    if (nzchar(p) && !identical(as.character(hb$pool_id %||% ""), p)) next
+    t0 <- exec_parse_ts(hb$at)
+    if (is.na(t0)) next
+    if (is.null(best) || is.na(bt) || t0 > bt) { best <- hb; bt <- t0 }
+  }
+  best
+}
+
+exec_heartbeat_age <- function(hb, now = Sys.time()) {
+  if (is.null(hb)) return(Inf)
+  t0 <- exec_parse_ts(hb$at)
+  if (is.na(t0)) return(Inf)
+  as.numeric(difftime(now, t0, units = "secs"))
+}
+
+exec_heartbeat_online <- function(hb, now = Sys.time(), fresh = EXEC_HB_FRESH_SECS) {
+  age <- exec_heartbeat_age(hb, now)
+  is.finite(age) && age < as.numeric(fresh)
+}
+
+exec_task_pool <- function(it) {
+  p <- trimws(as.character(it$pool_id %||% ""))
+  if (nzchar(p)) p else exec_default_pool_id()
+}
 
 
 exec_read <- function() {
@@ -407,55 +579,131 @@ EXEC_STALE_SECS <- 2L * 3600L
 #   就是它发出来的。用户看到的就是点一键重跑一直被打回，而屏幕上没有任何
 #   在跑的东西。排队正常几秒到几分钟内就会被领走，半小时没人领只有一个解释：
 #   执行端根本没在盯这个队列。
-EXEC_QUEUE_STALE_SECS <- 30L * 60L
+# queued 的唯一过期规则是「执行端离线」。在线时排多久都保留；从未上线
+# 才退回任务创建时间。24 小时绝对期限已按 SPEC-V2 删除。
+EXEC_QUEUE_STALE_SECS <- EXEC_WORKER_OFFLINE_SECS
 
-exec_reap <- function(d = NULL, now = Sys.time()) {
+exec_reap_audit_path <- function() file.path(STATE_DIR, "exec_reaper_audit.jsonl")
+
+exec_reap_audit_append <- function(rec) {
+  f <- exec_reap_audit_path()
+  dir.create(dirname(f), showWarnings = FALSE, recursive = TRUE)
+  tryCatch(cat(paste0(jsonlite::toJSON(rec, auto_unbox = TRUE), "\n"),
+               file = f, append = TRUE), error = function(e) NULL)
+  invisible(TRUE)
+}
+
+exec_reap_ts <- function(it) {
+  for (nm in c("last_seen", "claimed_at", "created_at")) {
+    v <- as.character(it[[nm]] %||% "")
+    if (nzchar(v)) return(list(at = v, source = nm, ts = exec_parse_ts(v)))
+  }
+  list(at = "", source = "", ts = as.POSIXct(NA))
+}
+
+exec_reap <- function(d = NULL, now = Sys.time(), audit = TRUE) {
   if (is.null(d)) d <- exec_read()
   items <- d$items %||% list()
   if (!length(items)) return(d)
+  hbs <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+  reaped <- list()
   changed <- FALSE
   for (i in seq_along(items)) {
     it <- items[[i]]
     st <- as.character(it$status %||% "")
     if (!identical(st, "running") && !identical(st, "queued")) next
-    t0 <- as.character(it$last_seen %||% "")
-    if (!nzchar(t0)) t0 <- as.character(it$claimed_at %||% "")
-    if (!nzchar(t0)) t0 <- as.character(it$created_at %||% "")
-    if (!nzchar(t0)) next
-    ts <- suppressWarnings(as.POSIXct(t0, format = "%Y-%m-%dT%H:%M:%S"))
-    if (is.na(ts)) next
-    gap <- as.numeric(difftime(now, ts, units = "secs"))
-    limit <- if (identical(st, "queued")) EXEC_QUEUE_STALE_SECS else EXEC_STALE_SECS
-    if (gap < limit) next
+    ts0 <- exec_reap_ts(it)
+    pool <- exec_task_pool(it)
+    wid <- trimws(as.character(it$worker_id %||% ""))
+    hb <- if (nzchar(wid)) exec_latest_heartbeat(worker_id = wid, hbs = hbs) else NULL
+    if (is.null(hb)) hb <- exec_latest_heartbeat(pool_id = pool, hbs = hbs)
+    hb_age <- exec_heartbeat_age(hb, now)
+    reason <- ""; code <- ""
+    if (identical(st, "running")) {
+      if (is.na(ts0$ts)) next
+      gap <- as.numeric(difftime(now, ts0$ts, units = "secs"))
+      if (gap < EXEC_STALE_SECS) next
+      code <- "executor_lost"
+      reason <- paste0(
+        "执行端失联：最后一次报信是 ", ts0$at, "，已 ", round(gap / 3600, 1),
+        " 小时没有任何更新，任务未回写。这不是这一步本身跑失败 —— ",
+        "它在服务器上的产物是否已生成，需要重新核一次。重跑这一步即可。")
+    } else {
+      # queued: worker 在线（心跳 <180s）永不按时间过期。心跳存在但已离线
+      # 满 30 分钟才回收；从未出现过该 pool 的心跳，才使用 created_at。
+      if (!is.null(hb)) {
+        if (!is.finite(hb_age) || hb_age < as.numeric(EXEC_WORKER_OFFLINE_SECS)) next
+        code <- "worker_offline"
+        reason <- paste0(
+          "执行端已离线：该 pool 最后一次心跳是 ",
+          as.character(hb$at %||% ""), "，已 ", round(hb_age / 60, 0),
+          " 分钟；queued 任务未开始，按离线规则回收。这不是任务本身跑失败。")
+      } else {
+        created <- exec_parse_ts(it$created_at)
+        if (is.na(created)) next
+        gap <- as.numeric(difftime(now, created, units = "secs"))
+        if (gap < as.numeric(EXEC_WORKER_OFFLINE_SECS)) next
+        code <- "worker_never_seen"
+        reason <- paste0(
+          "从未观测到可接该任务的执行端：任务已排队 ", round(gap / 60, 0),
+          " 分钟，pool=", pool, " 没有任何心跳。这不是任务本身跑失败。")
+      }
+    }
     items[[i]]$status <- "failed"
     items[[i]]$finished_at <- exec_ts(now)
-    items[[i]]$error <- if (identical(st, "queued")) paste0(
-      "排队 ", round(gap / 60, 0), " 分钟一直没人接手，已按过期处理，不再挡着重跑。",
-      "这不是这一步跑失败 —— 它根本没开始。直接重跑即可。")
-    else paste0(
-      "执行端失联：最后一次报信是 ", t0, "，已 ", round(gap / 3600, 1),
-      " 小时没有任何更新，任务未回写。这不是这一步本身跑失败 —— ",
-      "它在服务器上的产物是否已生成，需要重新核一次。重跑这一步即可。")
+    items[[i]]$error <- reason
     items[[i]]$stale_reaped <- TRUE
+    items[[i]]$reap_reason_code <- code
+    items[[i]]$reap_previous_status <- st
+    items[[i]]$reap_ts <- ts0$at
+    items[[i]]$reap_ts_source <- ts0$source
+    reap_wid <- if (nzchar(wid)) wid else as.character((hb %||% list())$worker_id %||% "")
+    items[[i]]$reap_worker_id <- if (nzchar(reap_wid)) reap_wid else NULL
+    items[[i]]$reap_pool_id <- pool
+    items[[i]]$reap_heartbeat_at <- if (is.null(hb)) NULL else as.character(hb$at %||% "")
+    reaped[[length(reaped) + 1L]] <- list(
+      at = exec_ts(now), id = as.character(it$id %||% ""), previous_status = st,
+      worker_id = if (nzchar(reap_wid)) reap_wid else NULL, pool_id = pool,
+      heartbeat_at = if (is.null(hb)) NULL else as.character(hb$at %||% ""),
+      reason_code = code, error = reason)
     changed <- TRUE
   }
   if (changed) {
     d$items <- items; exec_write(d)
+    if (isTRUE(audit)) for (rec in reaped) exec_reap_audit_append(rec)
     for (it in items) if (isTRUE(it$stale_reaped) && nzchar(as.character(it$chain_id %||% "")))
       rc_callback(list(session_id = it$session_id, req_id = it$chain_id,
         step = it$step, status = "failed", code = 1L), FALSE)
   }
+  attr(d, "reaped") <- reaped
   d
 }
 
-exec_enqueue <- function(step, session_id = "", note = "", script = "", script_args = "") {
+exec_enqueue <- function(step, session_id = "", note = "", script = "", script_args = "", req_id = "",
+                         params = NULL, params_rel = "", run_dir = "", mode = "",
+                         reference_id = "", ref_mode = "", ref_path = "", pool_id = NULL) {
   d <- exec_read()
-  # 同一环节同一分析已有排队中的就不再重复入队：连点两下不该跑两遍。
-  for (it in (d$items %||% list())) {
-    if (identical(as.character(it$step %||% ""), step) &&
-        identical(as.character(it$session_id %||% ""), session_id) &&
-        as.character(it$status %||% "") %in% c("queued", "running")) return(it)
+  # 持久幂等：同一个 session+step+req_id 不论当前是 queued/running/done/failed
+  # 都只返回原任务。要重跑必须换新 req_id；这条比旧的「仅 queued/running
+  # 去重」更严格，避免 auto_dispatch 重试时在终态后再生一条。
+  rq <- trimws(as.character(req_id %||% ""))
+  if (nzchar(rq)) {
+    for (it in (d$items %||% list())) {
+      if (identical(as.character(it$step %||% ""), step) &&
+          identical(as.character(it$session_id %||% ""), session_id) &&
+          identical(trimws(as.character(it$req_id %||% "")), rq)) return(it)
+    }
   }
+  # 同一环节同一分析已有排队中的就不再重复入队：连点两下不该跑两遍。
+  if (!nzchar(rq)) {
+    for (it in (d$items %||% list())) {
+      if (identical(as.character(it$step %||% ""), step) &&
+          identical(as.character(it$session_id %||% ""), session_id) &&
+          as.character(it$status %||% "") %in% c("queued", "running")) return(it)
+    }
+  }
+  pool <- trimws(as.character(pool_id %||% ""))
+  if (!nzchar(pool)) pool <- exec_default_pool_id()
   it <- list(
     id = paste0("ex-", format(Sys.time(), "%Y%m%d%H%M%S"), "-",
                 paste(sample(c(letters, 0:9), 4, replace = TRUE), collapse = "")),
@@ -464,11 +712,46 @@ exec_enqueue <- function(step, session_id = "", note = "", script = "", script_a
     #   执行端不需要再自己查"步骤->脚本"表（那张表和应用里的定义早就会对不上）。
     script = as.character(script %||% ""),
     script_args = as.character(script_args %||% ""),
+    # 回写绑定用的请求号。
+    #   为什么必须记在任务上：执行端回写 /api/step/import 时，
+    #   req_id 是从这条任务里取的（worker.py: item.req_id or item.chain_id）。
+    #   不记的话它只能发空串，而回写接口要求非空且 attempt 已登记 ——
+    #   于是作业在集群上真跑完了，应用这边永远收不到结果。
+    #   实测就是这条：ex-20261113100134-nn9f 的 req_id 与 chain_id 都是 null。
+    req_id = if (nzchar(as.character(req_id %||% ""))) as.character(req_id) else NULL,
+    # 结构参数：由应用算好、随任务下发，执行端在 qsub 之前写成文件。
+    #   为什么必须走这条路：筛群脚本只认参数文件，而应用主机看不到集群
+    #   /share，写不了那个文件；执行端能写但原来没人把参数交给它。
+    #   只在有参数时挂字段，避免给其它步骤凭空多一个空 params。
+    params = if (is.list(params) && length(params)) params else NULL,
+    params_rel = if (nzchar(as.character(params_rel %||% ""))) as.character(params_rel) else NULL,
+    # The queue item must carry the record context it was authorized against;
+    # the worker must never infer it from current/global state.
+    run_dir = as.character(run_dir %||% ""),
+    mode = as.character(mode %||% ""),
+    reference_id = as.character(reference_id %||% ""),
+    ref_mode = as.character(ref_mode %||% ""),
+    ref_path = as.character(ref_path %||% ""),
+    pool_id = pool,
+    worker_id = NULL,
     status = "queued", created_at = exec_ts(),
     claimed_at = NULL, claimed_by = NULL, finished_at = NULL, error = NULL)
   d$items <- c((d$items %||% list()), list(it))
   exec_write(d)
   it
+}
+
+exec_by_req <- function(step, session_id, req_id) {
+  st <- trimws(as.character(step %||% ""))
+  sd <- trimws(as.character(session_id %||% ""))
+  rq <- trimws(as.character(req_id %||% ""))
+  if (!nzchar(st) || !nzchar(sd) || !nzchar(rq)) return(NULL)
+  for (it in (tryCatch(exec_read(), error = function(e) list(items = list()))$items %||% list())) {
+    if (identical(as.character(it$step %||% ""), st) &&
+        identical(as.character(it$session_id %||% ""), sd) &&
+        identical(trimws(as.character(it$req_id %||% "")), rq)) return(it)
+  }
+  NULL
 }
 
 exec_due <- function() {
@@ -489,14 +772,192 @@ exec_running <- function() {
          (d$items %||% list()))
 }
 
+# 这一环是否已经有执行端在管（排队中或正在跑）。
+#   为什么需要它：执行端是唯一提交者。只要队列里有这一条，
+#   会话里就绝不能再出现"你去服务器上执行"这种话 ——
+#   那等于给同一件事派了第二个执行者，两套结果谁对谁错没人能判。
+exec_active_for <- function(step, session_id = "") {
+  st <- as.character(step %||% "")
+  sd <- as.character(session_id %||% "")
+  if (!nzchar(st)) return(NULL)
+  d <- tryCatch(exec_read(), error = function(e) NULL)
+  if (is.null(d)) return(NULL)
+  for (it in (d$items %||% list())) {
+    if (!identical(as.character(it$step %||% ""), st)) next
+    if (nzchar(sd) && !identical(as.character(it$session_id %||% ""), sd)) next
+    if (!as.character(it$status %||% "") %in% c("queued", "running")) next
+    return(it)
+  }
+  NULL
+}
+
+# 这一环最近一次的执行任务，不看状态。
+#   为什么要一个不筛状态的版本：只按 queued/running 判断，
+#   作业一变成 done/failed，观察通知就会退回"你去执行"那一版。
+#   而 done/failed 恰恰是最需要说清"这件事已经派过、别再来一遍"的时刻 ——
+#   失败后助手若被允许重跑，就会绕过执行端和它的输出目录隔离。
+#   所以观察与否只看"有没有派过"，绑定的 exec_id 由这里给出。
+exec_latest_for <- function(step, session_id = "") {
+  st <- as.character(step %||% "")
+  sd <- as.character(session_id %||% "")
+  if (!nzchar(st)) return(NULL)
+  d <- tryCatch(exec_read(), error = function(e) NULL)
+  if (is.null(d)) return(NULL)
+  best <- NULL; bt <- ""
+  for (it in (d$items %||% list())) {
+    if (!identical(as.character(it$step %||% ""), st)) next
+    if (nzchar(sd) && !identical(as.character(it$session_id %||% ""), sd)) next
+    t0 <- as.character(it$created_at %||% "")
+    if (is.null(best) || t0 >= bt) { best <- it; bt <- t0 }
+  }
+  best
+}
+
+# 这一环最近一次执行任务若是明确 failed，就按失败呈现。
+#   为什么要单独一个函数：exec_active_for 只看 queued/running，
+#   于是一次"领取后被拒、根本没提交"的失败在页面变成了
+#   exec_id=null + 「交接未确认，尚无执行回写」—— 事实是作业被明确拒绝，
+#   页面上反而像没派出去，人会再点一次。
+#   约束一：只看该步最新一条（exec_latest_for 按 created_at 取最大），
+#   旧 req 的失败不能盖掉后派出去的新任务。
+#   约束二：调用方给了当前 req 时，exec 上记的 req 必须与它一致；
+#   对不上说明这条失败属于别的题次，结论不适用。
+exec_failed_for <- function(step, session_id = "", req_id = "") {
+  it <- tryCatch(exec_latest_for(step, session_id), error = function(e) NULL)
+  if (is.null(it)) return(NULL)
+  if (!identical(as.character(it$status %||% ""), "failed")) return(NULL)
+  rq <- as.character(it$req_id %||% "")
+  if (nzchar(req_id) && nzchar(rq) && !identical(rq, req_id)) return(NULL)
+  it
+}
+
+# 把「队列最新状态」与「回写记录」合成一个可测结论。
+#   抽出来的理由：这段判定决定页面写什么，要能一条条跑正反例，
+#   埋在几千行的处理器里就只能靠人读。
+#   规则：有在跑/在排队的任务就以它为准；没有才是明确失败；
+#   回写已 done 的步骤不被失败覆盖（那是已经跑成过的记录）。
+flow_exec_state <- function(exNow, exFail, rec) {
+  recSt <- if (is.null(rec)) "" else as.character(rec$status %||% "")
+  settled <- recSt %in% c("done", "verified")
+  pick <- NULL; status <- ""
+  if (!is.null(exNow)) {
+    pick <- exNow; status <- as.character(exNow$status %||% "queued")
+  } else if (!is.null(exFail) && !settled) {
+    pick <- exFail; status <- "failed"
+  }
+  if (is.null(pick)) {
+    return(list(status = if (is.null(rec)) "todo" else "",
+                exec_id = NULL, exec_status = NULL,
+                exec_job = NULL, exec_last_seen = NULL, exec_error = NULL))
+  }
+  err <- as.character(pick$error %||% "")
+  list(status = status,
+       exec_id = as.character(pick$id %||% ""),
+       exec_status = status,
+       exec_job = as.character(pick$job_id %||% ""),
+       exec_last_seen = as.character(pick$last_seen %||% ""),
+       exec_error = if (nzchar(err)) err else NULL)
+}
+
+# 一条 exec 任务能否作为某次回写的绑定依据。
+#   单独抽出来是为了能测：这段判定决定"谁能写进哪条记录"，
+#   埋在几千行的处理器里就只能靠人读，没法一条条跑。
+#   条件一条都不能少：
+#     · 任务在案（ex0 非空）
+#     · 记录号与步骤号都非空
+#     · 任务的 session 与回写的一致 —— 挡住"拿别的任务的 id 写这条记录"
+#     · 任务的 step 与回写的一致 —— 挡住"拿 doublet 的任务给 merge 背书"
+#     · 任务状态是四种真实状态之一
+#     · 任务真的带了脚本（空脚本说明它没被正确下发过）
+#     · 任务有创建时间（产物 mtime 要跟它比）
+exec_compat_ok <- function(ex0, sid_in, stp_in) {
+  if (is.null(ex0)) return(FALSE)
+  sid_in <- trimws(as.character(sid_in %||% ""))
+  stp_in <- trimws(as.character(stp_in %||% ""))
+  if (!nzchar(sid_in) || !nzchar(stp_in)) return(FALSE)
+  identical(as.character(ex0$session_id %||% ""), sid_in) &&
+    identical(as.character(ex0$step %||% ""), stp_in) &&
+    as.character(ex0$status %||% "") %in% c("queued", "running", "done", "failed") &&
+    nzchar(trimws(as.character(ex0$script %||% ""))) &&
+    nzchar(trimws(as.character(ex0$created_at %||% "")))
+}
+
+# 已入队时进会话的那段：只观察、只解释、不另派。
+#   和"要你去执行"那段必须由同一个函数产生，否则前端改了、brief 又重建执行正文，
+#   两边说法不一致，人还是会被误导。
+remote_step_observe_text <- function(step_id, sid = "", ex = NULL) {
+  exid <- as.character((ex %||% list())$id %||% "")
+  stt <- as.character((ex %||% list())$status %||% "")
+  job <- as.character((ex %||% list())$job_id %||% "")
+  paste(c(
+    "【来自 个性化分析助手】",
+    paste0("要办的事：这一环已经由执行端接管，作业已提交，请你只做观察与解释。",
+           "（阶段 id=", step_id, "）"),
+    paste0("执行任务号：", if (nzchar(exid)) exid else "（未取到）",
+           "；状态：", if (nzchar(stt)) stt else "未知",
+           if (nzchar(job)) paste0("；集群作业名：", job) else ""),
+    paste0("分析记录：", if (nzchar(as.character(sid %||% ""))) as.character(sid) else "（未指定）"),
+    "禁止另行提交作业：不要 qsub、不要手写脚本、不要在服务器上重跑同一步。",
+    "已经在跑的时候再提交一次，会得到两套产物、覆盖同一个输出目录，事后无法判定哪份有效。",
+    "你要做的三件事：一，按页面，或 GET /api/flow?session=",
+    if (nzchar(as.character(sid %||% ""))) as.character(sid) else "<分析记录号>",
+    " 说明真实进度（这条只读、会校验这份记录属于谁）；二，解释中间报错的原因；",
+    "三，只在执行端明确失败、且人要求时，才提出补救方案（仍由执行端提交，不由你直接跑）。",
+    "回写由执行端完成；你不必、也不要替它回写。"
+  ), collapse = "\n")
+}
+
 # 执行端上报"我还活着、这个任务还在跑"。
 #   不改变 status：它仍然是 running，只是把 last_seen 往前推。
 #   判断"是否失联"只看这个时间戳，不看"等了多久" ——
 #   等得久不等于失败，没人报信才是真的出问题了。
-exec_keepalive <- function(id, job = "", note = "") {
-  exec_set(id, list(last_seen = exec_ts(), job_id = as.character(job %||% ""),
-                    note = as.character(note %||% "")))
-  invisible(TRUE)
+# 唯一作业号一旦登记，就不能被另一个号覆盖。
+#   为什么必须这样：job_number 是"这份产物属于哪次作业"的唯一凭据。
+#   如果后来的心跳可以随手把它改掉，那么一份旧产物只要再报一次心跳、
+#   换上一个新号，就能冒充新作业的结果 —— 绑定判据等于被绕开。
+#   所以同名号重复登记是幂等的，不同号一律冲突拒绝并保留原值。
+exec_jobnum_merge <- function(prev, incoming) {
+  p <- trimws(as.character(prev %||% ""))
+  i <- trimws(as.character(incoming %||% ""))
+  if (!nzchar(i)) {
+    return(list(ok = TRUE, value = p, code = if (nzchar(p)) "kept" else "absent"))
+  }
+  if (!grepl("^[0-9]+$", i))
+    return(list(ok = FALSE, code = "bad_jobnumber", value = p))
+  if (!nzchar(p)) return(list(ok = TRUE, value = i, code = "set"))
+  if (identical(p, i)) return(list(ok = TRUE, value = p, code = "same"))
+  # 冲突：保留原值，不写新的
+  list(ok = FALSE, code = "jobnumber_conflict", value = p)
+}
+
+exec_keepalive <- function(id, job = "", note = "", job_number = "",
+                           worker_id = "", pool_id = "", now = Sys.time()) {
+  # job_number 是 qsub 回执里的唯一数字号；job_id 是可重复的作业名。
+  #   只存名字不够：名字按"步骤+时分秒"生成，同一分钟重试就会撞名。
+  d <- exec_read()
+  prevNum <- ""
+  for (it in (d$items %||% list())) {
+    if (identical(as.character(it$id %||% ""), id))
+      prevNum <- as.character(it$job_number %||% "")
+  }
+  mg <- exec_jobnum_merge(prevNum, job_number)
+  fields <- list(last_seen = exec_ts(now), job_id = as.character(job %||% ""),
+                 note = as.character(note %||% ""))
+  wid <- trimws(as.character(worker_id %||% ""))
+  if (nzchar(wid)) fields$worker_id <- wid
+  pid <- trimws(as.character(pool_id %||% ""))
+  if (nzchar(pid)) fields$pool_id <- pid
+  if (isTRUE(mg$ok) && nzchar(as.character(mg$value %||% "")))
+    fields$job_number <- as.character(mg$value)
+  if (!isTRUE(mg$ok) && identical(mg$code, "jobnumber_conflict")) {
+    # 冲突保留原值，只留痕，不当成新作业。
+    fields$job_number <- as.character(mg$value)
+    fields$job_number_conflict <- trimws(as.character(job_number %||% ""))
+    message("job_number_conflict ", id, " kept ", mg$value,
+            " rejected ", trimws(as.character(job_number %||% "")))
+  }
+  exec_set(id, fields)
+  invisible(mg)
 }
 
 exec_set <- function(id, fields) {
@@ -1018,6 +1479,187 @@ rec_status_normalized <- function(rec) {
   stv
 }
 
+# 这条产物的"最新已验收版本"指纹。
+#   为什么要单独取：镜像目录里可能还躺着旧版文件，
+#   只按"文件在不在"判已取回，就会把旧文件当成新结果给人下载。
+#   回写里带的 md5 是执行端对该次产物的实测值，取最近一条即可。
+#   md5 必须本身合法才采信；查不到就返回空，由调用方退回旧行为。
+# 登记取回时该用哪个大小。
+#   已知基准优先：库里能查到该产物最新验收的字节数时，以它为准，
+#   浏览器带来的值只作兜底 —— 页面可能停在旧版，用户点取回时送来的还是上一版大小，
+#   若优先采信它，新文件一回传就被判"大小与登记不一致"。
+artifact_request_bytes <- function(sid, rel, requested = NULL) {
+  exp <- tryCatch(artifact_expected_bytes(sid, rel), error = function(e) NA_real_)
+  if (is.finite(exp) && exp > 0) return(exp)
+  r <- suppressWarnings(as.numeric(requested %||% NA))
+  if (is.finite(r) && r > 0) return(r)
+  NA_real_
+}
+
+# 与基准 md5 同一条记录里的字节数。
+#   为什么要它：执行端回传时会核对"磁盘大小 vs 登记大小"，
+#   登记值若还是上一版的字节数，新文件一上来就被判"大小不一致"失败。
+artifact_expected_bytes <- function(sid, rel) {
+  want <- gsub("\\\\", "/", as.character(rel %||% ""))
+  if (!nzchar(want)) return(NA_real_)
+  sid <- as.character(sid %||% "")
+  if (!nzchar(sid) || !isTRUE(DB_READY)) return(NA_real_)
+  rows <- tryCatch(DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT a.payload AS payload, MAX(COALESCE(a.verified_at, a.reported_at)) AS t ",
+    "FROM step_attempts a, json_each(a.payload, '$.artifacts') j ",
+    "WHERE a.status = 'verified' ",
+    "AND json_extract(a.payload, '$.session_id') = ? ",
+    "AND TRIM(json_extract(j.value, '$.rel')) = ? ",
+    "GROUP BY a.payload ORDER BY t DESC"), list(sid, want)),
+    error = function(e) NULL)
+  if (is.null(rows) || !nrow(rows)) return(NA_real_)
+  p <- tryCatch(jsonlite::fromJSON(rows$payload[[1]], simplifyVector = FALSE),
+                error = function(e) NULL)
+  if (is.null(p)) return(NA_real_)
+  for (a in (p$artifacts %||% list())) {
+    r0 <- gsub("\\\\", "/", as.character(if (is.list(a)) a$rel %||% "" else a))
+    if (!identical(r0, want)) next
+    b <- suppressWarnings(as.numeric(if (is.list(a)) a$bytes %||% NA else NA))
+    return(if (is.finite(b) && b > 0) b else NA_real_)
+  }
+  NA_real_
+}
+
+artifact_expected_md5 <- function(sid, rel) {
+  # 基准 = "包含这条产物的最新一条已验证记录"里的 md5。
+  #   为什么不能拿整个 session 最新一条 verified 顶替：
+  #     会话里每一步都会写自己的 verified 记录，最新那条通常只含它自己的产物。
+  #     实测后果：PPT 一完成，最新记录只剩 pptx/manifest，
+  #     于是 figs、enrich 的图全部查不到基准；pack 完成后再看 PPT 也一样查不到。
+  #   为什么必须"先按精确 rel 筛、再取其中最新"：
+  #     这才是"这份文件的最新验收版本"，而不是"这个 session 最近干了什么"。
+  #   为什么最新相关记录里缺 md5 就返回空：
+  #     它才是当前版本；它自己没给 hash，说明基准未核实，
+  #     不能让更早的旧 hash 冒充它（那正是这次缓存事故的同类错）。
+  want <- gsub("\\\\", "/", as.character(rel %||% ""))
+  if (!nzchar(want)) return("")
+  sid <- as.character(sid %||% "")
+  if (!nzchar(sid) || !isTRUE(DB_READY)) return("")
+  # 在 SQL 里就按 rel 筛：只要"这条记录含这个产物"的那批，再取其中最新一条。
+  #   不用"取最近 N 条再在 R 里找"——N 是任意截断：
+  #     早期步骤的产物会在若干次新验收之后被挤出窗口，表现成"老图又没法下载了"。
+  #   用 json_each 展开 artifacts，避免对 JSON 结构写死下标。
+  rows <- tryCatch(DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT a.payload AS payload, MAX(COALESCE(a.verified_at, a.reported_at)) AS t ",
+    "FROM step_attempts a, json_each(a.payload, '$.artifacts') j ",
+    "WHERE a.status = 'verified' ",
+    "AND json_extract(a.payload, '$.session_id') = ? ",
+    "AND TRIM(json_extract(j.value, '$.rel')) = ? ",
+    "GROUP BY a.payload ORDER BY t DESC"), list(sid, want)),
+    error = function(e) NULL)
+  if (is.null(rows) || !nrow(rows)) return("")
+  # 第一条就是最新相关记录：它带合法 md5 就用它，没带就判未核实。
+  p <- tryCatch(jsonlite::fromJSON(rows$payload[[1]], simplifyVector = FALSE),
+                error = function(e) NULL)
+  if (is.null(p)) return("")
+  for (a in (p$artifacts %||% list())) {
+    r0 <- gsub("\\\\", "/", as.character(if (is.list(a)) a$rel %||% "" else a))
+    if (!identical(r0, want)) next
+    v <- tolower(as.character(if (is.list(a)) a$md5 %||% "" else ""))
+    return(if (grepl("^[0-9a-f]{32}$", v)) v else "")
+  }
+  ""
+}
+
+# Schedule from verified facts, never from the caller's unverified artifact list.
+artifact_enqueue_verified <- function(sid, req_id, step, status = "done", blocked = FALSE, historical = FALSE) {
+  if (!isTRUE(HAS_MIRROR) || !isTRUE(DB_READY) || isTRUE(blocked) ||
+      !identical(as.character(status), "done") ||
+      step %in% c("selftest", "all", "config") ||
+      (!isTRUE(historical) && !attempt_selected(APP_DIR, sid, req_id))) return(list(queued = 0L))
+  rows <- DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT a.payload, a.attempt_id, a.owner_key, s.run_dir FROM step_attempts a JOIN sessions s ",
+    "ON s.session_id = json_extract(a.payload, '$.session_id') ",
+    "AND s.owner_key = a.owner_key WHERE s.session_id = ? AND a.req_id = ? ",
+    "AND a.step_id = ? AND a.status = 'verified' ",
+    "ORDER BY COALESCE(a.verified_at, a.reported_at) DESC LIMIT 1"),
+    list(sid, req_id, step))
+  if (!nrow(rows)) return(list(queued = 0L))
+  payload <- jsonlite::fromJSON(rows$payload[[1]], simplifyVector = FALSE)
+  if (!identical(as.character(payload$session_id %||% ""), as.character(sid)) ||
+      !identical(as.character(payload$req_id %||% ""), as.character(req_id)) ||
+      !identical(as.character(payload$step %||% ""), as.character(step)) ||
+      !identical(as.character(payload$status %||% ""), "done"))
+    return(list(queued = 0L, error = "verified_payload_binding_mismatch"))
+  run_dir <- as.character(rows$run_dir[[1]] %||% "")
+  if (!nzchar(run_dir) || !identical(as.character(payload$run_dir %||% ""), run_dir))
+    return(list(queued = 0L, error = "verified_run_dir_mismatch"))
+  if (isTRUE(historical)) {
+    # A global head moves on to the next stage; the persisted per-stage selection does not.
+    selected <- (sess_find(APP_DIR, sid)$steps %||% list())[[step]]
+    terminal <- attempt_value(APP_DIR, sid, req_id, paste0("step--", step))
+    pp <- if (exists("sr_passport", mode = "function")) sr_passport(APP_DIR, sid, step) else NULL
+    bound <- identical(as.character(selected$req_id %||% ""), as.character(req_id)) &&
+      identical(as.character(selected$status %||% ""), "done") &&
+      identical(as.character(terminal$req_id %||% ""), as.character(req_id)) &&
+      identical(as.character(terminal$status %||% ""), "done")
+    if (!bound) return(list(queued = 0L, error = "historical_selection_unconfirmed"))
+    if (is.null(pp) || !identical(pp$kind, "post") ||
+        !identical(pp$session_id, sid) || !identical(pp$stage, step) ||
+        !identical(pp$attempt_id, rows$attempt_id[[1]]) || !identical(pp$run_dir, run_dir) ||
+        !(as.character(pp$verdict %||% "") %in% c("pass", "warn")) ||
+        nzchar(as.character(pp$error %||% "")))
+      return(list(queued = 0L, error = "historical_review_unconfirmed_or_blocked"))
+  }
+  results <- list()
+  source_unconfirmed <- FALSE
+  for (a in payload$artifacts %||% list()) {
+    if (!is.list(a)) next
+    rel <- as.character(a$rel %||% "")
+    # Never borrow a newer hash from a foreign run, owner or unreviewed attempt.
+    latest <- DBI::dbGetQuery(DB_CON, paste0(
+      "SELECT a.attempt_id FROM step_attempts a, json_each(a.payload, '$.artifacts') j ",
+      "WHERE a.status = 'verified' AND json_extract(a.payload, '$.session_id') = ? ",
+      "AND TRIM(json_extract(j.value, '$.rel')) = ? ",
+      "ORDER BY COALESCE(a.verified_at, a.reported_at) DESC, a.attempt_id DESC LIMIT 1"), list(sid, rel))
+    if (!nrow(latest) || !identical(latest$attempt_id[[1]], rows$attempt_id[[1]])) {
+      source_unconfirmed <- TRUE
+      next
+    }
+    bytes <- suppressWarnings(as.numeric(a$bytes %||% NA_real_))
+    md5 <- tolower(as.character(a$md5 %||% ""))
+    if (!nzchar(rel) || !identical(mirror_safe(rel), rel) || grepl("\\.\\.", rel) ||
+        startsWith(rel, "/") || !mirror_can(rel, bytes) ||
+        tolower(tools::file_ext(rel)) %in% MIRROR_LARGE_EXTS ||
+        any(vapply(MIRROR_SECRET_PATTERNS, function(p) grepl(p, rel, ignore.case = TRUE), TRUE)) ||
+        !is.finite(bytes) || bytes <= 0 || bytes != floor(bytes) || !grepl("^[0-9a-f]{32}$", md5)) next
+    results[[rel]] <- mirror_request(sid, rel, bytes = bytes, run_dir = run_dir,
+                                    want_md5 = md5, preserve_existing = TRUE, recover = isTRUE(historical),
+                                     owner_key = rows$owner_key[[1]])
+  }
+  list(queued = sum(vapply(results, function(x) isTRUE(x$ok), TRUE)), items = results,
+       error = if (source_unconfirmed) "latest_verified_source_not_reviewed" else NULL)
+}
+
+# Bounded worker-poll backfill, not a browser/list-read side effect. The cursor is
+# process-local: restart repeats safely, and old stages cannot starve behind new ones.
+artifact_reconcile_pending <- function(limit = 64L, owner_key = NULL) {
+  if (!isTRUE(DB_READY)) return(list(scanned = 0L, issues = list()))
+  env <- environment(artifact_reconcile_pending)
+  key <- paste0(".artifact_reconcile_cursor:", APP_DIR, ":", owner_key %||% "*")
+  cursor <- if (exists(key, envir = env, inherits = FALSE)) get(key, envir = env) else 0L
+  rows <- DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT a.req_id, a.step_id, json_extract(a.payload, '$.session_id') AS sid ",
+    "FROM step_attempts a JOIN sessions s ON s.session_id = json_extract(a.payload, '$.session_id') ",
+    "AND s.owner_key = a.owner_key WHERE a.status = 'verified' ",
+    if (!is.null(owner_key)) "AND s.owner_key = ? " else "",
+    "ORDER BY a.attempt_id LIMIT ? OFFSET ?"), c(if (!is.null(owner_key)) list(owner_key) else list(), list(as.integer(limit), cursor)))
+  assign(key, if (nrow(rows) < limit) 0L else cursor + nrow(rows), envir = env)
+  issues <- list()
+  for (i in seq_len(nrow(rows))) {
+    r <- tryCatch(artifact_enqueue_verified(rows$sid[[i]], rows$req_id[[i]], rows$step_id[[i]],
+      historical = TRUE), error = function(e) list(error = conditionMessage(e)))
+    if (!is.null(r$error)) issues[[length(issues) + 1L]] <- list(session = rows$sid[[i]],
+      req_id = rows$req_id[[i]], step = rows$step_id[[i]], error = r$error)
+  }
+  list(scanned = nrow(rows), issues = issues)
+}
+
 rec_display_status <- function(rec) {
   status <- rec_status_normalized(rec)
   if (identical(status, "delegated") &&
@@ -1069,6 +1711,102 @@ remote_status_projection <- function(steps) {
        has_running = any(states == "running"),
        summary = list(scope = "observed_stage_writebacks", counts = counts,
                       conflicting = length(known) > 1L, completion_confirmed = FALSE))
+}
+
+# 已验收产物的基线（bytes / md5）。
+#   回写里没带 md5 时返回空串，表示"未核验"，不能拿它冒充已验收证据。
+# Receipt authentication deliberately does not use the legacy anonymous worker window.
+mirror_receipt_auth <- function(req, owner_ctx, sid = "", b = list()) {
+  deny <- function(code) list(ok = FALSE, status = 403L, code = code,
+                              error = "mirror receipt authorization denied")
+  h <- req$headers %||% list()
+  worker_present <- !is.null(h[["x-worker-token"]]) ||
+    startsWith(tolower(trimws(as.character(h[["authorization"]] %||% ""))), "worker ")
+  if (worker_present) {
+    if (!exists("worker_token_check", mode = "function")) return(deny("worker_auth_missing"))
+    wa <- tryCatch(worker_token_check(APP_DIR, worker_token_from_req(req)),
+      error = function(e) list(ok = FALSE, code = "worker_token_invalid"))
+    if (!isTRUE(wa$ok)) return(deny(wa$code %||% "worker_token_invalid"))
+    if (!"mirror" %in% wa$scopes) return(deny("worker_scope_denied"))
+    # Match the existing execution-pool binding; a token from another pool cannot
+    # retrieve this application's global mirror queue.
+    if (!identical(wa$pool_id, worker_default_pool(APP_DIR))) return(deny("worker_pool_mismatch"))
+    wa <- worker_route_auth(req, as.character(b$worker_id %||% ""),
+                            as.character(b$pool_id %||% ""), "mirror")
+    if (!isTRUE(wa$ok)) return(wa)
+    return(list(ok = TRUE, worker = TRUE))
+  }
+  if (!nzchar(record_scalar(owner_ctx$key))) return(deny("mirror_identity_required"))
+  if (!nzchar(sid)) return(list(ok = TRUE, worker = FALSE))
+  access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "write")
+  if (!isTRUE(access$ok)) return(list(ok = FALSE, status = access$status %||% 403L,
+    code = access$code %||% "record_forbidden", error = access$error))
+  list(ok = TRUE, worker = FALSE, cap = access$cap)
+}
+
+mirror_receipt_guard <- function(req, owner_ctx, b, failure = FALSE) {
+  sid <- record_trim(b$session_id); rel <- record_trim(b$rel)
+  auth <- mirror_receipt_auth(req, owner_ctx, sid, b)
+  if (!isTRUE(auth$ok)) return(auth)
+  deny <- function(code) list(ok = FALSE, status = 409L, code = code,
+                              error = "mirror receipt binding is not current and verified")
+  if (!nzchar(sid) || !nzchar(rel)) return(deny("binding_fields_required"))
+  cap <- auth$cap %||% record_capability(DB_CON, APP_DIR, sid, list(key = NA_character_))
+  if (!isTRUE(cap$ok) || !nzchar(cap$run_dir)) return(deny("record_run_dir_missing"))
+  hits <- Filter(function(it) identical(as.character(it$session %||% ""), sid) &&
+    identical(as.character(it$rel %||% ""), rel), mirror_req_read()$items %||% list())
+  if (length(hits) != 1L) return(deny("not_registered"))
+  it <- hits[[1]]
+  if (!is.null(it$done) || nzchar(as.character(it$error %||% "")) ||
+      as.character(it$status %||% "") %in% c("done", "failed", "stopped"))
+    return(deny("receipt_not_pending"))
+  if (!identical(as.character(it$run_dir %||% ""), cap$run_dir) ||
+      (nzchar(as.character(it$owner_key %||% "")) && !identical(it$owner_key, cap$owner_key)))
+    return(deny("registration_binding"))
+  rows <- tryCatch(DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT a.payload, a.owner_key FROM step_attempts a ",
+    "WHERE a.status = 'verified' AND json_extract(a.payload, '$.session_id') = ? ",
+    "AND EXISTS (SELECT 1 FROM json_each(a.payload, '$.artifacts') j ",
+    "WHERE TRIM(json_extract(j.value, '$.rel')) = ?) ",
+    "ORDER BY COALESCE(a.verified_at, a.reported_at) DESC, a.rowid DESC LIMIT 1"),
+    list(sid, rel)), error = function(e) NULL)
+  if (is.null(rows) || !nrow(rows) || !identical(rows$owner_key[[1]], cap$owner_key))
+    return(deny("verified_baseline_missing"))
+  payload <- tryCatch(jsonlite::fromJSON(rows$payload[[1]], simplifyVector = FALSE), error = function(e) NULL)
+  if (!identical(as.character(payload$run_dir %||% ""), cap$run_dir) ||
+      !identical(as.character(payload$status %||% ""), "done")) return(deny("baseline_binding"))
+  arts <- Filter(function(a) is.list(a) && identical(record_trim(a$rel), rel), payload$artifacts %||% list())
+  if (length(arts) != 1L) return(deny("verified_baseline_missing"))
+  md <- tolower(record_trim(arts[[1]]$md5))
+  size <- suppressWarnings(as.numeric(arts[[1]]$bytes %||% NA))
+  if (!grepl("^[0-9a-f]{32}$", md) || length(size) != 1L || !is.finite(size) || size <= 0 || size != round(size))
+    return(deny("verified_baseline_missing"))
+  if (!identical(tolower(record_trim(it$want_md5)), md) ||
+      !isTRUE(suppressWarnings(as.numeric(it$bytes %||% NA)) == size)) return(deny("registration_stale"))
+  if (!failure) {
+    if (!identical(tolower(record_trim(b$md5)), md)) return(deny("baseline_md5"))
+    # Legacy small-file workers omit bytes; actual decoded size is still checked
+    # against the authoritative baseline by mirror_put.
+    if ((!is.null(b$bytes) && !isTRUE(suppressWarnings(as.numeric(b$bytes)) == size)))
+      return(deny("baseline_size"))
+  }
+  list(ok = TRUE, md5 = md, bytes = size)
+}
+
+artifact_baseline <- function(sid, rel) {
+  d <- tryCatch(remote_steps_read(sid), error = function(e) list(steps = list()))
+  want <- gsub("\\\\", "/", as.character(rel %||% ""))
+  for (s in (d$steps %||% list())) {
+    for (a in (s$artifacts %||% list())) {
+      r0 <- gsub("\\\\", "/", as.character(a$rel %||% a$path %||% ""))
+      if (!nzchar(r0) || !identical(r0, want)) next
+      md <- tolower(as.character(a$md5 %||% ""))
+      return(list(found = TRUE,
+                  bytes = suppressWarnings(as.numeric(a$bytes %||% NA)),
+                  md5 = if (grepl("^[0-9a-f]{32}$", md)) md else ""))
+    }
+  }
+  list(found = FALSE, bytes = NA_real_, md5 = "")
 }
 
 remote_steps_read <- function(sid = NULL) {
@@ -1218,7 +1956,13 @@ ppt_register_artifact <- function(sid, r) {
   invisible(TRUE)
 }
 
-flow_profile <- function() {
+flow_profile <- function(sid = NULL) {
+  qs <- trimws(as.character(sid %||% ""))
+  if (nzchar(qs) && isTRUE(HAS_SESSIONS)) {
+    rec <- tryCatch(sess_find(APP_DIR, qs), error = function(e) NULL)
+    md <- trimws(as.character((rec %||% list())$mode %||% ""))
+    if (nzchar(md)) return(if (identical(md, "local")) "local" else "server")
+  }
   s2 <- tryCatch(read_state(), error = function(e) list())
   if (isTRUE(s2$runDirRemote)) return("server")
   # 退路：state 里没标，就看位置设置里的 mode。
@@ -1226,9 +1970,9 @@ flow_profile <- function() {
   md <- as.character(((pl %||% list())$mode) %||% "")
   if (identical(md, "server")) "server" else "server"
 }
-flow_run_order <- function() {
+flow_run_order <- function(sid = NULL) {
   if (!HAS_FLOW) return(character(0))
-  FLOW_ORDER(flow_profile())
+  FLOW_ORDER(flow_profile(sid))
 }
 
 # ---------------------------------------------------------------------
@@ -1953,6 +2697,17 @@ send_text <- function(con, code, ctype, txt) send_raw(con, code, ctype, charToRa
 send_json <- function(con, code, obj) send_text(con, code, "application/json; charset=utf-8",
                                                 jsonlite::toJSON(obj, auto_unbox = TRUE, null = "null", digits = NA))
 
+worker_route_auth <- function(req, claimed_worker_id = "", claimed_pool_id = "",
+                              scope = "queue") {
+  if (!isTRUE(HAS_WORKER_AUTH) || !exists("worker_request_auth", mode = "function"))
+    return(list(ok = FALSE, status = 503L, code = "worker_auth_missing",
+                error = "执行端身份模块未加载，拒绝匿名操作。"))
+  tryCatch(worker_request_auth(APP_DIR, req, claimed_worker_id, claimed_pool_id, scope),
+           error = function(e) list(ok = FALSE, status = 503L,
+                                    code = "worker_auth_failed",
+                                    error = conditionMessage(e)))
+}
+
 read_request <- function(con) {
   buf <- raw(0)
   repeat {
@@ -2066,27 +2821,34 @@ serve_request <- function(con, req) {
   p <- pr$path; q <- pr$q
   st <- read_state()
   runDir <- st$runDir
+  body_cache <- NULL
+  body_loaded <- FALSE
   body_json <- function(default = list()) {
-    if (!nzchar(req$body)) return(default)
-    tryCatch(jsonlite::fromJSON(req$body, simplifyVector = FALSE), error = function(e) default)
+    if (!body_loaded) {
+      body_cache <<- if (!nzchar(req$body)) list() else
+        tryCatch(jsonlite::fromJSON(req$body, simplifyVector = FALSE), error = function(e) list())
+      body_loaded <<- TRUE
+    }
+    if (length(body_cache)) body_cache else default
   }
 
-  # A stale tab must not make current-record routes read or mutate another record.
-  requested_sid <- trimws(as.character(q$session %||% ""))
-  callback_route <- p %in% c("/api/step/import", "/api/envcheck/import",
-    "/api/notebook/cells", "/api/notebook/build", "/api/notebook/download",
-    "/api/notebook/replay/build", "/api/notebook/replay/download")
-  if (nzchar(requested_sid) && startsWith(p, "/api/") &&
-      !startsWith(p, "/api/sessions/") && !callback_route &&
-      !identical(requested_sid, cur_sid())) {
-    return(send_json(con, 409, list(ok = FALSE, code = "session_selection_changed",
-      error = "当前分析记录已在其他页面切换，请重新选择记录后再操作。")))
+  # Canonical sid conflict is decided before auth or any side effect. No query/body
+  # precedence exists, and record routes no longer compare target against current.
+  early_target <- record_session_target(q, body_json(), path = p,
+                                        current_sid = cur_sid(), allow_current = TRUE,
+                                        require = FALSE)
+  if (!isTRUE(early_target$ok) && identical(early_target$code, "session_conflict")) {
+    refused <- record_refusal(early_target)
+    return(send_json(con, refused$status, refused$body))
   }
 
   # ---- 每次请求算一次 owner（B1）------------------------------------
   #   算在这里而不是每条路由里各算一次：漏一条路由就是一个越权入口。
   #   代价是每次请求多一次网关问询；身份失败时 fail-closed，见 db_api.R。
-  owner_ctx <- if (DB_READY) tryCatch(db_api_owner(APP_DIR, req), error = function(e)
+  fetch_auth <- fetch_client_request_auth(APP_DIR, req, p, req$method, DB_CON, body_json())
+  if (isTRUE(fetch_auth$present) && !isTRUE(fetch_auth$ok))
+    return(send_json(con, fetch_auth$status %||% 403L, list(ok = FALSE, code = fetch_auth$code)))
+  owner_ctx <- if (isTRUE(fetch_auth$present)) fetch_auth$owner_ctx else if (DB_READY) tryCatch(db_api_owner(APP_DIR, req), error = function(e)
     list(key = NA_character_, kind = "unidentified", external_id = NA_character_,
          error = conditionMessage(e))) else
     list(key = NA_character_, kind = "unidentified", external_id = NA_character_)
@@ -2095,14 +2857,66 @@ serve_request <- function(con, req) {
     return(send_json(con, 403, list(ok = FALSE, code = "agent_token_invalid",
       error = "助手令牌无效或已撤销")))
 
+  if (p %in% c("/api/fetch-client/config", "/api/fetch-client/revoke", "/api/fetch-client/client", "/api/fetch-client/status")) {
+    if (!fetch_client_web(owner_ctx)) return(send_json(con, 403, list(ok = FALSE, error = "请用已登录的应用页面接入设备")))
+    expected_method <- if (p %in% c("/api/fetch-client/config", "/api/fetch-client/revoke")) "POST" else "GET"
+    if (!identical(req$method, expected_method)) return(send_json(con, 405, list(ok = FALSE, error = "method denied")))
+    if (identical(expected_method, "POST") && !as.character(req$headers[["origin"]] %||% "") %in%
+        c("https://artifact.catsco.cc", "https://artifact.catsco.cn"))
+      return(send_json(con, 403, list(ok = FALSE, error = "请从应用原页面操作")))
+    out <- tryCatch({
+      if (p == "/api/fetch-client/config") {
+        base <- paste0(as.character(req$headers[["origin"]]), "/personal-analysis")
+        fetch_client_issue(APP_DIR, owner_ctx, base, as.character(body_json()$device_id %||% "fetch-device"))
+      } else if (p == "/api/fetch-client/revoke") fetch_client_revoke(APP_DIR, owner_ctx)
+      else if (p == "/api/fetch-client/client") list(ok = TRUE, source = paste(readLines(file.path(APP_DIR, "tools", "pa_fetch_client.py"), warn = FALSE), collapse = "\n"))
+      else {
+        tokens <- Filter(function(x) identical(x$owner_key, owner_ctx$key) && is.null(x$revoked_at) &&
+          is.numeric(x$expires_at) && x$expires_at > as.numeric(Sys.time()), fetch_client_read(APP_DIR)$tokens)
+        list(ok = TRUE, devices = lapply(tokens, function(x) x[c("device_id", "expires_at")]))
+      }
+    }, error = function(e) list(ok = FALSE, status = 503L, error = "接入配置暂不可用，请稍后重试"))
+    raw <- charToRaw(enc2utf8(as.character(jsonlite::toJSON(out, auto_unbox = TRUE, null = "null", digits = NA))))
+    status <- if (isTRUE(out$ok)) 200L else out$status %||% 400L
+    hdr <- paste0("HTTP/1.1 ", status, " Result\r\nContent-Type: application/json; charset=utf-8\r\nCache-Control: no-store\r\nPragma: no-cache\r\nReferrer-Policy: no-referrer\r\nContent-Length: ", length(raw), "\r\nConnection: close\r\n\r\n")
+    writeBin(c(charToRaw(hdr), raw), con); flush(con); return(invisible(NULL))
+  }
+
+  # Every record-scoped route is classified here before its handler or any
+  # side effect. This is the single gate that prevents a new route from silently
+  # falling back to current/global state.
+  record_preflight <- NULL
+  send_json_base <- send_json
+  send_json <- function(con, code, obj) {
+    if (!is.null(record_preflight) && isTRUE(record_preflight$ok) &&
+        is.list(obj) && is.list(record_preflight$access)) {
+      cap <- record_preflight$access$cap
+      if (is.null(obj$session_id) && !is.null(cap$session_id))
+        obj$session_id <- cap$session_id
+      if (is.null(obj$can_read)) obj$can_read <- isTRUE(cap$can_read)
+      if (is.null(obj$can_write)) obj$can_write <- isTRUE(cap$can_write)
+      if (is.null(obj$readonly)) obj$readonly <- isTRUE(cap$readonly)
+    }
+    send_json_base(con, code, obj)
+  }
+  record_preflight <- record_request_preflight(APP_DIR, DB_CON, p, req$method, q,
+                                                body_json(), owner_ctx, cur_sid())
+  if (!isTRUE(record_preflight$ok)) {
+    return(send_json(con, record_preflight$status, record_preflight$body))
+  }
+
   if (p %in% c("/api/run/logs", "/api/run/logs/download")) {
     if (!identical(req$method, "GET")) return(send_json(con, 405, list(ok = FALSE, error = "GET required")))
     if (!DB_READY) return(send_json(con, 503, list(ok = FALSE, error = "日志数据库不可用")))
-    # Explicit session is mandatory: never silently download a newly selected record.
-    out <- db_api_run_logs(DB_CON, owner_ctx, requested_sid)
-    if (out$code != 200L) return(send_json(con, out$code, out$body))
-    if (p == "/api/run/logs") return(send_json(con, 200, out$body))
-    bytes <- charToRaw(enc2utf8(out$text))
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
+    rows <- db_run_log_read_record(DB_CON, access$cap$owner_key, sid)
+    text <- db_run_log_text(rows)
+    if (p == "/api/run/logs")
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = sid,
+        read_at = db_now(), entries = rows, text = text),
+        record_cap_fields(access$cap))))
+    bytes <- charToRaw(enc2utf8(text))
     hdr <- paste0("HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n",
       "Content-Disposition: attachment; filename=run-log.txt\r\nCache-Control: no-store\r\n",
       "Content-Length: ", length(bytes), "\r\nConnection: close\r\n\r\n")
@@ -2187,37 +3001,77 @@ serve_request <- function(con, req) {
     # 和按分析记录的（.../mirror/<session>/<rel>）。以前只查前者，
     # 而取回端写的是后者 —— 于是「明明取回了却还是 202」。
     # 这里两处都查，查到哪个用哪个。
-    sid_dl <- as.character(qget(q, "session") %||% "")
-    if (!nzchar(sid_dl)) sid_dl <- tryCatch(cur_sid(), error = function(e) "")
-    cand <- c(db_api_local_path(APP_DIR, owner_ctx$key, rel))
-    if (nzchar(sid_dl) && isTRUE(HAS_MIRROR)) cand <- c(cand, mirror_path(sid_dl, rel))
+    # 归属：显式给了 session 就只认这一份镜像，绝不拿 owner 目录里同名旧文件顶替。
+    #   同名文件在不同记录里可能是两次不同的运行，混用等于把别人的结果当本次。
+    access <- record_preflight$access
+    sid_dl <- as.character(record_preflight$target$sid %||% "")
     fp <- ""
-    for (c1 in cand) if (nzchar(c1) && file.exists(c1)) { fp <- c1; break }
+    if (isTRUE(HAS_MIRROR)) {
+      p1 <- mirror_path(sid_dl, rel)
+      if (nzchar(p1) && file.exists(p1)) fp <- p1
+    }
     if (!nzchar(fp)) {
+      if (!isTRUE(access$cap$can_write))
+        return(send_json(con, 403, c(list(ok = FALSE, code = "fetch_requires_owner",
+          session_id = sid_dl,
+          error = "shared 记录只能读取已经取回的产物；创建取回任务需要记录所有者。"),
+          record_cap_fields(access$cap))))
       # 没取回：登记取回任务，让页面显示进度，而不是直接报「找不到」。
       req_id <- db_new_id("fx")
       DBI::dbExecute(DB_CON,
         "INSERT INTO fetch_jobs(request_id,owner_key,version_id,rel,state,created_at,updated_at)
          VALUES(?,?,?,?,?,?,?)",
-        list(req_id, owner_ctx$key, as.character(qget(q, "version_id") %||% NA),
+        list(req_id, access$cap$owner_key, as.character(access$cap$version_id %||% NA),
              rel, "pending", db_now(), db_now()))
       DBI::dbExecute(DB_CON,
         "INSERT INTO poll_jobs(job_id,kind,owner_key,version_id,ticket_id,state,
            next_check_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-        list(paste0("job-", req_id), "fetch", owner_ctx$key,
-             as.character(qget(q, "version_id") %||% NA), req_id,
+        list(paste0("job-", req_id), "fetch", access$cap$owner_key,
+             as.character(access$cap$version_id %||% NA), req_id,
              "pending", db_now(), db_now(), db_now()))
       # 同时登记进「待取清单」：执行端（工作电脑上的取回器）每轮读的就是这份，
       #   只写 fetch_jobs 的话，取回器那一侧看不到这个请求，文件永远搬不回来。
       if (isTRUE(HAS_MIRROR) && nzchar(sid_dl))
         tryCatch(mirror_request(sid_dl, rel,
-                                bytes = as.numeric(qget(q, "bytes") %||% NA),
-                                run_dir = as.character(runDir %||% "")),
+                                bytes = artifact_expected_bytes(sid_dl, rel),
+                                run_dir = as.character(access$cap$run_dir %||% ""),
+                                want_md5 = artifact_expected_md5(sid_dl, rel)),
                  error = function(e) NULL)
       return(send_json(con, 202, list(
         ok = TRUE, ready = FALSE, request_id = req_id, rel = rel,
         error = "还没取回到本地，已登记取回任务",
         hint = "轮询 /api/artifact/fetch/status?request_id=... 看进度；就绪后再点下载。")))
+    }
+    # 最终要流的那个文件必须自己过硬：前面选路径用的是 mirror_path / owner 回退，
+    #   但真正发出去的是 fp。只核路径不核内容，等于核了 A 发 B。
+    #   基准取该 session 最新一条 verified 记录的 md5；拿不到基准就不当已验收，
+    #   尤其不能让镜像目录里的旧文件冒充。
+    expA <- artifact_expected_md5(sid_dl, rel)
+    actA <- if (isTRUE(HAS_MIRROR)) mirror_actual_md5(fp) else ""
+    in_mirror <- isTRUE(HAS_MIRROR) && nzchar(fp) &&
+      startsWith(normalizePath(fp, mustWork = FALSE),
+                 normalizePath(mirror_dir(sid_dl), mustWork = FALSE))
+    if (nzchar(expA)) {
+      if (!identical(actA, expA)) {
+        # 这份不是最新验收版本：镜像里的挪去 _stale 留审计，然后拒绝，不提供旧文件。
+        if (isTRUE(in_mirror)) {
+          mv <- tryCatch(mirror_quarantine(sid_dl, rel), error = function(e) "")
+          if (nzchar(mv)) message("mirror_stale_quarantined ", rel, " -> ", mv)
+        }
+        return(send_json(con, 409, list(
+          ok = FALSE, code = "mirror_stale",
+          error = "本地这份不是最新已验收版本，请重新取回后再下载",
+          expected_md5 = expA, cached_md5 = actA)))
+      }
+    } else {
+      # 查不到最新基准就一律拒绝，不管这份来自镜像还是 owner 回退。
+      #   只拦镜像时，owner 目录里那份同名旧文件仍会流出去 ——
+      #   而这正是"看起来能下、下到的是旧结果"的那条路。
+      #   要能下载，就必须先有一条该 session、该 rel 的 verified 记录给出 md5。
+      return(send_json(con, 409, list(
+        ok = FALSE, code = "mirror_unverified",
+        error = "查不到这条产物最新已验收版本的 md5，无法确认是否最新，暂不下载",
+        rel = rel, cached_md5 = actA)))
     }
     info <- file.info(fp)
     if (isTRUE(info$isdir)) return(send_json(con, 400, list(ok = FALSE, error = "这是一个目录")))
@@ -2261,7 +3115,8 @@ serve_request <- function(con, req) {
 
   # 数据层路由统一在这里收口。返回 NULL 表示不归它管，继续往下走。
   api_res <- tryCatch(
-    db_api_handle(DB_CON, APP_DIR, p, req, q, body_json, send_json, owner_ctx),
+    db_api_handle(DB_CON, APP_DIR, p, req, q, body_json, send_json, owner_ctx,
+                  record_preflight),
     error = function(e) list(code = 500, body = list(ok = FALSE,
       code = "db_api_error", error = conditionMessage(e))))
   if (!is.null(api_res)) return(send_json(con, api_res$code, api_res$body))
@@ -2331,6 +3186,79 @@ serve_request <- function(con, req) {
 
   if (p == "/api/ping")
     return(send_json(con, 200, list(ok = TRUE, platform = .Platform$OS.type, port = PORT)))
+
+  # ---- 管理员与两个隔离开关（app.admin.v1）--------------------------
+  #   GET  看当前开关 + 我是不是管理员
+  #   POST 改开关（只有管理员）
+  # 为什么管理员是「机器人主人」而不是「第一个进来的人」：
+  #   第一个进来的人可能只是打开了一次网址。这里只认部署时写在
+  #   config/admin_policy.json（或 PA_ADMIN_VIEWER_UIDS / PA_ADMIN_USERNAMES）
+  #   里的平台身份；配置为空时谁都不是管理员，开关维持默认（两个都开）。
+  if (p == "/api/admin/policy") {
+    if (!isTRUE(HAS_ADMIN_POLICY))
+      return(send_json(con, 503, list(ok = FALSE, code = "admin_policy_missing",
+        error = "缺少 engine/admin_policy.R")))
+    a <- admin_identity(APP_DIR, owner_ctx)
+    pol_now <- record_policy(APP_DIR)
+    if (identical(req$method, "GET")) {
+      return(send_json(con, 200, list(
+        ok = TRUE, identified = nzchar(a$owner_key),
+        is_admin = isTRUE(a$is_admin), admin_reason = a$reason,
+        me = list(owner_key = if (nzchar(a$owner_key)) a$owner_key else NULL,
+                  uid = if (nzchar(a$uid)) a$uid else NULL,
+                  username = if (nzchar(a$username)) a$username else NULL),
+        policy = record_policy_public(pol_now),
+        hint = if (isTRUE(a$is_admin)) ""
+               else "只有应用所属机器人的主人可以改这两个开关。")))
+    }
+    if (!identical(req$method, "POST"))
+      return(send_json(con, 405, list(ok = FALSE, code = "method_not_allowed")))
+    if (!isTRUE(a$is_admin)) {
+      tryCatch(admin_audit(APP_DIR, list(action = "policy_denied",
+        actor = a$owner_key %||% "", uid = a$uid %||% "", username = a$username %||% "",
+        at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))), error = function(e) NULL)
+      return(send_json(con, 403, list(ok = FALSE, code = "admin_required",
+        is_admin = FALSE, policy = record_policy_public(pol_now),
+        error = "只有应用所属机器人的主人可以改这两个开关。")))
+    }
+    b <- body_json()
+    # 只认 TRUE / FALSE。写成 "false" 字符串或 0 一律拒绝，
+    #   因为「以为关掉了其实没关」比报错危险得多。
+    pick <- function(k, cur) {
+      v <- b[[k]]
+      if (is.null(v)) return(list(ok = TRUE, value = cur))
+      if (is.logical(v) && length(v) == 1L && !is.na(v)) return(list(ok = TRUE, value = isTRUE(v)))
+      list(ok = FALSE)
+    }
+    r1 <- pick("record_isolation", pol_now$record_isolation)
+    r2 <- pick("write_isolation", pol_now$write_isolation)
+    if (!isTRUE(r1$ok) || !isTRUE(r2$ok))
+      return(send_json(con, 400, list(ok = FALSE, code = "policy_value_invalid",
+        error = "两个开关只接受 true / false；未做任何修改。")))
+    saved <- admin_policy_write(APP_DIR, r1$value, r2$value,
+                               actor = a$owner_key, uid = a$uid, username = a$username)
+    if (!isTRUE(saved$ok))
+      return(send_json(con, 500, list(ok = FALSE, code = "policy_write_failed",
+        error = saved$error %||% "策略写入失败")))
+    return(send_json(con, 200, list(
+      ok = TRUE, is_admin = TRUE,
+      policy = record_policy_public(saved$policy),
+      note = "已保存。刷新页面即生效；已在页面里打开的人下次请求就会按新开关判定。")))
+  }
+
+  # ---- 改应用代码的统一门 -------------------------------------------
+  #   哪些算"改应用代码"：脚本库里的脚本被替换/新增/还原/采纳，
+  #   以及把"帮我改脚本"这种请求交给助手。
+  #   注意这条只管页面这条路。助手自己在本机改文件走的是文件系统，
+  #   不经过这里 —— 那一侧靠的是 config/admin_policy.json 这个同一份事实，
+  #   助手按它判断要不要动手。两处读同一份，才不会出现"页面说不行、助手照改"。
+  code_write_denied <- function() {
+    if (!isTRUE(HAS_ADMIN_POLICY)) return(NULL)
+    g <- admin_code_write_gate(APP_DIR, owner_ctx)
+    if (isTRUE(g$ok)) return(NULL)
+    send_json(con, 403, list(ok = FALSE, code = g$code,
+      is_admin = isTRUE(g$admin), error = g$error %||% "只有管理员可以修改应用代码。"))
+  }
 
   # ---- 助手写入授权（app.agent.v1）----------------------------------
   #   为什么要有这块：
@@ -2428,6 +3356,8 @@ serve_request <- function(con, req) {
   # ===================================================================
   if (p == "/api/sessions" && identical(req$method, "GET")) {
     if (!HAS_SESSIONS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/sessions.R")))
+    if (!DB_READY) return(send_json(con, 503, list(ok = FALSE, code = "database_unavailable",
+      error = "记录数据库不可用，不会返回未归属的记录列表")))
     lst <- sess_list(APP_DIR)
     # ---- 按使用者过滤（B1）----------------------------------------
     #   以前这里直接回全局 sessions.json：谁进来都看到同一批记录。
@@ -2445,18 +3375,28 @@ serve_request <- function(con, req) {
           error = "身份未识别，不会显示任何已有记录",
           hint = "点「重试识别」，或从平台会话里重新打开这个应用")))
       }
-      rows <- tryCatch(db_rows(DB_CON,
-        "SELECT session_id, owner_key, visibility, name, updated_at FROM sessions
-          WHERE owner_key = ? OR visibility = 'shared'", list(owner_ctx$key)),
+      vis <- record_visibility_query(APP_DIR, owner_ctx)
+      rows <- tryCatch(db_rows(DB_CON, vis$sql, vis$params),
         error = function(e) NULL)
       if (!is.null(rows)) {
         keep <- as.character(rows$session_id)
         lst$sessions <- Filter(function(s) as.character(s$id) %in% keep, lst$sessions %||% list())
-        # 共享记录的只读标记：页面据此把跑/改/删按钮置灰。
-        shared <- as.character(rows$session_id[rows$owner_key != owner_ctx$key])
-        lst$readonly <- shared
+        own <- stats::setNames(as.character(rows$owner_key), as.character(rows$session_id))
+        pol_now <- record_policy(APP_DIR)
+        write_open <- !isTRUE(pol_now$write_isolation)
+        lst$sessions <- lapply(lst$sessions, function(s) {
+          id <- as.character(s$id %||% "")
+          is_owner <- identical(unname(own[[id]] %||% ""), as.character(owner_ctx$key))
+          can_write <- is_owner || write_open
+          c(s, list(can_read = TRUE, can_write = can_write, readonly = !can_write))
+        })
+        # 只读标记：页面据此把跑/改/删按钮置灰。
+        #   隔离开着时 = 别人的记录；关着时谁都能改，所以列表为空。
+        lst$readonly <- if (write_open) character(0)
+          else as.character(rows$session_id[rows$owner_key != owner_ctx$key])
         lst$identified <- TRUE
         lst$owner_key <- owner_ctx$key
+        lst$policy <- record_policy_public(pol_now)
       }
     }
     return(send_json(con, 200, lst))
@@ -2464,20 +3404,56 @@ serve_request <- function(con, req) {
 
   if (p == "/api/sessions/state" && identical(req$method, "GET")) {
     if (!HAS_SESSIONS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/sessions.R")))
-    sid <- as.character(q$id %||% "")
+    target <- record_session_target(q, list(id = q$id %||% ""), path = p,
+                                    current_sid = cur_sid(), allow_current = TRUE,
+                                    require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    sid <- target$sid
+    access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "read")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
     out <- sess_state(APP_DIR, sid)
+    if (is.null(out$session))
+      return(send_json(con, 404, c(list(ok = FALSE, code = "session_record_missing",
+        error = "没有这条分析记录。"), record_cap_fields(access$cap))))
     # 页面还需要「当前这台机器/路径」的公开视图（不含口令）
-    out$place <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
+    out$place <- record_public_place(access$cap$place %||% list())
+    visible <- tryCatch({
+      vis <- record_visibility_query(APP_DIR, owner_ctx)
+      db_rows(DB_CON, sub("SELECT session_id, owner_key, visibility, name, updated_at",
+                          "SELECT session_id, owner_key, visibility", vis$sql, fixed = TRUE),
+              vis$params)
+    }, error = function(e) NULL)
+    if (!is.null(visible)) {
+      keep <- as.character(visible$session_id)
+      out$sessions <- Filter(function(s) as.character(s$id) %in% keep, out$sessions %||% list())
+      own <- stats::setNames(as.character(visible$owner_key), as.character(visible$session_id))
+      pol_now <- record_policy(APP_DIR)
+      write_open <- !isTRUE(pol_now$write_isolation)
+      out$sessions <- lapply(out$sessions, function(s) {
+        id <- as.character(s$id %||% "")
+        is_owner <- identical(unname(own[[id]] %||% ""), as.character(owner_ctx$key))
+        can_write <- is_owner || write_open
+        c(s, list(can_read = TRUE, can_write = can_write, readonly = !can_write))
+      })
+      out$policy <- record_policy_public(pol_now)
+    }
     # 这次有没有在等助手写回：记录自带，不用全局标记。
     #   两个槽位分开报（2026-11-12）：识别在等哪个号、步骤在等哪个号互不覆盖。
     #   以前只有一个 pending_req，步骤下发会把它顶掉，识别结论被误判成旧数据。
-    .sid0 <- out$current %||% sid
+    .sid0 <- sid
     out$pending_identify_req <- tryCatch(sess_get_pending(APP_DIR, .sid0, slot = "identify"),
                                          error = function(e) NULL)
     out$pending_step_req <- tryCatch(sess_get_pending(APP_DIR, .sid0, slot = "step"),
                                      error = function(e) NULL)
     # 旧字段保留指向识别槽：老页面读它判"还在等识别"，语义不变。
     out$pending_req <- out$pending_identify_req
+    out$current <- sess_current_id(APP_DIR)
+    out$viewing_session_id <- sid
+    out$record_source <- target$record_source
+    out <- c(out, record_cap_fields(access$cap))
     return(send_json(con, 200, out))
   }
 
@@ -2497,26 +3473,22 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, code = "agent_token_required",
         error = "推流水只接受助手令牌；人不需要走这条路")))
     b <- body_json()
-    sid_nb <- trimws(as.character(b$session_id %||% ""))
-    if (!nzchar(sid_nb) || is.null(tryCatch(sess_find(APP_DIR, sid_nb), error = function(e) NULL)))
-      return(send_json(con, 409, list(ok = FALSE, code = "session_record_missing",
-        error = "session_id 不存在，未写入流水")))
+    sid_nb <- trimws(as.character(record_preflight$target$sid %||% ""))
+    access <- record_preflight$access
     cell <- b$cell
     if (!is.list(cell))
       return(send_json(con, 400, list(ok = FALSE, error = "cell 必须是对象")))
-    if (!db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, sid_nb))
-      return(send_json(con, 403, list(ok = FALSE, code = "notebook_not_owner",
-        error = "没有这条分析记录的操作权限")))
     store <- nb_store_dir(APP_DIR, sid_nb)
     ok <- tryCatch(nb_append_cell(store, cell, event_id = b$event_id), error = function(e) FALSE)
     if (!isTRUE(ok)) return(send_json(con, 400, list(ok = FALSE, error = "流水写入失败")))
     if (isTRUE(b$final) || isTRUE(b$build)) {
       result <- tryCatch(nb_build_export(store), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
       result$session_id <- sid_nb
-      return(send_json(con, if (isTRUE(result$ok)) 200 else 400, result))
+      return(send_json(con, if (isTRUE(result$ok)) 200 else 400,
+                       c(result, record_cap_fields(access$cap))))
     }
-    return(send_json(con, 200, list(ok = TRUE, session_id = sid_nb,
-      cells_file = nb_cells_file(store))))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = sid_nb,
+      cells_file = nb_cells_file(store)), record_cap_fields(access$cap))))
   }
 
   if (p %in% c("/api/notebook/replay/build", "/api/notebook/replay/download")) {
@@ -2524,9 +3496,8 @@ serve_request <- function(con, req) {
     if (!identical(req$method, if (building) "POST" else "GET"))
       return(send_json(con, 405, list(ok = FALSE, code = "method_not_allowed")))
     b <- if (building) body_json() else list()
-    sid_replay <- if (building) b$session_id else q$session
-    if (!DB_READY || !db_api_notebook_authorized(DB_CON, owner_ctx, sid_replay))
-      return(send_json(con, 403, list(ok = FALSE, code = "notebook_not_owner")))
+    sid_replay <- as.character(record_preflight$target$sid %||% "")
+    access <- record_preflight$access
     session_replay <- tryCatch(sess_find(APP_DIR, sid_replay), error = function(e) NULL)
     if (is.null(session_replay)) return(send_json(con, 409, list(ok = FALSE, code = "session_record_missing")))
     if (!exists("nr_api_build", mode = "function") || !exists("nr_api_download", mode = "function"))
@@ -2539,6 +3510,8 @@ serve_request <- function(con, req) {
       return(send_json(con, 409, list(ok = FALSE, code = "replay_binding_or_manifest_invalid",
         error = "重放清单、记录绑定或本次产物校验未通过，未提供旧文件。")))
     if (building) return(send_json(con, 200, list(ok = TRUE, session_id = sid_replay,
+      can_read = isTRUE(access$cap$can_read), can_write = isTRUE(access$cap$can_write),
+      readonly = isTRUE(access$cap$readonly),
       full_analysis_replay_verified = FALSE, note = "已打包显式授权清单；尚非完整科学分析复现认证。")))
     bytes <- result$bytes
     if (!is.raw(bytes) || !length(bytes))
@@ -2554,12 +3527,8 @@ serve_request <- function(con, req) {
     if (!HAS_NOTEBOOK)
       return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/notebook_build.R")))
     b <- body_json()
-    sid_nb <- trimws(as.character(b$session_id %||% cur_sid()))
-    if (!nzchar(sid_nb)) return(send_json(con, 400, list(ok = FALSE, error = "缺 session_id")))
-    if (is.na(owner_ctx$key)) return(send_json(con, 403, list(ok = FALSE, error = "身份未识别")))
-    if (!db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, sid_nb))
-      return(send_json(con, 403, list(ok = FALSE, code = "notebook_not_owner",
-        error = "没有这条分析记录的操作权限")))
+    sid_nb <- trimws(as.character(record_preflight$target$sid %||% ""))
+    access <- record_preflight$access
     store <- nb_store_dir(APP_DIR, sid_nb)
     session_nb <- tryCatch(sess_find(APP_DIR, sid_nb), error = function(e) NULL)
     synced <- tryCatch({ if (!is.null(session_nb)) nb_sync_local(APP_DIR, session_nb); TRUE },
@@ -2568,15 +3537,13 @@ serve_request <- function(con, req) {
     out <- tryCatch(nb_build_export(store, session_nb$name %||% NULL),
       error = function(e) list(ok = FALSE, error = conditionMessage(e)))
     out$session_id <- sid_nb
-    return(send_json(con, if (isTRUE(out$ok)) 200 else 400, out))
+    return(send_json(con, if (isTRUE(out$ok)) 200 else 400,
+                     c(out, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/notebook/download" && identical(req$method, "GET")) {
-    sid_nb <- trimws(as.character(q$session %||% cur_sid()))
-    if (!nzchar(sid_nb)) return(send_json(con, 400, list(ok = FALSE, error = "缺 session")))
-    if (!db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, sid_nb))
-      return(send_json(con, 403, list(ok = FALSE, code = "notebook_not_owner",
-        error = "没有这条分析记录的下载权限")))
+    sid_nb <- trimws(as.character(record_preflight$target$sid %||% ""))
+    access <- record_preflight$access
     session_nb <- tryCatch(sess_find(APP_DIR, sid_nb), error = function(e) NULL)
     synced <- tryCatch({ if (!is.null(session_nb)) nb_sync_local(APP_DIR, session_nb); TRUE },
       error = function(e) e)
@@ -2603,10 +3570,12 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, code = "identity_unavailable",
         error = "身份未识别，不会显示任何记录")))
     lst <- sess_list(APP_DIR)
-    rows <- tryCatch(db_rows(DB_CON,
-      "SELECT session_id, owner_key, visibility FROM sessions
-        WHERE owner_key = ? OR visibility = 'shared'", list(owner_ctx$key)),
-      error = function(e) NULL)
+    rows <- tryCatch({
+      vis <- record_visibility_query(APP_DIR, owner_ctx)
+      db_rows(DB_CON, sub("SELECT session_id, owner_key, visibility, name, updated_at",
+                          "SELECT session_id, owner_key, visibility", vis$sql, fixed = TRUE),
+              vis$params)
+    }, error = function(e) NULL)
     if (is.null(rows))
       return(send_json(con, 503, list(ok = FALSE, error = "记录表不可读")))
     keep <- as.character(rows$session_id)
@@ -2615,7 +3584,12 @@ serve_request <- function(con, req) {
     order <- if (HAS_FLOW) tryCatch(FLOW_ORDER("server"), error = function(e) character(0))
              else character(0)
     items <- runs_list(APP_DIR, owner_ctx$key, mine, shared, order)
-    for (i in seq_along(items)) items[[i]]$sentence <- runs_state_sentence(items[[i]])
+    for (i in seq_along(items)) {
+      sid_i <- as.character(items[[i]]$session_id %||% "")
+      cap_i <- record_capability(DB_CON, APP_DIR, sid_i, owner_ctx)
+      if (isTRUE(cap_i$ok)) items[[i]] <- c(items[[i]], record_cap_fields(cap_i))
+      items[[i]]$sentence <- runs_state_sentence(items[[i]])
+    }
     return(send_json(con, 200, list(ok = TRUE, items = items,
                                     now = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))))
   }
@@ -2634,6 +3608,27 @@ serve_request <- function(con, req) {
         error = paste0("后台助手身份未配置或未通过验证。",
                        "请由受信任的后台身份通道提供凭据；当前请求未获授权。"))))
     b <- body_json()
+    # from/to belonged to an older bounded-chain idea. rc_begin never accepted
+    # them, so reject before the intent transaction can create a record.
+    if (("from" %in% names(b)) || ("to" %in% names(b)) ||
+        (is.list(b$auto_dispatch) &&
+         (("from" %in% names(b$auto_dispatch)) || ("to" %in% names(b$auto_dispatch)))))
+      return(send_json(con, 400, list(ok = FALSE, code = "from_to_removed",
+        error = "from/to 已删除；请用单步 step，或使用应用已有的全链路语义。")))
+    auto <- b$auto_dispatch
+    if (!is.null(auto)) {
+      if (!is.list(auto) || !all(names(auto) %in% c("step", "req_id")) ||
+          is.null(auto$step) || is.null(auto$req_id) ||
+          !is.character(auto$step) || length(auto$step) != 1L ||
+          !is.character(auto$req_id) || length(auto$req_id) != 1L ||
+          !nzchar(trimws(auto$step)) || !nzchar(trimws(auto$req_id)) ||
+          !isTRUE(attempt_valid(trimws(auto$req_id))))
+        return(send_json(con, 400, list(ok = FALSE, code = "auto_dispatch_invalid",
+          error = "auto_dispatch 只接受非空 step 与合法 req_id；未创建记录。")))
+      auto$step <- trimws(auto$step)
+      auto$req_id <- trimws(auto$req_id)
+      b$auto_dispatch <- NULL
+    }
     norm <- intent_normalize(b)
     if (!isTRUE(norm$ok)) {
       return(send_json(con, 400, list(ok = FALSE, code = "intent_invalid",
@@ -2647,7 +3642,117 @@ serve_request <- function(con, req) {
       tryCatch(agent_audit(APP_DIR, "intent_import",
         list(token_id = owner_ctx$external_id, session_id = result$body$session_id,
              project = it$project_name, missing = it$missing)), error = function(e) NULL)
-    return(send_json(con, result$status, result$body))
+    if (is.null(auto) || !identical(result$status, 200L) || !isTRUE(result$body$ok))
+      return(send_json(con, result$status, result$body))
+    merge_payload <- function(base, extra) {
+      for (nm in names(extra)) base[[nm]] <- extra[[nm]]
+      base
+    }
+    if (!isTRUE(HAS_RUN_ENQUEUE))
+      return(send_json(con, 503, c(result$body, list(ok = FALSE,
+        code = "dispatch_retryable", retryable = TRUE, step = auto$step,
+        req_id = auto$req_id, error = "入队实现不可用；记录已保留，可重试派活。"))))
+    sid_dispatch <- as.character(result$body$session_id %||% "")
+    out <- tryCatch(run_enqueue(
+      con, req, q,
+      body = list(session_id = sid_dispatch, step = auto$step,
+                  req_id = auto$req_id, force = FALSE),
+      owner_ctx = owner_ctx, current_sid = "", via = "/api/intent/import auto_dispatch",
+      req_id_override = auto$req_id, step_override = auto$step,
+      allow_local_launch = FALSE, agent_dispatch = TRUE),
+      error = function(e) list(pa_status = 503L, pa_body = list(
+        ok = FALSE, code = "dispatch_retryable", retryable = TRUE,
+        error = paste0("记录已保留，但派活失败：", conditionMessage(e)))))
+    created <- !isTRUE(result$body$duplicate)
+    updated <- isTRUE(result$body$duplicate)
+    audit_one <- function(code, exec_id = "") tryCatch(agent_audit(APP_DIR, "intent_auto_dispatch",
+      list(token_id = owner_ctx$external_id, owner_key = owner_ctx$key,
+           session_id = sid_dispatch, step = auto$step, req_id = auto$req_id,
+           exec_id = exec_id, code = code, current_changed = FALSE)),
+      error = function(e) NULL)
+    if (!identical(as.integer(out$pa_status), 200L)) {
+      db <- out$pa_body %||% list()
+      gate <- identical(as.integer(out$pa_status), 409L)
+      code <- if (gate) as.character(db$code %||% "dispatch_rejected")
+              else "dispatch_retryable"
+      audit_one(code)
+      body <- merge_payload(result$body, db)
+      body <- merge_payload(body, list(ok = FALSE,
+        code = if (gate) code else "dispatch_retryable",
+        record_created = created, record_updated = updated,
+        session_id = sid_dispatch, retryable = !gate,
+        step = auto$step, req_id = auto$req_id,
+        dispatch_status = as.integer(out$pa_status)))
+      if (!gate) body$error <- as.character(db$error %||% "记录已保留，但队列写入失败，可重试。")
+      return(send_json(con, if (gate) 409L else 503L, body))
+    }
+    db <- out$pa_body %||% list()
+    audit_one("queued", as.character(db$exec_id %||% ""))
+    body <- merge_payload(result$body, db)
+    body <- merge_payload(body, list(ok = TRUE,
+      record_created = created, record_updated = updated,
+      session_id = sid_dispatch, queued = TRUE, step = auto$step,
+      req_id = auto$req_id, exec_id = as.character(db$exec_id %||% "")))
+    return(send_json(con, 200, body))
+  }
+
+  # Agent-facing dispatch: the token owner selects the target record explicitly.
+  # No current read/switch and no second page click are involved.
+  if (p == "/api/agent/dispatch" && identical(req$method, "POST")) {
+    if (!identical(as.character(owner_ctx$kind %||% ""), "agent"))
+      return(send_json(con, 403, list(ok = FALSE, code = "agent_token_required",
+        error = "后台助手身份未配置或未通过验证，未派活。")))
+    if (!DB_READY)
+      return(send_json(con, 503, list(ok = FALSE, code = "database_unavailable",
+        error = "数据库不可用，不能校验记录归属。")))
+    if (!isTRUE(HAS_RUN_ENQUEUE))
+      return(send_json(con, 503, list(ok = FALSE, code = "dispatch_unavailable",
+        error = "入队实现不可用，未派活。")))
+    b <- body_json()
+    if (isTRUE(b$force))
+      return(send_json(con, 403, list(ok = FALSE, code = "force_requires_human",
+        error = "force 只接受人的身份。agent 不能给自己放行。")))
+    sid_in <- record_trim(b$session_id)
+    step_in <- record_trim(b$step)
+    req_in <- record_trim(b$req_id)
+    if (!nzchar(sid_in) || !nzchar(step_in))
+      return(send_json(con, 400, list(ok = FALSE, code = "dispatch_target_required",
+        error = "必须显式提供 session_id 与 step。")))
+    if (!nzchar(req_in) || !isTRUE(attempt_valid(req_in)))
+      return(send_json(con, 400, list(ok = FALSE, code = "req_id_required",
+        error = "必须提供合法的持久 req_id，才能保证重复派活不重复入队。")))
+    target <- record_session_target(q, b, path = p, current_sid = "",
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    out <- tryCatch(run_enqueue(
+      con, req, q,
+      body = list(session_id = sid_in, step = step_in, req_id = req_in, force = FALSE),
+      owner_ctx = owner_ctx, current_sid = "", via = p,
+      req_id_override = req_in, step_override = step_in,
+      allow_local_launch = FALSE, agent_dispatch = TRUE),
+      error = function(e) list(pa_status = 503L, pa_body = list(
+        ok = FALSE, code = "dispatch_retryable", retryable = TRUE,
+        error = paste0("派活失败：", conditionMessage(e)))))
+    db <- out$pa_body %||% list()
+    if (identical(as.integer(out$pa_status), 502L) &&
+        identical(as.character(db$code %||% ""), "exec_enqueue_failed")) {
+      out$pa_status <- 503L
+      db$dispatch_status <- 502L
+      db$code <- "enqueue_failed"
+      db$retryable <- TRUE
+    }
+    code <- if (identical(as.integer(out$pa_status), 200L)) "queued"
+            else as.character(db$code %||% "dispatch_failed")
+    tryCatch(agent_audit(APP_DIR, "agent_dispatch", list(
+      token_id = owner_ctx$external_id, owner_key = owner_ctx$key,
+      session_id = sid_in, step = step_in, req_id = req_in,
+      exec_id = as.character(db$exec_id %||% ""), code = code,
+      current_changed = FALSE)), error = function(e) NULL)
+    if (is.null(db$session_id)) db$session_id <- sid_in
+    return(send_json(con, out$pa_status, db))
   }
 
   if (p == "/api/sessions/new" && identical(req$method, "POST")) {
@@ -2655,11 +3760,56 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, error = "身份或数据库不可用，不能创建有归属的分析记录")))
     if (!HAS_SESSIONS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/sessions.R")))
     b <- body_json()
-    pub <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
+    me <- owner_ctx_key(owner_ctx)
+
+    # ---- 来源记录：必须由当前身份可读，且只读 --------------------------
+    #   为什么不能照抄全局 place：全局 place 只是「这台机器上一次保存的样子」，
+    #   它可能来自另一份记录（包括别人名下的记录，只要页面切过去看过一眼）。
+    #   拿它当模板，等于把那份记录里的路径和字段复制进新记录。
+    #   所以来源只能显式给，并且必须当场用 owner 校验；校验不过就拒绝，
+    #   而不是静默降级成全局 place。
+    #   只读：这条分支从头到尾不写来源记录，也不改它的 place/run_dir。
+    src_sid <- trimws(as.character(b$source_session_id %||% ""))
+    src_note <- ""
+    if (nzchar(src_sid)) {
+      if (!isTRUE(db_run_log_authorized(DB_CON, me, src_sid)))
+        return(send_json(con, 403, list(ok = FALSE, code = "source_not_owned",
+          error = "这份来源记录不属于当前登录身份，不能拿来当新建模板。请先切换到自己的记录。")))
+      src <- tryCatch(sess_find(APP_DIR, src_sid), error = function(e) NULL)
+      if (is.null(src))
+        return(send_json(con, 404, list(ok = FALSE, code = "source_missing",
+          error = "来源记录不存在。")))
+      pub <- src$place
+      src_note <- src_sid
+    } else {
+      pub <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
+    }
+    if (!is.list(pub)) pub <- list(mode = "server")
+
+    # ---- 结果目录：本请求自己定，不回写任何记录 ------------------------
+    #   以前新建只能继承，没有第二条路。于是「换一个独立结果目录」只能靠
+    #   先保存设置 —— 而保存写的是当前记录，等于为了新建去改旧记录。
+    want_rd <- trimws(as.character(b$run_dir %||% ""))
+    if (nzchar(want_rd)) {
+      rd_norm <- gsub("\\\\", "/", want_rd)
+      rd_norm <- sub("/+$", "", rd_norm)
+      if (!grepl("^/", rd_norm) || grepl("(^|/)\\.\\.(/|$)", rd_norm))
+        return(send_json(con, 400, list(ok = FALSE, code = "run_dir_not_absolute",
+          error = "结果目录要写成服务器上的绝对路径，且不能含 ..。")))
+      if (is.list(pub$server)) pub$server$work_root <- rd_norm
+      if (identical(tolower(as.character(pub$mode %||% "")), "local"))
+        pub$local$path <- rd_norm
+    }
+
     s <- tryCatch(sess_create(APP_DIR, name = as.character(b$name %||% ""),
                               place = pub, note = as.character(b$note %||% "")),
                   error = function(e) NULL)
     if (is.null(s)) return(send_json(con, 400, list(ok = FALSE, error = "新建失败")))
+    # 新记录定下来之后，把这套设置落成页面当前设置。
+    #   只写 config/server_profile.json，不碰任何记录的 place ——
+    #   不这么做的话，页面显示的还是上一个目录，随后「保存并识别」会把
+    #   旧目录写回新记录，白折腾一趟。
+    tryCatch(place_write(APP_DIR, pub), error = function(e) NULL)
     # New records need ownership before their first status read or callback, not only
     # after a successful completed-step report. Never claim existing legacy records.
     DBI::dbExecute(DB_CON, "INSERT INTO sessions(session_id,owner_key,name,mode,run_dir,created_at,updated_at) VALUES(?,?,?,?,?,?,?)",
@@ -2671,9 +3821,17 @@ serve_request <- function(con, req) {
   if (p == "/api/sessions/switch" && identical(req$method, "POST")) {
     if (!HAS_SESSIONS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/sessions.R")))
     b <- body_json()
-    sid <- as.character(b$id %||% "")
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    sid <- target$sid
+    access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
     r <- tryCatch(sess_switch(APP_DIR, sid), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    if (!isTRUE(r$ok)) return(send_json(con, 400, r))
+    if (!isTRUE(r$ok)) return(send_json(con, 404, c(r, record_cap_fields(access$cap))))
     s <- r$session
     # 记录里带着「这台机器/这些路径」。切过去就把它们恢复成当前设置 ——
     #   不恢复的话，页面显示的是这次分析的目录，实际动手用的是上一次的，
@@ -2684,14 +3842,21 @@ serve_request <- function(con, req) {
     # 运行目录跟着记录走：服务器模式记的是服务器上的绝对路径，
     #   本机不可能存在，所以这里只落 state、不去判目录在不在。
     session_activate_state(s)
-    return(send_json(con, 200, list(ok = TRUE, session = s)))
+    return(send_json(con, 200, c(list(ok = TRUE, session = s), record_cap_fields(access$cap))))
   }
 
   if (p == "/api/sessions/update" && identical(req$method, "POST")) {
     if (!HAS_SESSIONS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/sessions.R")))
     b <- body_json()
-    sid <- as.character(b$id %||% "")
-    if (!nzchar(sid)) return(send_json(con, 400, list(ok = FALSE, error = "缺 id")))
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    sid <- target$sid
+    access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
     patch <- list()
     if (!is.null(b$name)) patch$name <- as.character(b$name)
     if (!is.null(b$note)) patch$note <- as.character(b$note)
@@ -2717,7 +3882,7 @@ serve_request <- function(con, req) {
     if (!is.null(b$species) || !is.null(b$tissue)) {
       spW <- if (is.null(b$species)) "" else species_canon(as.character(b$species))
       tiW <- if (is.null(b$tissue)) "" else trimws(as.character(b$tissue))
-      plW <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
+      plW <- access$cap$place %||% list()
       corpW <- if (exists("dp_path_corpus", mode = "function"))
         dp_path_corpus(plW) else ""
       hitW <- character(0)
@@ -2761,64 +3926,123 @@ serve_request <- function(con, req) {
     }
     if (!length(patch)) return(send_json(con, 400, list(ok = FALSE, error = "没有要改的内容")))
     r <- tryCatch(sess_update(APP_DIR, sid, patch), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/sessions/archives" && identical(req$method, "GET")) {
     if (!HAS_SESSIONS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/sessions.R")))
-    return(send_json(con, 200, list(ok = TRUE, archives = sess_archive_list(APP_DIR, as.character(q$id %||% "")))))
+    target <- record_session_target(q, list(id = q$id %||% ""), path = p,
+                                    current_sid = cur_sid(), allow_current = TRUE,
+                                    require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx, need = "read")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    return(send_json(con, 200, c(list(ok = TRUE,
+      archives = sess_archive_list(APP_DIR, target$sid)), record_cap_fields(access$cap))))
   }
 
   if (p == "/api/sessions/archive" && identical(req$method, "POST")) {
     if (!HAS_SESSIONS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/sessions.R")))
     b <- body_json()
-    sid <- as.character(b$id %||% sess_current_id(APP_DIR))
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    sid <- target$sid
+    access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
     r <- tryCatch(sess_archive(APP_DIR, sid,
                                label = as.character(b$label %||% "manual"),
                                note = as.character(b$note %||% "")),
                   error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/sessions/restore" && identical(req$method, "POST")) {
     if (!HAS_SESSIONS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/sessions.R")))
     b <- body_json()
-    sid <- as.character(b$id %||% sess_current_id(APP_DIR))
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    sid <- target$sid
+    access <- record_access(DB_CON, APP_DIR, sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
     arc <- as.character(b$archive %||% "")
     if (!nzchar(arc)) return(send_json(con, 400, list(ok = FALSE, error = "缺 archive")))
     r <- tryCatch(sess_archive_restore(APP_DIR, sid, arc),
                   error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/place") {
     if (!HAS_PLACE) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/place.R")))
-    if (identical(req$method, "POST")) {
-      b <- body_json()
-      r <- tryCatch(place_write(APP_DIR, b), error = function(e) NULL)
-      if (is.null(r)) return(send_json(con, 400, list(ok = FALSE, error = "写入失败")))
+    b <- if (identical(req$method, "POST")) body_json() else list()
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = TRUE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
     }
-    pub <- tryCatch(place_public(APP_DIR), error = function(e) NULL)
-    if (is.null(pub)) return(send_json(con, 200, list(ok = FALSE, error = "读不到位置配置")))
-    lp <- as.character(pub$local$path %||% "")
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx,
+                            need = if (identical(req$method, "POST")) "write" else "read")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    if (identical(req$method, "POST")) {
+      pub0 <- record_place_merge(access$cap$place, b)
+      mode0 <- as.character(pub0$mode %||% "local")
+      rd0 <- record_place_run_dir(pub0, mode0)
+      saved <- tryCatch(sess_update(APP_DIR, target$sid, list(
+        place = pub0, mode = mode0, run_dir = rd0)), error = function(e) NULL)
+      if (is.null(saved) || !isTRUE(saved$ok))
+        return(send_json(con, 400, list(ok = FALSE, error = "目标记录写入失败")))
+      tryCatch(DBI::dbExecute(DB_CON,
+        "UPDATE sessions SET mode=?, run_dir=?, updated_at=? WHERE session_id=? AND owner_key=?",
+        list(mode0, rd0, db_now(), target$sid, access$cap$owner_key)), error = function(e) NULL)
+      if (identical(target$sid, sess_current_id(APP_DIR)))
+        tryCatch(session_activate_state(saved$session), error = function(e) NULL)
+      return(send_json(con, 200, c(list(ok = TRUE,
+        ready = isTRUE(record_place_ready(pub0, mode0, rd0)),
+        local_path = if (nzchar(rd0) && identical(mode0, "local")) enc2utf8(rd0) else NULL,
+        local_ok = if (nzchar(rd0) && identical(mode0, "local")) dir.exists(rd0) else NULL),
+        record_public_place(pub0), record_cap_fields(access$cap))))
+    }
+    pub <- record_public_place(access$cap$place %||% list())
+    mode0 <- record_trim(access$cap$mode)
+    rd0 <- record_trim(access$cap$run_dir)
+    lp <- if (identical(mode0, "local")) rd0 else as.character(pub$local$path %||% "")
     return(send_json(con, 200, c(list(ok = TRUE,
-                                     ready = isTRUE(tryCatch(place_ready(APP_DIR),
-                                                             error = function(e) FALSE)),
+                                     ready = isTRUE(record_place_ready(pub, mode0, rd0)),
                                      local_path = if (nzchar(lp)) enc2utf8(lp) else NULL,
                                      local_ok = if (nzchar(lp)) dir.exists(lp) else NULL),
-                                 pub)))
+                                 pub, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/place/commit" && identical(req$method, "POST")) {
     if (!HAS_PLACE) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/place.R")))
     b <- body_json()
     warns <- character(0)
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    target_sid <- target$sid
 
-    # 1) 先落盘。即使后面识别失败，用户填的也已经在文件里了。
-    tryCatch(place_write(APP_DIR, b),
-             error = function(e) warns <<- c(warns, paste0("保存位置配置失败：", conditionMessage(e))))
-
-    pub <- tryCatch(place_public(APP_DIR), error = function(e) list(mode = "local"))
+    # 1) 只合并并保存到目标记录；全局 place 不是这次写入的中转站。
+    pub <- record_place_merge(access$cap$place, b)
     pub_srv <- pub$server %||% list()
     mode <- as.character(pub$mode %||% "local")
 
@@ -2840,10 +4064,12 @@ serve_request <- function(con, req) {
     #    所以这里只在 local 时落 state。
     rd <- NULL
     if (identical(mode, "local")) {
-      a <- tryCatch(place_apply_local(APP_DIR, STATE_DIR), error = function(e) NULL)
-      if (is.null(a) || !isTRUE(a$ok))
+      lp <- record_trim(pub$local$path)
+      if (!nzchar(lp) || !dir.exists(lp)) {
         warns <- c(warns, "本机工作路径还没选，或者那个目录现在不存在。")
-      else rd <- a$runDir
+      } else {
+        rd <- normalizePath(lp, winslash = "/", mustWork = FALSE)
+      }
     } else {
       # 服务器模式下「运行目录」就是服务器上的结果目录。
       #   以前这里只取出来用、不落 state，于是页面永远写着「运行目录还没定」——
@@ -2859,30 +4085,27 @@ serve_request <- function(con, req) {
     #   没有记录就现开一份 —— 「保存并识别」本来就是在开始一次分析，
     #   不能出现"识别跑完了却没有归属"的状态：那种状态下刷新一定丢。
     #   识别还没回来（服务器模式），所以这里只记「在等什么」，不记结论。
-    cur_sid <- NULL
     if (HAS_SESSIONS) {
-      cur_sid <- as.character(b$session_id %||% "")
-      if (!nzchar(cur_sid)) cur_sid <- sess_current_id(APP_DIR)
-      if (!nzchar(cur_sid)) {
-        s0 <- tryCatch(sess_create(APP_DIR, place = pub), error = function(e) NULL)
-        if (!is.null(s0)) cur_sid <- s0$id
-      }
-      if (nzchar(cur_sid)) {
-        tryCatch(sess_update(APP_DIR, cur_sid, list(
-          place = pub, mode = mode, run_dir = if (is.null(rd)) "" else rd)),
-          error = function(e) NULL)
-        # 只动 identify 槽。以前这里顺手把 pending_req 置空，
-        #   等于每次保存识别都把步骤的待办一起抹掉（两槽共用时的连带伤害）。
-        if (identical(mode, "server")) {
-          tryCatch(sess_set_pending(APP_DIR, cur_sid, req_id, slot = "identify"),
-                   error = function(e) NULL)
-        } else {
-          tryCatch(sess_clear_pending(APP_DIR, cur_sid, slot = "identify"),
-                   error = function(e) NULL)
-        }
+      saved <- tryCatch(sess_update(APP_DIR, target_sid, list(
+        place = pub, mode = mode, run_dir = if (is.null(rd)) "" else rd)),
+        error = function(e) NULL)
+      if (is.null(saved) || !isTRUE(saved$ok))
+        return(send_json(con, 400, c(list(ok = FALSE, code = "record_write_failed",
+          error = "目标分析记录没有保存成功。"), record_cap_fields(access$cap))))
+      tryCatch(DBI::dbExecute(DB_CON,
+        "UPDATE sessions SET mode=?, run_dir=?, updated_at=? WHERE session_id=? AND owner_key=?",
+        list(mode, if (is.null(rd)) "" else rd, db_now(), target_sid, access$cap$owner_key)),
+        error = function(e) NULL)
+      # 只动目标记录的 identify 槽。
+      if (identical(mode, "server")) {
+        tryCatch(sess_set_pending(APP_DIR, target_sid, req_id, slot = "identify"),
+                 error = function(e) NULL)
+      } else {
+        tryCatch(sess_clear_pending(APP_DIR, target_sid, slot = "identify"),
+                 error = function(e) NULL)
       }
     }
-    if (!is.null(rd) && nzchar(rd)) {
+    if (identical(target_sid, sess_current_id(APP_DIR))) {
       st$runDir <- rd
       st$runDirRemote <- !identical(mode, "local")
       try(save_state(st), silent = TRUE)
@@ -2891,8 +4114,8 @@ serve_request <- function(con, req) {
     # Human save explicitly delegates this server check. Never let an agent mint
     # authorization; only reuse its own still-valid owner-specific handoff.
     agent_handoff_path <- NULL
-    if (identical(mode, "server") && HAS_AGENT_GATE && nzchar(cur_sid %||% "") &&
-        db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, cur_sid)) {
+    if (identical(mode, "server") && HAS_AGENT_GATE && nzchar(target_sid) &&
+        db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, target_sid)) {
       ho <- tryCatch(agent_handoff_ensure(APP_DIR, owner_ctx),
                      error = function(e) list(ok = FALSE, code = "handoff_unavailable"))
       if (isTRUE(ho$ok)) agent_handoff_path <- ho$path
@@ -3014,7 +4237,7 @@ serve_request <- function(con, req) {
       warns <- c(warns, paste0(
         "环境体检还没做：需要在服务器 ", srv_host,
         " 上执行。这次识别已交给助手，结果写回来之前这一栏不下结论。"))
-    } else if (isTRUE(st$runDirRemote)) {
+    } else if (!identical(mode, "local")) {
       # 服务器模式的运行目录在服务器上，本机不存在是正常的。
       #   这次的结果由执行端在服务器上跑完回写。
     } else if (!is.null(rd) && nzchar(rd) && dir.exists(rd)) {
@@ -3060,11 +4283,12 @@ serve_request <- function(con, req) {
     if (!is.null(rd) && nzchar(rd) && HAS_HISTORY)
       try(hist_recent_add(APP_DIR, rd), silent = TRUE)
 
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE,
-      place = c(list(ready = isTRUE(tryCatch(place_ready(APP_DIR), error = function(e) FALSE))), pub),
+      place = c(list(ready = isTRUE(record_place_ready(pub, mode,
+        if (is.null(rd)) "" else rd))), pub),
       run_dir = if (is.null(rd) || !nzchar(rd)) NULL else enc2utf8(rd),
-      run_dir_remote = isTRUE(st$runDirRemote),
+      run_dir_remote = !identical(mode, "local"),
       env = env_obj, decision = dec_obj, scans = scan_obj,
       # needs_remote=TRUE 表示"这一轮没有识别服务器"，
       # 前端据此显示"还没检查过"，而不是拿空结果当成"检查完了没问题"。
@@ -3079,7 +4303,7 @@ serve_request <- function(con, req) {
       stale_env = stale_env,
       stale_note = if (is.null(stale_env)) NULL else paste0(
         "以下是上一次执行回来的结果，仅供参考；这次的结果要等助手跑完写回来。"),
-      warnings = as.list(warns))))
+      warnings = as.list(warns)), record_cap_fields(access$cap))))
   }
 
   if (p == "/api/env") {
@@ -3113,49 +4337,77 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/run-dir") {
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
     if (identical(req$method, "GET")) {
-      if (is.null(runDir))
-        return(send_json(con, 200, list(ok = TRUE, runDir = NULL, steps = list())))
+      ctx <- record_context(access$cap, require_run_dir = TRUE)
+      if (!isTRUE(ctx$ok)) {
+        out <- record_refusal(ctx)
+        out$body <- c(out$body, record_cap_fields(access$cap))
+        return(send_json(con, out$status, out$body))
+      }
+      runDir <- ctx$run_dir
       cfg <- read_cfg(runDir)
       pipe <- read_json_file(file.path(runDir, "pipeline.json"))
       gates <- read_json_file(file.path(runDir, "gates.json"))
       # 步骤清单按档位给：服务器模式给 flow_spec 的 server 档，
       #   否则给 step_plan 那套。混着给就会出现"页面上一排按钮，
       #   每个都指向服务器上不存在的脚本"。
-      stepsOut <- if (identical(flow_profile(), "server")) flow_server_steps()
+      stepsOut <- if (identical(flow_profile(sid), "server")) flow_server_steps()
                   else step_titles(cfg, runDir, ENGINE_DIR)
-      return(send_json(con, 200, list(
+      return(send_json(con, 200, c(list(
         ok = TRUE, runDir = enc2utf8(gsub("\\\\", "/", runDir)),
         pipeline = pipe, gates = gates,
-        profile = flow_profile(),
+        profile = flow_profile(sid), session_id = sid,
         steps = stepsOut,
-        stepState = read_step_state(runDir))))
+        stepState = read_step_state(runDir)), record_cap_fields(access$cap))))
     }
     if (identical(req$method, "POST")) {
       b <- body_json()
       dir <- gsub("\\\\", "/", as.character(b$dir %||% ""))
       if (!nzchar(dir) || !dir.exists(dir) || !isTRUE(file.info(dir)$isdir))
         return(send_json(con, 400, list(ok = FALSE, error = paste0("这个目录用不了：", dir))))
-      st$runDir <- normalizePath(dir, winslash = "/", mustWork = FALSE)
-      save_state(st)
-      # 同时记进「最近用过的目录」。
-      #   不记的话，用户点「切换运行目录」回到欢迎页会看不到刚才那个目录，
-      #   等于还是回不去 —— 那正是这次要修的问题。
-      if (HAS_HISTORY) hist_recent_add(APP_DIR, st$runDir)
-      return(send_json(con, 200, list(ok = TRUE, runDir = st$runDir)))
+      dir <- normalizePath(dir, winslash = "/", mustWork = FALSE)
+      pl <- record_place_merge(access$cap$place, list(local = list(path = dir), mode = "local"))
+      saved <- tryCatch(sess_update(APP_DIR, sid, list(run_dir = dir, mode = "local", place = pl)),
+                        error = function(e) NULL)
+      if (is.null(saved) || !isTRUE(saved$ok))
+        return(send_json(con, 400, list(ok = FALSE, error = "目标记录写入失败")))
+      tryCatch(DBI::dbExecute(DB_CON,
+        "UPDATE sessions SET mode='local', run_dir=?, updated_at=? WHERE session_id=? AND owner_key=?",
+        list(dir, db_now(), sid, access$cap$owner_key)), error = function(e) NULL)
+      if (identical(sid, sess_current_id(APP_DIR))) {
+        st$runDir <- dir
+        st$runDirRemote <- FALSE
+        save_state(st)
+        if (HAS_HISTORY) hist_recent_add(APP_DIR, dir)
+      }
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = sid, runDir = dir),
+        record_cap_fields(access$cap))))
     }
   }
 
   if (p == "/api/config" && identical(req$method, "POST")) {
     b <- body_json()
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    target <- record_session_target(q, b, path = p, current_sid = cur_sid(),
+                                    allow_current = FALSE, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx, need = "write",
+                            require_ctx = TRUE, require_run_dir = TRUE)
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    target_sid <- target$sid
+    runDir <- access$ctx$run_dir
+    st$runDir <- runDir
+    st$runDirRemote <- access$ctx$run_dir_remote
     # 服务器模式下运行目录在服务器上，本机写不了。
     #   以前这里直接 400，于是"把这次设置写到服务器上"没有出口。
     #   现在同样改成交给助手：设置内容一并带上，助手在服务器上落地。
-    if (isTRUE(st$runDirRemote)) {
-      b <- body_json()
-      pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
-      sid <- if (HAS_SESSIONS) tryCatch(sess_current_id(APP_DIR), error = function(e) "") else ""
+    if (isTRUE(access$ctx$run_dir_remote)) {
+      pl <- access$ctx$place
+      sid <- target_sid
       rq <- if (HAS_SESSIONS && nzchar(as.character(sid %||% "")))
         as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
       ins <- remote_step_instruction("config", pl, session_id = as.character(sid %||% ""), req_id = rq)
@@ -3183,10 +4435,11 @@ serve_request <- function(con, req) {
         note = "已交给助手，等它回写",
         delegated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
         req_id = if (nzchar(rq)) rq else NULL,
-        session_id = cur_sid()))
-      return(send_json(con, 200, list(
+        session_id = target_sid), sid = target_sid)
+      return(send_json(con, 200, c(list(
         ok = TRUE, delegated = TRUE, step = "config", instruction = ins,
-        msg = "当前是服务器模式，设置要写在服务器的结果目录里。已把这次设置交给助手去落地。")))
+        msg = "当前是服务器模式，设置要写在服务器的结果目录里。已把这次设置交给助手去落地。"),
+        record_cap_fields(access$cap))))
     }
     if (isTRUE(b$init)) {
       # 注意参数顺序：init_config(runDir, engineDir, overwrite)
@@ -3207,7 +4460,8 @@ serve_request <- function(con, req) {
           close(con2)
         }
       }, error = function(e) NULL)
-      return(send_json(con, 200, list(ok = TRUE, written = w, runDir = runDir)))
+      return(send_json(con, 200, c(list(ok = TRUE, written = w, runDir = runDir),
+                                   record_cap_fields(access$cap))))
     }
     written <- character(0)
     for (nm in c("pipeline.json", "gates.json")) {
@@ -3219,587 +4473,14 @@ serve_request <- function(con, req) {
       written <- c(written, nm)
     }
     if (!length(written)) return(send_json(con, 400, list(ok = FALSE, error = "没有可保存的内容")))
-    return(send_json(con, 200, list(ok = TRUE, written = written)))
+    return(send_json(con, 200, c(list(ok = TRUE, written = written),
+                                 record_cap_fields(access$cap))))
   }
 
   if (p == "/api/run" && identical(req$method, "POST")) {
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
-    b <- body_json()
-    stepId <- as.character(b$step %||% "")
-    effective_sid <- as.character(b$session_id %||% cur_sid())
-    if (length(effective_sid) != 1L || is.na(effective_sid) ||
-        !identical(effective_sid, cur_sid()))
-      return(send_json(con, 409, list(ok = FALSE, code = "session_selection_changed",
-        error = "执行记录与当前选择不一致，未启动或入队。")))
-    if (isTRUE(HAS_SESSIONS) && exists("intent_execution_gate", mode = "function")) {
-      intent_gate <- tryCatch(intent_execution_gate(APP_DIR, effective_sid, requested_step = stepId),
-        error = function(e) list(ok = FALSE, code = "intent_profile_unreadable",
-          error = "分析限制无法完整读取，未启动执行。"))
-      if (!isTRUE(intent_gate$ok)) return(send_json(con, 409, intent_gate))
-    }
-
-    # ---- 对账不一致：只拦被涉及的那几步 ------------------------------
-    #   为什么在这里拦（2026-11-03，审核第 12 条）
-    #     对账器一直只做一件事：在页面上画一个红框。
-    #     没有任何闸门读它的 ok，于是「1 处不一致」可以挂一个多月，
-    #     十二个阶段照跑 —— 被看见和被拦住，是两件事。
-    #   为什么只拦涉及的那几步，不做全局闸门：
-    #     现在就有两条不过（STEP_TASK 缺项、服务器快照未上报）。
-    #     做成全局硬闸门，等于整个应用一步都点不动 —— 那不是修复，是停机。
-    #   为什么带 force 放行：
-    #     对账是静态事实核对，它可能滞后于实际能力（比如快照刚上报完、
-    #     页面还没刷新）。留一条只给人用的放行路，理由必须写。
-    if (HAS_CONTRACT && nzchar(stepId) && !identical(stepId, "all")
-        && !identical(stepId, "config") && !isTRUE(b$force)) {
-      gchk <- tryCatch(
-        contract_check(ENGINE_DIR, flow_profile(),
-                       step_task_keys = names(STEP_TASK)),
-        error = function(e) NULL)
-      if (!is.null(gchk) && length(gchk$issues)) {
-        hit <- Filter(function(x) {
-          identical(as.character(x$level), "fail") &&
-            as.character(stepId) %in% unlist(x$stages %||% list())
-        }, gchk$issues)
-        if (length(hit)) {
-          return(send_json(con, 409, list(
-            ok = FALSE, code = "contract_mismatch", step = stepId,
-            error = paste0("这一环的定义对不上，先修好再跑：",
-                           paste(vapply(hit, function(x) as.character(x$what %||% ""), ""),
-                                 collapse = "；")),
-            where = as.list(vapply(hit, function(x) as.character(x$where %||% ""), "")),
-            fix = as.list(vapply(hit, function(x) as.character(x$fix %||% ""), "")),
-            hint = "修完刷新页面再点。确实要现在跑，请在页面上以人的身份强制放行并写理由。")))
-        }
-      }
-    }
-
-    # ---- 闸门：上一步不是 verified，直接 409（L3 第 2 步）-----------
-    #   这是「让 agent 没有绕过去的路」的那一步。
-    #   以前闸门只在 qc 不是 pass 时拼一句 reviewWarn，然后照常派作业，
-    #   force=true 还能直接越过 —— 那不是闸门，是提示。
-    #   现在：未通过判定就返回 409 + 返工单号，force 只接受人身份并需理由。
-    if (DB_READY && nzchar(stepId) && !identical(stepId, "all")) {
-      sid_g <- as.character(b$session_id %||% "")
-      if (!nzchar(sid_g)) sid_g <- tryCatch(cur_sid(), error = function(e) "")
-      vinfo <- tryCatch(db_api_version_of(DB_CON, sid_g), error = function(e) NULL)
-      if (!is.null(vinfo) && nzchar(vinfo$version_id %||% "") &&
-          !is.na(vinfo$version_id %||% NA)) {
-        if (isTRUE(b$force)) {
-          who <- as.character(b$force_by %||% b$who %||% "")
-          why <- as.character(b$force_reason %||% "")
-          # agent 不能给自己放行：这条必须可被测试触发（I5 第 4 条）。
-          if (!nzchar(who) || grepl("^(agent|assistant|bot|claude|gpt|model)", tolower(who)))
-            return(send_json(con, 403, list(
-              ok = FALSE, code = "force_requires_human", step = stepId,
-              error = "force 只接受人的身份。agent 不能给自己放行。",
-              hint = "放行请在页面上填写理由，或调用 /api/review/release 并给 who / why。")))
-          if (!nzchar(why))
-            return(send_json(con, 400, list(
-              ok = FALSE, code = "force_reason_required", step = stepId,
-              error = "强制放行必须填理由，理由是交付清单的一部分。")))
-          tryCatch({
-            prev <- stepId
-            db_event(DB_CON, "review_override", owner_key = owner_ctx$key %||% NA,
-                     version_id = vinfo$version_id, step_id = stepId,
-                     payload = list(who = who, why = why, at = db_now(),
-                                    path = "/api/run force"))
-          }, error = function(e) NULL)
-        } else {
-          g <- tryCatch(db_api_gate(DB_CON, APP_DIR, owner_ctx, vinfo$version_id, stepId),
-                        error = function(e) NULL)
-          # 闸门返回非 NULL 不等于"必须拦"。
-          #   踩过的坑（2026-11-06）：这里原来写的是
-          #     if (!is.null(g)) return(send_json(con, g$code, g$body))
-          #   也就是"闸门有话说就 409 返回"。可是 db_api_gate 的 warn 档
-          #   （默认档）返回的正是 ok=TRUE + warn_only=TRUE —— 它的含义是
-          #   "记一条未核验项，放行"。被这一行统一当成失败拦掉之后，
-          #   warn 档实际等于 block 档：点击 → 409 → 从未入队 → 执行端永远
-          #   取不到任务。页面看起来像"点了没反应"，而代码里三档齐全。
-          #   正确判据是闸门自己的 ok 字段：ok=FALSE 才拦，ok=TRUE 带着警告继续。
-          if (!is.null(g)) {
-            if (isFALSE(g$body$ok)) return(send_json(con, g$code, g$body))
-            # 放行但要留痕：这条警告要进交付清单，不能悄悄丢掉。
-            tryCatch(db_event(DB_CON, "gate_warn_passed",
-                              owner_key = owner_ctx$key %||% NA,
-                              version_id = vinfo$version_id, step_id = stepId,
-                              payload = list(code = g$body$code %||% "",
-                                             upstream = g$body$upstream %||% "",
-                                             upstream_status = g$body$upstream_status %||% "",
-                                             at = db_now())),
-                     error = function(e) NULL)
-          }
-        }
-      }
-    }
-
-    # 服务器模式的运行目录在服务器上，本机起不了进程。
-    #   但也不能只回一句"请到助手那边跑"就完了 —— 那等于把按钮做成死路，
-    #   用户点下去看到的就是一条报错。现在改成：这一步照样能点，
-    #   点了就把这步变成一条任务交给助手，并记成「已交给助手，等回写」。
-    #   状态不再是空的：页面能显示"这一步交给谁了、在等什么"。
-    if (isTRUE(st$runDirRemote)) {
-      if (identical(stepId, "all")) {
-        out <- rc_begin(effective_sid, runDir, as.character(b$req_id %||% ""), owner_ctx,
-                        overwrite = isTRUE(b$overwrite))
-        return(send_json(con, out$code, out$body))
-      }
-      active_chain <- rc_read(effective_sid)
-      chain_dispatch <- isTRUE(get0("RC_DISPATCH", inherits = TRUE, ifnotfound = FALSE))
-      if (!chain_dispatch && !is.null(active_chain) && active_chain$status %in% c("running", "starting", "blocked"))
-        return(send_json(con, 409, list(ok = FALSE, code = "chain_in_progress")))
-      # ---- 决策先于执行：这一步要人定的事，现在就生成并发出 ----
-      #   位置很关键：必须在入队之前。
-      #   以前的问题不是"入队太晚"，而是根本没有"这里该问人"这个动作 ——
-      #   决策清单是初始化时抄进 run-dir 的九条，服务器模式下读不到，
-      #   于是页面整块消失、也没人被告知，脚本就按默认值一路跑下去了。
-      #   现在：走到这一步 → 用这一步当下的真实数据生成问题 → 发进会话
-      #   → 没答完就不放行。答完再点，才入队。
-      if (isTRUE(HAS_DECISIONS) && !identical(as.character(stepId), "all")
-          && !isTRUE(b$force)) {
-        decSid <- as.character(b$session_id %||% "")
-        if (!nzchar(decSid)) decSid <- cur_sid()
-        decision_error <- NULL
-        tryCatch(dec_ensure(stepId, decSid), error = function(e) decision_error <<- conditionMessage(e))
-        pend <- tryCatch(dec_pending(decSid), error = function(e) { decision_error <<- conditionMessage(e); list() })
-        if (!is.null(decision_error)) return(send_json(con, 409,
-          list(ok = FALSE, code = "decision_unreadable", error = decision_error)))
-        # 只认"这一步自己的"待答问题：别的问题属于别的阶段，不该卡这一下。
-        mine <- Filter(function(x) identical(as.character(x$step %||% ""), as.character(stepId)), pend)
-        if (length(mine)) {
-          txt <- dec_ask_text(mine, stepTitle = if (HAS_FLOW) {
-            x <- flow_stage(stepId); if (is.null(x)) stepId else as.character(x$title)
-          } else stepId)
-          qd <- tryCatch(inject_enqueue(text = txt, session = decSid,
-                                        reason = "decision", step = stepId),
-                         error = function(e) NULL)
-          return(send_json(con, 409, list(
-            ok = FALSE, code = "need_decision", step = stepId,
-            error = "这一步要你先定一件事，定完才能跑",
-            pending = length(mine),
-            queued = !is.null(qd),
-            items = mine)))
-        }
-        # 答完了：把答案带进这次的指令里，别让助手自己去猜一个值。
-        ans <- Filter(function(x) identical(as.character(x$step %||% ""), as.character(stepId)),
-                      tryCatch(dec_read(decSid)$items, error = function(e) list()))
-        ans <- Filter(function(x) identical(as.character(x$status %||% ""), "answered"), ans)
-        if (length(ans)) {
-          kv <- vapply(ans, function(x) {
-            d <- x$answer_detail
-            if (!is.null(d) && length(d) && nzchar(as.character(paste(unlist(d), collapse = ""))))
-              paste0(as.character(x$title %||% x$key), " = ",
-                     paste(as.character(unlist(d)), collapse = "、"))
-            else paste0(as.character(x$title %||% x$key), " = ", as.character(x$answer %||% ""))
-          }, "")
-          b$gate_note <- paste(c(as.character(b$gate_note %||% ""),
-                                 paste0("【人已定】", paste(kv, collapse = "；"))), collapse = " ")
-        }
-
-        # 筛群这一步的特殊处理：脚本已改成"只认参数文件"，不会再自己猜清单。
-        #   所以必须把"写入哪个文件、写成什么"一起交给执行端，
-        #   否则脚本会按设计停下报错（这是刻意的：宁可停下，也不照抄上一轮的号）。
-        if (identical(as.character(stepId), "filter")) {
-          cf <- Filter(function(x) identical(as.character(x$key %||% ""), "cluster_filter"), ans)
-          if (length(cf)) {
-            ids <- as.character(cf[[1]]$answer %||% "keep_all")
-            det <- cf[[1]]$answer_detail
-            if (!is.null(det) && nzchar(as.character(paste(unlist(det), collapse = ""))))
-              ids <- paste(unlist(det), collapse = ",")
-            vec <- if (identical(ids, "keep_all")) character(0) else
-              trimws(unlist(strsplit(ids, "[,，]")))
-            vec <- vec[nzchar(vec)]
-            # ---- 把 dims / resolution 一起写进参数文件 ----------------
-            #   为什么必须写进去（2026-11-03，审核第 9 条）
-            #     前端有完整的参数面板，值存进了 variants_<sid>.json 的
-            #     params 里；但筛群脚本 drop_and_recluster.R 里
-            #     FindNeighbors(dims = 1:20) 与 FindClusters(resolution = 0.6)
-            #     是写死的，从不读这两个值。
-            #     于是「选了参数」和「参数生效」之间隔着一层看不见的假象：
-            #     人以为换 0.9 就换成分群口径，实际还是 0.6。
-            #   做法分两步，都不假装：
-            #     ① 把所选值写进 drop_params.json（脚本一旦升级就能读到，
-            #        也让这一轮到底想要什么有据可查）；
-            #     ② 所选值与脚本写死的值不一致时，在指令里明说"这一版不生效"。
-            #   只做①不做②，等于把人蒙在鼓里；只做②不做①，等于放弃这条线。
-            dv <- ""
-            rv <- ""
-            tryCatch({
-              vf <- file.path(STATE_DIR, paste0("variants_", as.character(gateSid %||% ""), ".json"))
-              if (file.exists(vf)) {
-                vd <- jsonlite::fromJSON(read_text_any(vf), simplifyVector = FALSE)
-                fst <- (vd$stages %||% list())$filter %||% list()
-                chosen <- as.character(fst$chosen %||% "")
-                its <- fst$items %||% list()
-                hit <- Filter(function(x) identical(as.character(x$id %||% ""), chosen), its)
-                if (length(hit)) {
-                  pv <- hit[[1]]$params %||% list()
-                  dv <- as.character(pv$dims %||% "")
-                  rv <- as.character(pv$resolution %||% "")
-                }
-              }
-            }, error = function(e) NULL)
-
-            jsl <- paste0(
-              '{"drop_clusters":[',
-              if (length(vec)) paste0('"', paste(vec, collapse = '","'), '"') else "",
-              ']',
-              if (nzchar(dv)) paste0(',"dims":"', dv, '"') else "",
-              if (nzchar(rv)) paste0(',"resolution":"', rv, '"') else "",
-              '}')
-
-            # 脚本这一版的实际口径（写死值）。改脚本那天，这里跟着改。
-            SCRIPT_DIMS <- "1:20"
-            SCRIPT_RES  <- "0.6"
-            dimsWarn <- ""
-            if (nzchar(dv) && !identical(gsub("[^0-9:]", "", dv), SCRIPT_DIMS)) {
-              dimsWarn <- paste0("【口径不一致】你选的 dims 是 ", dv,
-                                 "，但筛群脚本这一版写死 ", SCRIPT_DIMS, "，本次不会按你选的跑。")
-            }
-            resWarn <- ""
-            if (nzchar(rv) && !identical(as.character(rv), SCRIPT_RES)) {
-              resWarn <- paste0("【口径不一致】你选的 resolution 是 ", rv,
-                                "，但筛群脚本这一版写死 ", SCRIPT_RES,
-                                "，本次不会按你选的跑；要按你选的跑，得先让脚本支持读参数文件里的 resolution。")
-            }
-            b$gate_note <- paste(c(as.character(b$gate_note %||% ""),
-                                   paste0("【必须先生成参数文件】在结果目录下写 7.after_drop/drop_params.json，内容为 ",
-                                          jsl,
-                                          "。筛群脚本这一版只从该文件读剔除清单，文件不存在会直接停下报错。"),
-                                   "【不许写死清单】不要改脚本里的清单，也不要照抄上一轮的簇号。",
-                                   if (nzchar(dimsWarn)) dimsWarn else NULL,
-                                   if (nzchar(resWarn)) resWarn else NULL), collapse = " ")
-          }
-        }
-      }
-
-      # ---- 参考表闸门：这一步需要本次的注释依据，但还没选 ----
-      #   为什么必须拦在这里：上一版没拦，人点一下就直接注入会话了，
-      #   会话里拿到的指令虽然写着"先停一下去选"，但那是让助手去读一句话，
-      #   而不是让应用在点的那一刻就把人拦住。结果就是 gina 看到的那个现象：
-      #   "没有弹出任何选择啊？直接就注入会话了"。
-      #   拦的方式沿用决策那套：返回 409 + code，前端据此弹出选择面板。
-      if (isTRUE(HAS_REFERENCE) && !identical(as.character(stepId), "all")
-          && !isTRUE(b$force) && supplement_needs_reference(stepId)) {
-        refSid <- as.character(b$session_id %||% "")
-        if (!nzchar(refSid)) refSid <- cur_sid()
-
-        # ---- 先在「服务器信息」里定的那一份，到这里自动生效 ----
-        #   为什么要有这一步：用户可以在服务器信息那一节直接给路径 / 选上传 /
-        #   选查文献 / 说这一轮不用。给了就意味着"这个决定已经做过"，
-        #   到这里不该再拦一次、再弹一遍窗 —— 那是同一个问题问两遍。
-        #   没给的（ref_mode 为空）才拦，让前端弹选择卡确认一次。
-        plRef <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
-        srvRef <- (plRef %||% list())$server %||% list()
-        refModeP <- as.character(srvRef$ref_mode %||% "")
-        refPathP <- as.character(srvRef$ref_path %||% "")
-
-        chosenRef <- ""
-        if (nzchar(refSid) && HAS_SESSIONS) {
-          s0 <- tryCatch(sess_find(APP_DIR, refSid), error = function(e) NULL)
-          chosenRef <- as.character((s0 %||% list())$reference_id %||% "")
-        }
-        haveChosen <- nzchar(chosenRef) &&
-          (nzchar(ref_path(chosenRef)) || nzchar(ref_server_path(chosenRef)))
-
-        # ① 事先给了服务器路径：登记进候选库并直接选为本次使用。
-        if (!haveChosen && identical(refModeP, "path") && nzchar(refPathP)) {
-          tryCatch({
-            ref_register_server(
-              list(list(path = refPathP, name = basename(refPathP),
-                        note = as.character(srvRef$ref_note %||% ""),
-                        species = "", tissue = "")),
-              host = as.character(srvRef$host %||% ""))
-            ridP <- paste0("srv-", substr(paste0("h", digest_of_str(refPathP)), 1, 12))
-            if (nzchar(ref_server_path(ridP)) && nzchar(refSid) && HAS_SESSIONS) {
-              sess_update(APP_DIR, refSid, list(reference_id = ridP))
-              chosenRef <- ridP
-              haveChosen <- TRUE
-            }
-          }, error = function(e) NULL)
-        }
-
-        # ② 事先说了这一轮不用：放行，不拦。
-        passNoRef <- identical(refModeP, "none")
-
-        if (!haveChosen && !passNoRef) {
-          return(send_json(con, 409, list(
-            ok = FALSE, code = "need_reference", step = stepId,
-            error = "这一步要先定注释依据，定完才能跑",
-            # 把"事先选的模式"带回去：前端据此把卡片默认停在对的那一页，
-            #   而不是每次都从"服务器已有"开始。
-            pref_mode = refModeP,
-            # 文献库模式：把存档号一起带回去。前端据此直接发起检索，
-            #   不再弹"服务器/上传/查文献"那张卡 —— 这三个选项人早就在
-            #   页面里选过了，再问一遍等于同一个决定做两次。
-            ref_archive = as.character(srvRef$ref_archive %||% ""),
-            items = ref_list())))
-        }
-      }
-
-      # ---- 点击即入执行队列：先入队，再做任何判断 ----
-      #   为什么放在最前：人点一下的意图是"跑这一步"。以前闸门先判，
-      #   一旦上一步没做质检就直接 409 —— 按钮看起来就是死的。
-      #   入队在这里，工作电脑上的执行端每分钟来取，取到就真跑。
-      # 入队时把这一步的完整命令一起存进任务。
-      #   为什么：执行端自己有一张"步骤->脚本"的表，那张表和应用的 flow_spec
-      #   是两份，一改就错位。错位时的表现就是注释这一步报
-      #   「模板脚本不存在：<结果目录>/02_annotate.R」——它以为要把
-      #   02_annotate.R 渲染到结果目录，而真实脚本在 _engine/sc-pipeline/scripts 下。
-      #   查表这件事本来就该应用做：它知道这一步用哪个脚本、什么参数。
-      #   命令随任务下发，执行端照着跑就行，不需要再维护第二张表。
-      plExec <- if (HAS_PLACE) place_read(APP_DIR) else NULL
-      execSid <- effective_sid
-      execVars <- flow_vars((plExec %||% list())$server %||% list(), sid = execSid)
-      execStage <- if (HAS_FLOW) flow_stage(stepId, flow_profile()) else NULL
-      execContract <- if (!is.null(execStage)) flow_execution(execStage, execVars) else NULL
-      if (!is.null(execContract) && !isTRUE(execContract$ok))
-        return(send_json(con, 409, list(ok = FALSE, code = "missing_execution_input",
-          error = paste(execContract$errors, collapse = "；"), missing = execContract$missing)))
-
-      # ---- 环节前置审：开跑之前审一次（2026-11-05）---------------------
-      #   为什么必须放在入队之前：入队之后再撤回，执行端可能已经取走了，
-      #   撤回只是把记录改成 failed，服务器上照样跑了一遍。
-      #   判法与后置审同一套（engine/stage_reviewer.R），判据仍来自 flow_spec：
-      #     block  明确不合格：上游没放行、输入不全、脚本缺失、注释依据没选
-      #     warn   有未核项或历史遗留（上游还没护照），放行但留痕
-      #     pass   全部条件齐备
-      #   为什么不像原来那样"只提示不拦"：
-      #     原来上一步没过审也照派，理由是"拦下来只会让人点不动"。
-      #     但那样一来，"处理没有偏移"就永远只能靠人看红条。
-      #     现在把"明确不合格"和"暂时判不了"分开：前者拦，后者放行并留痕。
-      #     force 放行沿用同一条规矩 —— 只接受人的身份并要写理由。
-      srPre <- NULL
-      if (isTRUE(HAS_STAGE_REVIEWER) && !identical(as.character(stepId), "all") &&
-          !identical(as.character(stepId), "config")) {
-        srPre <- tryCatch(
-          sr_preflight(APP_DIR, stepId, sid = execSid, profile = flow_profile(),
-                       V = execVars, force = isTRUE(b$force)),
-          error = function(e) list(verdict = "warn", checks = list(), blockers = list(),
-                                   error = conditionMessage(e)))
-        if (identical(as.character(srPre$verdict %||% ""), "block"))
-          return(send_json(con, 409, list(
-            ok = FALSE, code = "stage_review_blocked", step = stepId,
-            error = "开跑前审没过：这一环还不具备开跑条件，未入队、未下发。",
-            permit_id = srPre$permit_id %||% NULL,
-            blockers = srPre$blockers %||% list(),
-            checks = srPre$checks %||% list(),
-            hint = paste0("按 blockers 里的 fix 逐条补齐后重试；",
-                          "确实要现在跑，请以人的身份在页面上强制放行并写理由。"))))
-      }
-      enqCmd <- ""
-      enqArgs <- ""
-      if (!is.null(execContract)) {
-        enqCmd <- execContract$script
-        enqArgs <- paste(vapply(execContract$argv, shQuote, "", type = "sh"), collapse = " ")
-      }
-      enq <- tryCatch(exec_enqueue(stepId, session_id = execSid,
-                          script = enqCmd, script_args = enqArgs),
-                       error = function(e) NULL)
-
-      if (chain_dispatch && !is.null(enq)) {
-        exec_set(enq$id, list(chain_id = active_chain$req_id, req_id = active_chain$req_id))
-      }
-
-      # ---- 质检闸门：上一步没过审 ----
-      #   现在只作提示，不再拦本次点击：这次的作业由执行端按登记脚本跑，
-      #   跑完照样带 mtime 回写，事后可核。拦下来只会让人点不动。
-      #   用户要的三件事里，"处理没有偏移"只能靠这个卡住：
-      #   上一步跑完了但没跑质检，或者质检没过，就说明没人核过
-      #   "是不是在服务器上跑的、脚本对不对、有没有跳步"。
-      #   这时候放它往下走，后面的产物就没有可信来源了。
-      #   force=true 是留给人的手动放行，不是默认路径。
-      # 注意：reviewWarn 必须先在块外声明。
-      #   原来只在 if 里面赋值，外面根本读不到 —— 页面永远显示不出"上一步没过审"，
-      #   等于这条提示从来没生效过。
-      reviewWarn <- ""
-      prevQual <- NULL
-      if (HAS_FLOW && !identical(as.character(stepId), "all") &&
-          !identical(as.character(stepId), "config") &&
-          !isTRUE(b$force)) {
-        flowOrder <- flow_run_order()
-        idx <- match(as.character(stepId), flowOrder)
-        # 只认当前这条分析的进度与质检结论。
-        #   闸门原来读全局文件，等于拿别人的质检结论给这一步放行 ——
-        #   比显示错结果更严重，所以这里必须按分析号过滤。
-        gateSid <- if (nzchar(as.character(b$session_id %||% "")))
-          as.character(b$session_id) else cur_sid()
-        dNow <- remote_steps_read(gateSid)
-        # 不再读服务器那份质检结论（state/flow_progress.json）。
-        #   那份是服务器上 reviewer.R 判的，而服务器上的 reviewer.R 是另一份副本，
-        #   按老流程的阶段名单写的，annotate / figs / enrich 都不认识 ——
-        #   拿它判定，这三个环节永远"没有质检"，提示永远挂着。
-        #   现在统一以应用侧质检（engine/quality.R）为准：判据是回写状态、
-        #   产物清单、运行目录、日志有无失败字样，这些应用自己都能核。
-        gNow <- list(stages = list())
-        if (!is.na(idx) && idx > 1) {
-          prevId <- flowOrder[idx - 1]
-          prevRec <- Filter(function(x) identical(as.character(x$id %||% ""), prevId), (dNow$steps %||% list()))
-          prevDone <- length(prevRec) > 0 &&
-            identical(as.character(prevRec[[length(prevRec)]]$status %||% ""), "done")
-          if (prevDone) {
-            # 判据只有一份：应用侧质检（engine/quality.R）。
-            #   不再是服务器那份 —— 服务器上的 reviewer.R 是另一份副本，
-            #   阶段名单按老流程写，annotate / figs / enrich 都不认识。
-            #   用两套账去判，结果就是这两套账互相打架：
-            #   应用这边说没跑过，服务器那边说阶段名不对，人看到两行红字，
-            #   却不知道该信哪一行、该改什么。
-            if (isTRUE(HAS_QUALITY)) {
-              qPrev <- tryCatch(qual_of(gateSid, prevId), error = function(e) NULL)
-              qOk <- !is.null(qPrev) && identical(as.character(qPrev$verdict %||% ""), "pass")
-              if (!qOk) {
-                ptitle <- if (HAS_FLOW) { x <- flow_stage(prevId); if (is.null(x)) prevId else x$title } else prevId
-                why <- if (is.null(qPrev))
-                  "应用侧还没有它的质检记录"
-                else if (identical(as.character(qPrev$verdict %||% ""), "unknown"))
-                  "应用侧质检判不了（信息不足）"
-                else "应用侧质检没过"
-                if (!is.null(qPrev) && nzchar(as.character(qPrev$note %||% "")))
-                  why <- paste0(why, "：", as.character(qPrev$note))
-                # 只作提示，作业照排：卡住按钮只会让人点不动，看不出问题在哪。
-                reviewWarn <- paste0("「", ptitle, "」已经跑完，但", why,
-                                     "；本次仍按登记脚本执行，结果会带产物时间回写，事后可核。")
-              }
-            }
-            prevQual <- tryCatch(
-              qual_prev_check(gateSid, stepId, order = flowOrder),
-              error = function(e) NULL)
-          }
-        }
-      }
-      pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
-      sid <- execSid
-      rq <- if (HAS_SESSIONS && nzchar(as.character(sid %||% "")))
-        as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% "") else ""
-      note <- as.character(b$gate_note %||% "")
-      # 「再次交给助手」时用户填的具体要求：附在已经定下的事后面。
-      #   为什么单独一段而不是混进 gate_note：两者来源不同 ——
-      #   gate_note 是流程闸门的客观答案，这一条是这一次人工追加的要求。
-      #   混在一起，事后分不清哪句是当初定的、哪句是这次补的。
-      extra <- trimws(as.character(b$req_note %||% ""))
-      if (nzchar(extra)) {
-        note <- paste0(if (nzchar(note)) paste0(note, "；") else "",
-                       "这次重新执行的额外要求：", extra)
-      }
-      ins <- remote_step_instruction(stepId, pl, session_id = as.character(sid %||% ""),
-                                     req_id = rq, gate_note = note)
-      remote_step_put(stepId, list(
-        title = (STEP_TASK[[stepId]] %||% list(title = stepId))$title,
-        status = "delegated", code = NULL,
-        note = "已交给助手，等它回写",
-        delegated_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
-        req_id = if (nzchar(rq)) rq else NULL,
-        # ---- 把「人已经定下的事」一起存下来 ----------------------------
-        #   为什么必须落盘（2026-11-03，审核第 8 条）
-        #     短指令只写「办什么 + 去哪取全文」，真正的交代在 /api/brief 里。
-        #     而 /api/brief 这条路由调 remote_step_instruction 时没传 gate_note，
-        #     于是"人已经定下的事"这句在取全文时直接消失了。
-        #     它的作用不是装饰：筛群剔群、口径选择这类决定就靠这句话往下传。
-        #     现在交付时把它存进记录，/api/brief 再按 step+session 取回来。
-        gate_note = if (nzchar(note)) note else NULL,
-        session_id = if (nzchar(as.character(sid %||% ""))) as.character(sid) else NULL))
-      # ---- 建一个查询作业：交出去之后由它负责「还没回写就再查一次」 ----
-      #   以前三类作业只有 fetch 和 rework 有创建点，poll 一次都不会被建，
-      #   所以「关掉标签页也接着推进」只写在注释里，实际从未发生。
-      #   这个作业的存在意义很具体：交付后 10 分钟还没回写，
-      #   由 poller 自动发一条「只查不重跑」的查询，而不是等人来问。
-      if (DB_READY) {
-        tryCatch({
-          vinfo <- db_api_version_of(DB_CON, as.character(sid %||% ""))
-          if (!is.null(vinfo) && nzchar(vinfo$version_id %||% "")) {
-            rid0 <- db_ensure_run(DB_CON, vinfo$version_id,
-                                  if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
-                                  work_root = as.character(V$run_dir %||% ""))
-            org <- db_rows(DB_CON,
-              "SELECT run_id FROM runs WHERE version_id = ? ORDER BY started_at LIMIT 1",
-              list(vinfo$version_id))
-            if (nrow(org)) rid0 <- as.character(org$run_id[1])
-            no <- db_next_attempt_no(DB_CON, rid0, stepId)
-            aid0 <- db_new_id("att")
-            db_tx(DB_CON, function() {
-              DBI::dbExecute(DB_CON,
-                "INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,step_id,
-                   attempt_no,req_id,status,started_at,payload)
-                 VALUES(?,?,?,?,?,?,?,?,?,?)",
-                list(aid0, rid0, vinfo$version_id,
-                     if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
-                     stepId, no, if (nzchar(rq)) rq else NA, "delegated",
-                     db_now(), db_json(list(via = "/api/run", run_dir = V$run_dir %||% ""))))
-              # 六要素齐全才建：缺一项就不建，而不是建一个发不出去的作业。
-              #   这正是 A6 要求的「缺字段不发消息、不标分析失败」。
-              DBI::dbExecute(DB_CON,
-                "INSERT INTO poll_jobs(job_id,kind,owner_key,run_id,version_id,step_id,
-                   attempt_id,query_request_id,payload,state,next_check_at,created_at,updated_at)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                list(paste0("job-poll-", aid0), "poll",
-                     if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
-                     rid0, vinfo$version_id, stepId, aid0,
-                     if (nzchar(rq)) rq else paste0("q-", aid0),
-                     db_json(list(project = vinfo$project_id, run_dir = V$run_dir %||% "")),
-                     "pending", db_iso_add(600), db_now(), db_now()))
-            })
-          }
-        }, error = function(e) NULL)
-      }
-
-      # ---- 台账 start 行：交给执行端去追加 ----
-      #   为什么在"交出去"这一刻就写，而不是等跑完：
-      #   reviewer.R 要求每个阶段既有 start 又有 finish。
-      #   只写 finish 的话它会判"台账里没有 start 记录 —— 这一步没经过统一入口"。
-      #   这条正是上一版被判 REFUSED 的直接原因之一。
-      if (isTRUE(HAS_LEDGER_OUT)) {
-        tryCatch(led_out_push(
-          sid = as.character(sid %||% ""), step = stepId, kind = "start",
-          run_dir = as.character(V$run_dir %||% ""),
-          note = "由应用在交付执行时登记"), error = function(e) NULL)
-      }
-      # 进会话的那一段必须短：平台对载荷有长度上限，超了直接判无效，
-      #   而一份能照着执行的指令必然是长文。所以把长文留在应用里，
-      #   进会话的只写「办什么 + 去哪取全文」，助手现取一条完整指令。
-      #   以前是把长文截断塞进去，助手只拿到半截，剩下靠自己补 —— 那正是跑偏的来源。
-      stage <- if (HAS_FLOW) flow_stage(stepId) else NULL
-      briefPath <- paste0("/api/brief?step=", utils::URLencode(stepId, reserved = TRUE),
-                          if (nzchar(as.character(sid %||% "")))
-                            paste0("&session=", utils::URLencode(as.character(sid), reserved = TRUE)) else "",
-                          if (nzchar(rq))
-                            paste0("&req=", utils::URLencode(rq, reserved = TRUE)) else "")
-      short <- paste(c(
-        "【来自 个性化分析助手】",
-        paste0("要办的事：在服务器上执行「",
-               (STEP_TASK[[stepId]] %||% list(title = stepId))$title, "」。",
-               if (!is.null(stage)) paste0("（阶段 id=", stage$id, "，skill=", stage$skill, "）") else ""),
-        "第一步先取完整指令（顺序、命令、环节、回写格式都在里面）：",
-        paste0("GET ", briefPath, "  取 text 字段，照它执行。"),
-        "按里面的顺序跑，每个环节结束回写 /api/step/import（状态、运行目录、产物清单、日志都要写全）。",
-        "不用另外跑质检脚本：质检由应用按你的回写内容自己判。"
-      ), collapse = "\n")
-      return(send_json(con, 200, list(
-        ok = TRUE, delegated = TRUE, step = stepId,
-        title = (STEP_TASK[[stepId]] %||% list(title = stepId))$title,
-        instruction = ins,
-        brief_path = briefPath,
-        session_text = short,
-        # 上一步质检的检查结果：这一版只展示，不拦。
-        #   要让它变成闸门，得单独一轮改动 + 明确说"现在开始拦"，
-        #   不能一边说"不影响流程"一边偷偷卡住按钮。
-        # 作业是否真的进了执行队列。
-        #   页面拿它来判断"这件事到底派出去没有"：注入会话只是通知，
-        #   入队才是执行的前提，两者不能混成一句成败。
-        exec_queued = !is.null(enq),
-        review_warn = if (nzchar(reviewWarn)) reviewWarn else NULL,
-        prev_quality = prevQual,
-        msg = "这一步要在服务器上跑，已把它交给助手执行；结果回写后这里会变成实际状态。")))
-    }
-    r <- tryCatch({
-      if (HAS_NOTEBOOK) {
-        session_nb <- sess_find(APP_DIR, cur_sid())
-        if (is.null(session_nb) || !identical(session_nb$mode %||% "local", "local") ||
-            !identical(normalizePath(session_nb$run_dir, mustWork = TRUE), normalizePath(runDir, mustWork = TRUE)))
-          stop("Cannot establish local notebook session binding")
-        nb_bind_local(runDir, APP_DIR, session_nb$id)
-      }
-      launch_step(stepId, runDir)
-    }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    out <- run_enqueue(con, req, q, body_json(), owner_ctx,
+                       current_sid = cur_sid(), via = "/api/run")
+    return(send_json(con, out$pa_status, out$pa_body))
   }
 
   # 助手回写某一步的执行结果。
@@ -3824,11 +4505,198 @@ serve_request <- function(con, req) {
       return(send_json(con, 400, list(ok = FALSE, code = "invalid_step_status",
         error = paste0("不支持的回写状态：", stv, "；未更新步骤，不能把未知状态当完成。"))))
     code <- b$code
+    # ---- 无请求号的历史在途任务：按 exec 任务派生一次性绑定 ----------
+    #   为什么需要这条：/api/run 早期入队时没把请求号记到任务上，
+    #   执行端回写只能发空 req_id，而 callback_owner 要求非空且 attempt 已登记。
+    #   结果就是作业在集群上跑完了，应用这边永远收不到结果。
+    #   这里不放松鉴权，反而多加几道核对 —— 客户端自报一个 exec_id 不足以写任何记录，
+    #   必须同时满足：任务在案、session 一致、step 一致、状态合法、
+    #   script 非空、记录属主可从库里确认、记录结果目录非空。
+    # 本次已验收回写体：补录准入用它绑定的 rel+md5 判「新文件是否被验收过」。
+    verified_payload <- function() {
+      rq0 <- as.character(b$req_id %||% "")
+      if (!nzchar(rq0) || !isTRUE(DB_READY)) return(NULL)
+      row <- tryCatch(DBI::dbGetQuery(DB_CON,
+        paste0("SELECT payload FROM step_attempts WHERE req_id = ? AND step_id = ? ",
+               "AND status = 'verified' ORDER BY verified_at DESC LIMIT 1"),
+        list(rq0, sid_step)), error = function(e) NULL)
+      if (is.null(row) || !nrow(row)) return(NULL)
+      tryCatch(jsonlite::fromJSON(row$payload[[1]], simplifyVector = FALSE),
+               error = function(e) NULL)
+    }
+    rq_in <- trimws(as.character(b$req_id %||% ""))
+    if (!nzchar(rq_in)) rq_in <- trimws(as.character(b$req_id_carried %||% ""))
+    exid_in <- trimws(as.character(b$exec_id %||% ""))
+    if (!nzchar(rq_in) && nzchar(exid_in) && HAS_SESSIONS) {
+      sid_in <- trimws(as.character(b$session_id %||% ""))
+      stp_in <- trimws(as.character(b$step %||% ""))
+      hit <- Filter(function(it) identical(as.character(it$id %||% ""), exid_in),
+                    tryCatch(exec_read()$items, error = function(e) list()) %||% list())
+      ex0 <- if (length(hit)) hit[[1]] else NULL
+      ok_ex <- exec_compat_ok(ex0, sid_in, stp_in)
+      if (!ok_ex)
+        return(send_json(con, 409, list(ok = FALSE, code = "exec_binding_invalid",
+          error = "回写带了 exec_id，但它不对应本记录本步骤的在案任务；未写入。",
+          exec_id = exid_in, session_id = sid_in, step = stp_in)))
+      # 属主只从库里这条记录读，不看请求头，也不看客户端自报。
+      own <- tryCatch(db_scalar(DB_CON, "SELECT owner_key FROM sessions WHERE session_id = ?",
+                                list(sid_in)), error = function(e) NA)
+      if (!DB_READY || length(own) != 1L || is.na(own) || !nzchar(as.character(own)))
+        return(send_json(con, 403, list(ok = FALSE, code = "exec_binding_not_owner",
+          error = "无法从库里确认这条记录的属主；未写入。")))
+      # 结果目录必须已有值：没有它就无从判断产物落在哪里。
+      rd0 <- if (!DB_READY) NA_character_ else tryCatch(
+        db_scalar(DB_CON, "SELECT run_dir FROM sessions WHERE session_id = ?", list(sid_in)),
+        error = function(e) NA_character_)
+      rd0 <- trimws(as.character(rd0))
+      if (length(rd0) != 1L || is.na(rd0) || !nzchar(rd0))
+        return(send_json(con, 409, list(ok = FALSE, code = "exec_binding_no_rundir",
+          error = "这条记录还没有结果目录，无法核对产物归属；未写入。")))
+      # 派生一个稳定请求号，只用于这条任务，不借用识别请求号，也不改任务本身。
+      derived <- paste0("exec-", exid_in)
+      reg <- tryCatch(attempt_register(APP_DIR, sid_in, derived, origin = "exec_task_compat"),
+                      error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+      if (!isTRUE(reg$ok))
+        return(send_json(con, 409, list(ok = FALSE, code = "exec_binding_attempt_failed",
+          error = paste0("这条任务的兼容 attempt 没能建立：", as.character(reg$error %||% "未知")),
+          exec_id = exid_in)))
+      # 审计旁证：attempt.json 是不可变事实，不往里补字段；
+      #   来源与任务原始创建时间单独留一份，只写一次。
+      tryCatch({
+        side <- file.path(attempt_dir(APP_DIR, sid_in, derived), "binding_source.json")
+        if (!file.exists(side)) {
+          sess_write_json(side, list(
+            binding_source = "exec_task_compat",
+            exec_id = exid_in,
+            exec_created_at = as.character(ex0$created_at %||% ""),
+            exec_script = as.character(ex0$script %||% ""),
+            session_id = sid_in, step = stp_in,
+            owner_key = as.character(own),
+            run_dir = rd0,
+            derived_req_id = derived,
+            noted_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            rule = "服务端按已存在任务一次性派生；未借用识别请求号，未改写任务字段"))
+          Sys.chmod(side, "0600")
+        }
+      }, error = function(e) NULL)
+      b$req_id <- derived
+      b$binding_source <- "exec_task_compat"
+      b$exec_bound_id <- exid_in
+      # 本题次的开始时间只认服务端任务创建时间，不采信客户端自报的 started_at。
+      #   为什么必须无条件覆盖：产物 mtime 的基线就是这个值（下面 start0 取它）。
+      #   客户端只要把 started_at 写早一点，上一轮的旧产物就"晚于本次开始"，
+      #   于是旧结果被当成这一轮的新结果写进来 —— 数字齐全、时间齐全，看不出错。
+      #   自报值留一份在旁边，只为核对，不参与判定。
+      if (nzchar(trimws(as.character(b$started_at %||% ""))) &&
+          !identical(trimws(as.character(b$started_at)), trimws(as.character(ex0$created_at %||% ""))))
+        b$client_started_at_ignored <- as.character(b$started_at)
+      # ---- 让这条派生 attempt 成为本步的选中项 ------------------------
+      #   为什么必须做：回写存进 attempt 之后，还要过 attempt_selected 那一关
+      #   才会投影到 remote_steps 与页面。它比的是"本步 pending 头"与这条 req，
+      #   派生号不在里面，selected 就是 false —— 结果只落进 attempt 文件，
+      #   页面永远看不到 running/done，等于"跑完了但界面不动"。
+      #   前提两条，缺一不设：
+      #     · 本步当前没有别的请求号在等回写（空，或就是这条派生号）
+      #     · 这条 exec 仍是该分析该步骤最近的一条任务
+      #   第二条专门防"旧任务顶掉后来者"：新任务一建就变成 latest，
+      #   此后旧任务的回写只能走受限发布（只存 attempt），不改选中项。
+      cur_pend <- tryCatch(as.character(sess_get_pending(APP_DIR, sid_in, slot = "step") %||% ""),
+                           error = function(e) "")
+      latest_ex <- tryCatch(exec_latest_for(stp_in, sid_in), error = function(e) NULL)
+      is_latest <- !is.null(latest_ex) &&
+        identical(as.character(latest_ex$id %||% ""), exid_in)
+      can_select <- is_latest && (!nzchar(cur_pend) || identical(cur_pend, derived))
+      sel_state <- if (!can_select) "skipped_other_pending_or_newer_task" else "set"
+      if (can_select) {
+        pset <- tryCatch(sess_set_pending(APP_DIR, sid_in, derived, slot = "step"),
+                         error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+        if (!isTRUE(pset$ok))
+          sel_state <- paste0("set_failed:", as.character(pset$error %||% "unknown"))
+      }
+      tryCatch({
+        side2 <- file.path(attempt_dir(APP_DIR, sid_in, derived), "binding_select.json")
+        if (!file.exists(side2)) {
+          sess_write_json(side2, list(
+            exec_id = exid_in, step = stp_in, derived_req_id = derived,
+            pending_before = cur_pend, exec_is_latest = is_latest,
+            select_action = sel_state,
+            noted_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            rule = "仅当本步无其他待回写号、且该任务仍是最新任务时才设为选中项"))
+          Sys.chmod(side2, "0600")
+        }
+      }, error = function(e) NULL)
+      b$started_at <- as.character(ex0$created_at %||% "")
+    }
     binding <- callback_owner(b)
     if (!isTRUE(binding$ok)) return(send_json(con, 409, binding))
     sid_chk <- binding$sid
     b$session_id <- sid_chk
     b$req_id <- binding$req_id
+    # Task-bound callbacks get their execution context from the bound record,
+    # never from the ephemeral current selection. A caller-supplied run_dir is
+    # accepted only when it is the same directory.
+    step_cap <- if (isTRUE(DB_READY)) tryCatch(
+      record_capability(DB_CON, APP_DIR, sid_chk, list(key = NA_character_)),
+      error = function(e) NULL) else NULL
+    record_run_dir <- record_trim((step_cap %||% list())$run_dir)
+    if (!nzchar(record_run_dir))
+      return(send_json(con, 409, list(ok = FALSE, code = "record_run_dir_missing",
+        session_id = sid_chk,
+        error = "这条记录没有 run_dir，回写无法定位产物；未写入任何记录。")))
+    callback_run_dir <- record_trim(b$run_dir)
+    same_run_dir <- function(a, c) identical(
+      sub("/+$", "", gsub("\\\\", "/", record_trim(a))),
+      sub("/+$", "", gsub("\\\\", "/", record_trim(c))))
+    if (nzchar(callback_run_dir) && !same_run_dir(callback_run_dir, record_run_dir))
+      return(send_json(con, 409, list(ok = FALSE, code = "record_run_dir_mismatch",
+        session_id = sid_chk, run_dir = record_run_dir,
+        error = "回写的 run_dir 不属于这条分析记录；未写入任何记录。")))
+    b$run_dir <- record_run_dir
+    # ---- 活跃执行保护 ------------------------------------------------
+    #   这一环还有执行端的任务在管时，只有那个任务本人能写终态。
+    #   判据是 exec_id 绑定，不是"log 非空"——补一句 log 就能过，那种判据没用。
+    #   执行端真实失败、准备阶段失败都带 exec_id，走同一条正常通路，不受影响。
+    if (HAS_EXEC_GUARD) {
+      # 守卫自己出错时不能当成放行。
+      #   19:11 那次故障的本质就是"没人敢拦"，如果守卫抛异常就 null，
+      #   等于给同类回写又开了一道门。这里一律按服务不可用拒收，零写入。
+      gd <- tryCatch({
+        b2 <- import_started_at_guard(b)
+        list(ok = TRUE, b = b2, g = import_active_exec_guard(b2, sess_dir = {
+          s_ctx0 <- tryCatch(sess_find(APP_DIR, binding$sid), error = function(e) NULL)
+          as.character((s_ctx0 %||% list())$run_dir %||% "")
+        }))
+      }, error = function(e) list(ok = FALSE, err = conditionMessage(e)))
+      if (!isTRUE(gd$ok)) {
+        tryCatch(import_guard_audit(STATE_DIR, b, list(code = "exec_guard_error")),
+                 error = function(e) NULL)
+        return(send_json(con, 503, list(
+          ok = FALSE, code = "exec_guard_unavailable", step = as.character(b$step %||% ""),
+          wrote_state = FALSE, wrote_started_at = FALSE,
+          error = paste0("执行保护模块出错，无法确认这一环是否已有执行端在管：",
+                         as.character(gd$err %||% "未知"), "。按拒收处理，状态与开始时间都不改。"))))
+      }
+      b <- gd$b
+      g0 <- gd$g
+      if (!is.null(g0)) {
+        tryCatch(import_guard_audit(STATE_DIR, b, g0), error = function(e) NULL)
+        code0 <- if (identical(as.numeric(g0$http %||% 409), 503)) 503 else 409
+        return(send_json(con, code0, g0))
+      }
+    }
+    # 物种/组织：执行端没带就按本记录自己的会话上下文补齐。
+    #   注释环用它们判断参考词典是否适用；值来自用户建记录时的选择，
+    #   是本应用侧的上下文，不是回写体自报，也不允许跨记录借。
+    if (!nzchar(as.character(b$species %||% "")) ||
+        !nzchar(as.character(b$tissue %||% ""))) {
+      s_ctx <- tryCatch(sess_find(APP_DIR, sid_chk), error = function(e) NULL)
+      if (!is.null(s_ctx)) {
+        if (!nzchar(as.character(b$species %||% "")))
+          b$species <- as.character(s_ctx$species %||% "")
+        if (!nzchar(as.character(b$tissue %||% "")))
+          b$tissue <- as.character(s_ctx$tissue %||% "")
+      }
+    }
     chain_check <- rc_validate(b)
     if (!is.null(chain_check)) return(send_json(con, chain_check$code, chain_check$body))
     if (!DB_READY) return(send_json(con, 503, list(ok = FALSE, error = "日志数据库不可用，未接收回写")))
@@ -3845,8 +4713,25 @@ serve_request <- function(con, req) {
                       exec_read()$items %||% list())
         if (length(hit)) {
           it0 <- hit[[1]]
-          ok_exec <- identical(as.character(it0$session_id %||% ""), sid_chk) &&
-            as.character(it0$status %||% "") %in% c("running", "queued")
+          st0 <- as.character(it0$status %||% "")
+          ok_base <- identical(as.character(it0$session_id %||% ""), sid_chk) &&
+            identical(as.character(it0$step %||% ""), sid_step)
+          ok_exec <- ok_base && st0 %in% c("running", "queued")
+          if (!ok_exec && ok_base && st0 %in% c("done", "failed")) {
+            # 终态任务的再次回写：只放行「这条任务仍是该步最新一条」的情形。
+            #   为什么原来一律拒绝是错的：作业真跑完了、判定却因判据缺陷拒了，
+            #   exec 随即被记成 failed，于是判据修好之后同一个 exec 再也交不进来 ——
+            #   只能整步重跑，白烧几小时集群。实测就是这么卡住的。
+            #   放行不等于放宽：仍要 session/step 一致、无后继任务、
+            #   run_dir 与库里一致，三项缺一即拒。
+            lat0 <- tryCatch(exec_latest_for(sid_step, sid_chk), error = function(e) NULL)
+            vin0 <- tryCatch(db_api_version_of(DB_CON, sid_chk), error = function(e) NULL)
+            rd_db <- trimws(as.character((vin0 %||% list())$run_dir %||% ""))
+            rd_in <- trimws(as.character(b$run_dir %||% ""))
+            ok_exec <- !is.null(lat0) &&
+              identical(as.character(lat0$id %||% ""), exid) &&
+              (!nzchar(rd_db) || !nzchar(rd_in) || identical(rd_db, rd_in))
+          }
           if (ok_exec) {
             own <- tryCatch(db_scalar(DB_CON,
               "SELECT owner_key FROM sessions WHERE session_id=?", list(sid_chk)),
@@ -3940,6 +4825,24 @@ serve_request <- function(con, req) {
       }
       start0 <- norm_ts(b$started_at %||% (prev$started_at %||% ""))
       bad <- list()
+      # pack 的 ZIP 不看跨机时间，改看"是不是这次那个作业产生的"。
+      #   作业号从服务端自己的 exec 记录里取，不采信回写自报的那一份。
+      execJob <- ""
+      execJobNum <- ""
+      if (identical(sid_step, "pack")) {
+        exid0 <- trimws(as.character(b$exec_id %||% ""))
+        if (nzchar(exid0)) {
+          d0 <- tryCatch(exec_read(), error = function(e) list(items = list()))
+          for (it0 in (d0$items %||% list())) {
+            if (identical(as.character(it0$id %||% ""), exid0)) {
+              execJob <- as.character(it0$job_id %||% "")
+              execJobNum <- as.character(it0$job_number %||% "")
+              break
+            }
+          }
+        }
+      }
+      pbFail <- list()
       for (a in arts) {
         if (is.character(a) && length(a) == 1L) {
           bad[[length(bad) + 1L]] <- list(rel = as.character(a), mtime = "", reason = "缺少 mtime")
@@ -3949,10 +4852,38 @@ serve_request <- function(con, req) {
         rel <- as.character(a$rel %||% a$path %||% "")
         if (!nzchar(m)) {
           bad[[length(bad) + 1L]] <- list(rel = rel, mtime = "", reason = "缺少 mtime")
+        } else if (isTRUE(HAS_PACK_BINDING) && identical(sid_step, "pack") &&
+                   identical(rel, PACK_ZIP_REL)) {
+          # pack 的打包产物：只认"本次作业 + 节点实算事实"这条链。
+          #   走这里就不再比跨机时间 —— 两台的时钟差会让刚打好的包被当成旧的。
+          pb <- tryCatch(
+            pack_zip_binding(rel, a, b$sge_job, b$pack_zip, execJob, sid_step,
+                             exec_jobnum = execJobNum, zip_structure = b$zip_structure),
+            error = function(e) list(ok = FALSE, code = "binding_error",
+                                     why = conditionMessage(e)))
+          if (!isTRUE(pb$ok)) {
+            pbFail[[length(pbFail) + 1L]] <- list(
+              rel = rel, mtime = m, code = as.character(pb$code %||% ""),
+              reason = as.character(pb$why %||% ""),
+              exec_job = execJob)
+          }
         } else if (nzchar(start0) && m < start0) {
-          bad[[length(bad) + 1L]] <- list(rel = rel, mtime = m,
-                                          reason = paste0("早于本题次开始时间 ", start0))
+          am <- tolower(as.character(a$md5 %||% a$checksum %||% ""))
+          # 只有 pack 复用 PPT 来源清单这一种情形允许早于本题次开始；
+          #   本步骤旧产物、无关旧文件、跨 session、旧 PPT 版本都仍然拒。
+          ok_up <- isTRUE(HAS_FRESHNESS) && isTRUE(tryCatch(
+            freshness_manifest_exempt(rel, am, sid_step, sid_chk, DB_CON),
+            error = function(e) FALSE))
+          if (!ok_up)
+            bad[[length(bad) + 1L]] <- list(rel = rel, mtime = m,
+                                            reason = paste0("早于本题次开始时间 ", start0))
         }
+      }
+      if (length(pbFail)) {
+        return(send_json(con, 409, list(
+          ok = FALSE, step = sid_step, code = "pack_binding_failed",
+          error = "这份打包产物没能绑定到本次作业，不能当成这次的结果写入。",
+          rejected = pbFail)))
       }
       if (length(bad)) {
         return(send_json(con, 409, list(
@@ -3977,6 +4908,46 @@ serve_request <- function(con, req) {
       #   统一 500。页面因此永远收不到进度，看着像"助手没回写"。
       session_id = if (nzchar(sid_chk)) sid_chk else NULL)
     if (!is.null(b$artifacts)) rec$artifacts <- b$artifacts
+    # 执行端带回来的依据（逐簇统计等）。
+    #   为什么要在这里接：worker 已经在回写体里发了 evidence，
+    #   但这一步的记录只挑了 artifacts 等字段，evidence 被静默丢掉 ——
+    #   于是 markers 虽然 verified，下一步筛群却拿不到真实簇号可展示、可校验。
+    #   只在带了 session 且与本次分析一致时收：依据必须属于这条分析记录，
+    #   否则就成了拿别人的簇表来给这一次做决定。
+    if (!is.null(b$evidence) && is.list(b$evidence) && nzchar(sid_chk)) {
+      ev0 <- b$evidence
+      if (is.list(ev0$cluster1_evidence)) {
+        ce <- ev0$cluster1_evidence
+        # 准入判断抽在 engine/evidence_check.R，便于用真实用例逐条验证。
+        #   任何一项不符就不写进记录：宁可没有依据，也不能让人看着
+        #   一份来路不明的簇表去做删除决定。
+        vr <- tryCatch(
+          # 这里的 step 要用本路由真实变量 sid_step。
+          #   原来写的是 stepId —— 那是别的路由里的变量，在这个作用域不存在，
+          #   于是每次都抛 object 'stepId' not found，被兜底 catch 成
+          #   「校验异常」，逐簇依据一条都存不进去。实测就是这么丢的。
+          evidence_check_cluster1(ce, step_id = as.character(sid_step),
+                                  sid = as.character(sid_chk),
+                                  artifacts = (b$artifacts %||% list())),
+          error = function(e) list(ok = FALSE, why = paste0("校验异常：",
+                                                            conditionMessage(e))))
+        if (isTRUE(vr$ok)) {
+          vce <- vr$evidence
+          vce$session_id <- sid_chk
+          ev0$cluster1_evidence <- vce
+        } else {
+          ev0$cluster1_evidence <- NULL
+          # 留一条拒绝原因，事后能查为什么这一步没有依据可展示。
+          ev0$cluster1_evidence_rejected <- list(
+            at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            session_id = sid_chk,
+            claimed_rel = as.character(ce$rel %||% ce$source_table %||% ""),
+            claimed_md5 = as.character(ce$md5 %||% ce$source_md5 %||% ""),
+            why = as.list(as.character(vr$why %||% "未说明")))
+        }
+      }
+      if (length(ev0)) rec$evidence <- ev0
+    }
     # 时间戳：页面上「这一环节花了多久」全靠这两个字段。
     #   执行端给了就用它给的（那是服务器上的真实时间）；
     #   没给就记下这次回写的时刻 —— 至少能算「交出去到现在过了多久」。
@@ -4031,21 +5002,350 @@ serve_request <- function(con, req) {
         rec$started_at <- prev$started_at
     }
     rec$req_id <- b$req_id
+    # 这一 req 之前到底验收过没有。
+    #   判据只能来自数据库：step_attempts 里同一 session、同一 req、同一 step
+    #   且 status=verified 的行。terminal 里写着 done 不算证据 ——
+    #   「申报 done」和「验收通过」是两件事：判定器拒绝时 terminal 一样写成 done，
+    #   选中分支还可能在判定之前就短路返回。只看 terminal 会把失败当成功。
+    verified_before <- function() {
+      rq0 <- as.character(b$req_id %||% "")
+      if (!nzchar(rq0)) return(list(ok = FALSE, why = "no_req_id"))
+      if (!isTRUE(DB_READY)) return(list(ok = FALSE, why = "db_not_ready"))
+      n <- tryCatch(
+        db_scalar(DB_CON,
+          paste0("SELECT COUNT(*) FROM step_attempts ",
+                 "WHERE req_id = ? AND step_id = ? AND status = 'verified' ",
+                 "AND json_extract(payload, '$.session_id') = ?"),
+          list(rq0, sid_step, sid_chk)),
+        error = function(e) {
+          # 查询失败一律按未验收处理。宁可让执行端多等一轮，
+          # 也不能因为查不到就当成已通过。
+          try(message("[step/import] verified_before: ", conditionMessage(e)), silent = TRUE)
+          NULL
+        })
+      if (is.null(n) || !length(n) || is.na(n)) return(list(ok = FALSE, why = "db_error"))
+      list(ok = as.integer(n) > 0L,
+           why = if (as.integer(n) > 0L) "verified" else "not_verified",
+           n = as.integer(n))
+    }
     prior_attempt <- attempt_results(APP_DIR, sid_chk, b$req_id)$steps[[sid_step]]
-    if (sess_chr(prior_attempt$status) %in% c("done", "failed", "stopped"))
-      return(send_json(con, 200, list(ok=TRUE,persisted=TRUE,terminal_preserved=TRUE,
-        selected=attempt_selected(APP_DIR,sid_chk,b$req_id),readback=prior_attempt)))
+    if (sess_chr(prior_attempt$status) %in% c("done", "failed", "stopped")) {
+      vb0 <- verified_before()
+      # 两个条件都要成立：terminal 是 done（不是 failed/stopped），
+      # 且数据库里有这一 req 的 verified 行。
+      #   只看前者会把被判定器拒绝的 done 当通过；
+      #   只看后者会在 failed terminal 上误判，因为失败路径不写 step_attempts。
+      accepted_before <- isTRUE(vb0$ok) && identical(sess_chr(prior_attempt$status), "done")
+      # ---- 终态短路时也要留拒绝凭据 --------------------------------
+      #   实测踩到的坑：一旦某次申报把 attempt 写成 done，后面再回写会走这条短路，
+      #   既不重判也不留痕 —— 于是被拒过的 done 永远显示成完成。
+      #   这里按"库里有没有 verified 行"补写一份凭据，页面与下游据此显示未通过。
+      if (identical(sess_chr(prior_attempt$status), "done") && !isTRUE(accepted_before)) {
+        tryCatch({
+          side <- file.path(attempt_dir(APP_DIR, sid_chk, b$req_id),
+                            paste0("verdict_reject-", sid_step, ".json"))
+          if (!file.exists(side)) {
+            sess_write_json(side, list(
+              session_id = sid_chk, req_id = b$req_id, step = sid_step,
+              proposed_status = "done",
+              code = "not_verified",
+              reason = paste0("申报 done，但库里没有 verified 行（", as.character(vb0$why %||% ""), "）"),
+              at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+              rule = "终态短路时补记；申报保留在 attempt，本凭据只表示未通过判定"))
+            Sys.chmod(side, "0600")
+          }
+        }, error = function(e) NULL)
+      }
+      # ---- 审计重验：终态 done 但库里没有 verified 行 ------------------
+      #   这是一次「被拒过、还没解决」的申报。旧行为在这里直接短路返回，
+      #   结果是判据修好之后同一个 exec 也交不进判定，只能整步重跑。
+      #   这里只放行「同一条 req 的再次申报」，继续走判定；
+      #   首次拒绝凭据原样保留，另存一份 recheck 记录说明被哪一次取代。
+      rejudge <- identical(sess_chr(prior_attempt$status), "done") &&
+        !isTRUE(accepted_before) && identical(as.character(stv), "done")
+      if (rejudge) {
+        tryCatch({
+          side0 <- file.path(attempt_dir(APP_DIR, sid_chk, b$req_id),
+                             paste0("verdict_reject-", sid_step, ".json"))
+          if (file.exists(side0)) {
+            rj0 <- sess_read_json(side0)
+            rs0 <- file.path(dirname(side0),
+                             paste0("verdict_reject-", sid_step, ".recheck-",
+                                    format(Sys.time(), "%Y%m%d-%H%M%S"), ".json"))
+            rj0$superseded_by <- "audit_recheck"
+            rj0$recheck_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+            rj0$recheck_rule <- paste0("判据修正后的同任务审计重验；",
+                                       "首次拒绝凭据仍保留在同一目录")
+            sess_write_json(rs0, rj0)
+            Sys.chmod(rs0, "0600")
+          }
+        }, error = function(e) NULL)
+      }
+      # ---- 已验收同任务的「只补决策依据」窄通道 ----------------------
+      #   背景：accepted 之后再发一次会走下面的 terminal_preserved 直接返回，
+      #   新采到的逐簇依据永远落不进 remote_steps，下游筛群拿不到 29 簇。
+      #   这里只允许一件事：补证据。产物、状态、DB 一律不动；
+      #   只有「本次产物清单与已验收的一致（或本次不带产物清单）」
+      #   且新证据通过准入校验时，才合并 cluster1_evidence。
+      # ---- 补「逐样本计数 + 分组」的独立支路 ----
+      #   背景：分组（orig.ident→group）只有集群侧 RDS 里有；filter 当初回写时
+      #   没带，已验收记录里就缺这一项，final 决策卡会显示「分组未提供」。
+      #   这里允许补，但只走这一条：同 req / 同 session / 同 run_dir、已完成、
+      #   计数自洽、分组键对得上样本、产物不变、不与已有数值冲突。
+      # 状态既可能是 done，也可能已经是 verified —— 只认 done 的话，
+      #   已验收记录永远进不来这条支路，补证据会被静默跳过。
+      if (isTRUE(accepted_before) &&
+          sess_chr(prior_attempt$status) %in% c("done", "verified") &&
+          is.list(b$evidence) && is.list(b$evidence$after_drop_stats) &&
+          !is.list(b$evidence$cluster1_evidence)) {
+        tryCatch(cat(paste0(format(Sys.time(), "%H:%M:%S"), "\tgroup_supp\t",
+          "accepted=", as.character(isTRUE(accepted_before)),
+          "\tprior=", sess_chr(prior_attempt$status),
+          "\tev=", as.character(is.list(b$evidence)),
+          "\tads=", as.character(is.list(b$evidence$after_drop_stats)),
+          "\tce=", as.character(is.list(b$evidence$cluster1_evidence)), "\n"),
+          file = file.path(STATE_DIR, "group_supp_debug.log"), append = TRUE),
+          error = function(e) NULL)
+        rec0 <- tryCatch(remote_step_get(sid_step, sid = sid_chk), error = function(e) NULL)
+        mg0 <- if (exists("evidence_after_drop_check"))
+          tryCatch(evidence_after_drop_check(rec0, b$req_id, b$run_dir, sid_chk, sid_step,
+                                             b$evidence$after_drop_stats,
+                                             new_artifacts = b$artifacts %||% list()),
+                   error = function(e) list(code = "check_error", error = conditionMessage(e)))
+        else list(code = "no_guard", error = "缺少 evidence_merge.R")
+        tryCatch(cat(paste0("  mg0=", if (is.null(mg0)) "NULL" else as.character(mg0$code %||% "?"),
+          " ", if (is.null(mg0)) "" else as.character(mg0$error %||% ""), "\n"),
+          file = file.path(STATE_DIR, "group_supp_debug.log"), append = TRUE),
+          error = function(e) NULL)
+        if (is.null(mg0)) {
+          ev0 <- rec0$evidence %||% list()
+          ev0$after_drop_stats <- b$evidence$after_drop_stats
+          rec0$evidence <- ev0
+          rec0$evidence_supplemented_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+          wok0 <- tryCatch({ remote_step_put(sid_step, rec0, sid = sid_chk); TRUE },
+                           error = function(e) FALSE)
+          rb0 <- if (isTRUE(wok0)) tryCatch(remote_step_get(sid_step, sid = sid_chk),
+                                            error = function(e) NULL) else NULL
+          # 读回必须逐字段相等才报成功；只看「samples 非空」等于自欺。
+          vf0 <- if (exists("evidence_after_drop_verify"))
+            tryCatch(evidence_after_drop_verify(rb0, b$req_id, b$run_dir,
+                                                b$evidence$after_drop_stats),
+                     error = function(e) list(ok = FALSE, why = conditionMessage(e)))
+          else list(ok = FALSE, why = "缺少 evidence_merge.R")
+          if (!isTRUE(wok0) || !isTRUE(vf0$ok)) {
+            # 显式拒绝：不落进下面的 accepted 成功分支，也不谎报 merged。
+            return(send_json(con, 409, list(ok = FALSE, code = "evidence_not_persisted",
+              error = paste0("分组证据未写入或读回不一致：",
+                             if (!isTRUE(wok0)) "写回失败" else as.character(vf0$why %||% "")),
+              accepted = accepted_before)))
+          }
+          adb <- (rb0$evidence %||% list())$after_drop_stats
+          if (is.list(adb) && length(adb$samples %||% list())) {
+            tryCatch({
+              af0 <- file.path(STATE_DIR, "evidence_supplements.jsonl")
+              cat(paste0(jsonlite::toJSON(list(
+                at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+                session_id = sid_chk, step = sid_step, req_id = b$req_id %||% "",
+                kind = "after_drop_stats_supplement",
+                n_samples = length(adb$samples %||% list()),
+                n_groups = length(unique(unlist(adb$sample_group %||% list()))),
+                cells_total = as.character(adb$cells_total %||% ""),
+                note = "已验收同任务补分组证据；产物与状态未变"), auto_unbox = TRUE), "\n"),
+                file = af0, append = TRUE)
+            }, error = function(e) NULL)
+            return(send_json(con, 200, list(ok = TRUE, persisted = TRUE,
+              terminal_preserved = TRUE, evidence_merged = TRUE,
+              merged_kind = "after_drop_stats", accepted = accepted_before,
+              selected = attempt_selected(APP_DIR, sid_chk, b$req_id),
+              readback = rb0)))
+          }
+        } else {
+          # 准入没过：必须显式拒绝。
+          #   原来这里没有 else，mg0 非空时会一路落到下面的终态短路分支，
+          #   返回 accepted=TRUE + evidence_merge_skipped，等于把「拒绝」
+          #   说成「已接受但没合并」—— 调用方看不出失败，也不会来修。
+          return(send_json(con, 409, list(ok = FALSE,
+            code = "evidence_not_admitted",
+            reason = as.character(mg0$code %||% "unknown"),
+            error = as.character(mg0$error %||% "补证据准入未通过"),
+            accepted = accepted_before)))
+        }
+      }
+      evMerged <- FALSE
+      if (isTRUE(accepted_before) && identical(sess_chr(prior_attempt$status), "done") &&
+          is.list(b$evidence) && is.list(b$evidence$cluster1_evidence)) {
+        sigOf <- function(xs) {
+          v <- vapply(xs, function(a) paste0(as.character(a$rel %||% ""), ":",
+                       as.character(a$md5 %||% "")), "")
+          sort(v)
+        }
+        newA <- b$artifacts %||% list()
+        oldA <- prior_attempt$artifacts %||% list()
+        # 判据：共同项 md5 必须一致，且旧清单里的每一项都还在；
+        #   允许本次多出条目（例如把日志登记成产物）。
+        #   为什么不能要求两端完全相等：补证据这一轮往往会附带新登记的日志，
+        #   要求相等会把合法补充挡死；而只要共同项变了，就是换了产物，必须拒绝。
+        kv <- function(xs) {
+          v <- vapply(xs, function(a) as.character(a$md5 %||% ""), "")
+          names(v) <- vapply(xs, function(a) as.character(a$rel %||% ""), "")
+          v
+        }
+        nk <- kv(newA); ok_ <- kv(oldA)
+        sameArt <- TRUE
+        if (length(ok_)) {
+          miss <- setdiff(names(ok_), names(nk))
+          if (length(miss)) sameArt <- FALSE
+          shared <- intersect(names(ok_), names(nk))
+          if (length(shared) &&
+              !identical(unname(ok_[shared]), unname(nk[shared]))) sameArt <- FALSE
+        }
+        if (sameArt) {
+          ce2 <- b$evidence$cluster1_evidence
+          vr2 <- tryCatch(
+            evidence_check_cluster1(ce2, step_id = as.character(sid_step),
+                                    sid = as.character(sid_chk),
+                                    artifacts = if (length(newA)) newA else oldA),
+            error = function(e) list(ok = FALSE, why = paste0("校验异常：",
+                                                              conditionMessage(e))))
+          if (isTRUE(vr2$ok)) {
+            rec2 <- tryCatch(remote_step_get(sid_step, sid = sid_chk),
+                             error = function(e) NULL)
+            # 身份必须与本次一致：同会话重跑过时，旧 req 的记录不能拿来合并。
+            mg <- if (exists("evidence_merge_check"))
+              evidence_merge_check(rec2, b$req_id, b$run_dir, sid_chk, sid_step,
+                                   as.character((vr2$evidence %||% list())$md5 %||% ""))
+            else list(code = "no_guard", error = "缺少 evidence_merge.R")
+            if (!is.null(mg)) {
+              evMerged <- FALSE
+              evWhy2 <- as.character(mg$error %||% mg$code %||% "准入未通过")
+            } else {
+              vce2 <- vr2$evidence
+              vce2$session_id <- sid_chk
+              ev2 <- rec2$evidence %||% list()
+              ev2$cluster1_evidence <- vce2
+              rec2$evidence <- ev2
+              rec2$evidence_supplemented_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+              # 写回结果必须捕获并读回核对：
+              #   吞掉错误还报 merged，等于假报 persisted。
+              wok <- tryCatch({ remote_step_put(sid_step, rec2, sid = sid_chk); TRUE },
+                              error = function(e) FALSE)
+              rb2 <- if (isTRUE(wok)) tryCatch(remote_step_get(sid_step, sid = sid_chk),
+                                               error = function(e) NULL) else NULL
+              vf <- if (exists("evidence_merge_verify"))
+                evidence_merge_verify(rb2, b$req_id, sid_step, sid_chk,
+                                      as.character(vce2$md5 %||% ""))
+              else list(ok = FALSE, why = "缺少 evidence_merge.R")
+              if (!isTRUE(vf$ok)) {
+                evMerged <- FALSE
+                evWhy2 <- as.character(vf$why %||% "写回读回不一致")
+              }
+              # 审计：只追加，不改历史；不碰拒绝凭据、不碰 DB。
+              tryCatch({
+                af <- file.path(STATE_DIR, "evidence_supplements.jsonl")
+                cat(paste0(jsonlite::toJSON(list(
+                  at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+                  session_id = sid_chk, step = sid_step, req_id = b$req_id %||% "",
+                  kind = "cluster1_evidence_supplement",
+                  n_clusters = length(vce2$clusters %||% list()),
+                  table_md5 = as.character(vce2$md5 %||% ""),
+                  note = "已验收同任务补证据；产物与状态未变"),
+                  auto_unbox = TRUE), "
+"), file = af, append = TRUE)
+              }, error = function(e) NULL)
+              if (isTRUE(vf$ok)) evMerged <- TRUE
+            }
+          } else {
+            evMerged <- FALSE
+            evWhy2 <- as.character(vr2$why %||% "未说明")
+          }
+        }
+      }
+      if (isTRUE(evMerged))
+        return(send_json(con, 200, list(ok=TRUE, persisted=TRUE,
+          terminal_preserved=TRUE, evidence_merged=TRUE,
+          accepted=accepted_before,
+          selected=attempt_selected(APP_DIR,sid_chk,b$req_id),
+          readback=remote_step_get(sid_step, sid = sid_chk))))
+
+      if (!rejudge) {
+        # 终态已验收时也要把本次新登记的产物补进记录，否则页面上永远取不到
+        #   final_params.json / final_execution.log 这类后补的条目。
+        #   只补清单：状态、判定结论、拒绝凭据一律不动；
+        #   旧项必须全在新清单里且 md5 相同，共同项 md5 变了就是换了产物，拒绝。
+        suppP <- character(0)
+        supp_note <- ""
+        vpP <- tryCatch(verified_payload(), error = function(e) NULL)
+        curRecP <- tryCatch(remote_step_get(sid_step, sid = sid_chk),
+                            error = function(e) NULL)
+        apP <- tryCatch(artifact_supplement_apply(
+                 as.character(b$req_id %||% ""), b$artifacts %||% list(),
+                 curRecP, vpP,
+                 function(r0) remote_step_put(sid_step, r0, sid = sid_chk),
+                 function() remote_step_get(sid_step, sid = sid_chk)),
+               error = function(e) list(ok = FALSE, code = "apply_error",
+                                        error = conditionMessage(e)))
+        if (!isTRUE(apP$ok) && !identical(as.character(apP$code), "req_mismatch"))
+          return(send_json(con, 409, list(ok = FALSE,
+            code = as.character(apP$code %||% "supplement_rejected"),
+            accepted = TRUE, terminal_preserved = TRUE,
+            error = as.character(apP$error %||% "补录准入未通过"))))
+        if (identical(as.character(apP$code), "req_mismatch"))
+          supp_note <- "req_mismatch_skipped"
+        if (isTRUE(apP$wrote)) {
+          suppP <- as.character(apP$added %||% character(0))
+          prior_attempt <- apP$record %||% prior_attempt
+          tryCatch({
+            afP <- file.path(STATE_DIR, "evidence_supplements.jsonl")
+            cat(paste0(jsonlite::toJSON(list(
+              at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+              session_id = sid_chk, step = sid_step, req_id = b$req_id %||% "",
+              kind = "artifact_list_supplement", added = as.list(suppP),
+              note = "终态已验收；仅补产物清单，状态与判定结论未变"),
+              auto_unbox = TRUE), "\n"), file = afP, append = TRUE)
+          }, error = function(e) NULL)
+        }
+        return(send_json(con, 200, list(ok=TRUE,persisted=TRUE,terminal_preserved=TRUE,
+          accepted=accepted_before,
+          evidence_merge_skipped=if (exists("evWhy2")) evWhy2 else "not_attempted",
+          accepted_reason=as.character(vb0$why %||% ""),
+          artifacts_supplemented = length(suppP) > 0,
+          supplement_note = supp_note,
+          artifacts_added = as.list(suppP),
+          selected=attempt_selected(APP_DIR,sid_chk,b$req_id),readback=prior_attempt)))
+      }
+    }
     if (!attempt_selected(APP_DIR, sid_chk, b$req_id)) {
       # The same payload, artifact checks and run-chain admission above apply.
       # Judge a claimed done before persistence, without publishing session caches.
       judge <- NULL
       if (identical(stv, "done") && !identical(sid_step, "selftest")) {
         judge <- tryCatch(attempt_judge_history(DB_CON, APP_DIR, owner_ctx, b,
-          runDir = as.character(b$run_dir %||% runDir %||% ""), sid = sid_chk),
+          runDir = as.character(b$run_dir %||% ""), sid = sid_chk),
           error = function(e) list(accepted = FALSE, code = "db_report_error", error = conditionMessage(e)))
       }
       rb_attempt <- attempt_save(APP_DIR, sid_chk, b$req_id, "step", rec, sid_step)
       accepted <- is.null(judge) || isTRUE(judge$accepted)
+      # ---- 被拒的 done 必须留下"拒绝凭据" ----------------------------
+      #   为什么不能只回 409 就完事：attempt 里已经写着 done，
+      #   页面读 attempt 就显示成完成，还能放行下游的 merge。
+      #   实测就是这样：模拟只给 2 个产物的 done 被判定器拒了，
+      #   接口回 409 accepted=false，可 /api/flow 照样显示 doublet done。
+      #   这里不动 attempt（那是申报的原始事实），另存一份拒绝凭据；
+      #   页面与下游前置审读它，把这一步显示成「完成申报未通过」，不计入完成。
+      if (!accepted) {
+        tryCatch({
+          side <- file.path(attempt_dir(APP_DIR, sid_chk, b$req_id),
+                            paste0("verdict_reject-", sid_step, ".json"))
+          sess_write_json(side, list(
+            session_id = sid_chk, req_id = b$req_id, step = sid_step,
+            proposed_status = as.character(stv),
+            code = as.character((judge %||% list())$code %||% ""),
+            reason = as.character((judge %||% list())$error %||% ""),
+            at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            rule = "申报保留在 attempt；本凭据只表示这次 done 未通过判定"))
+          Sys.chmod(side, "0600")
+        }, error = function(e) NULL)
+      }
       # Preserve run-chain bookkeeping; rc_validate above remains the admission gate.
       chain_result <- rc_callback(b, !is.null(judge) && isTRUE(judge$accepted))
       if (stv %in% c("done", "failed", "stopped")) attempt_release_output(APP_DIR, sid_chk, b$req_id)
@@ -4056,8 +5356,17 @@ serve_request <- function(con, req) {
     }
     proposed_status <- rec$status
     rec <- attempt_save(APP_DIR, sid_chk, b$req_id, "step", rec, sid_step)
-    if (!identical(rec$status, proposed_status) && sess_chr(rec$status) %in% c("done","failed","stopped"))
-      return(send_json(con, 200, list(ok=TRUE,persisted=TRUE,terminal_preserved=TRUE,readback=rec)))
+    if (!identical(rec$status, proposed_status) && sess_chr(rec$status) %in% c("done","failed","stopped")) {
+      # 与上面那条短路同一个口径：terminal 是 done 且数据库里有 verified 行才算验收过。
+      #   这里额外要防的是「判定还没跑就短路」——rec 刚被 attempt_save 写成终态，
+      #   判定代码在下面 4075 之后，所以此刻 terminal 的 done 只是申报。
+      vb1 <- verified_before()
+      accepted_before1 <- isTRUE(vb1$ok) && identical(sess_chr(rec$status), "done")
+      return(send_json(con, 200, list(ok=TRUE,persisted=TRUE,terminal_preserved=TRUE,
+        accepted=accepted_before1,
+        accepted_reason=as.character(vb1$why %||% ""),
+        readback=rec)))
+    }
     # Capture only after all callback validation; retries dedupe on the received body,
     # not generated reception timestamps. Missing req_id remains explicitly unknown.
     db_run_log_append(DB_CON, owner_ctx_key(owner_ctx), sid_chk, list(
@@ -4104,7 +5413,7 @@ serve_request <- function(con, req) {
     } else if (DB_READY && stv %in% c("done", "failed")) {
       db_report <- tryCatch(
         db_api_report_step(DB_CON, APP_DIR, owner_ctx, b,
-                           runDir = as.character(b$run_dir %||% runDir %||% ""),
+                           runDir = as.character(b$run_dir %||% ""),
                            sid = sid_chk),
         error = function(e) list(accepted = FALSE, code = "db_report_error",
                                  error = conditionMessage(e)))
@@ -4115,8 +5424,7 @@ serve_request <- function(con, req) {
     #   之前放在 envcheck 的回写块里，那段永远不会被这一步执行到 ——
     #   实测表现是"回写成功、但质检记录和台账都没有"，看起来像功能没做，
     #   其实是写在了到不了的代码里。
-    qsid2 <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid2)) qsid2 <- tryCatch(sess_current_id(APP_DIR), error = function(e) "")
+    qsid2 <- sid_chk
     if (!nzchar(qsid2)) qsid2 <- "_default"
     qDone2 <- identical(as.character(rec$status %||% stv), "done")
     qRels2 <- character(0)
@@ -4163,6 +5471,8 @@ serve_request <- function(con, req) {
         !identical(as.character(sid_step), "config")) {
       srPass <- tryCatch(
         sr_admit(APP_DIR, sid_step, sid = qsid2, wb = b, verdict = db_report,
+                 set_id = (db_report %||% list())$set_id,
+                 set_id_provenance = (db_report %||% list())$set_id_provenance,
                  attempt_id = (db_report %||% list())$attempt_id %||% NULL,
                  # 把开跑前那份许可号带进护照：这样"审过才跑"这条能事后举证，
                  #   而不是只能相信"当时审了"。
@@ -4171,7 +5481,7 @@ serve_request <- function(con, req) {
                                   error = function(e) NULL)
                    as.character((lp %||% list())$permit_id %||% "") %||% NULL
                  },
-                 profile = tryCatch(flow_profile(), error = function(e) "server")),
+                 profile = tryCatch(flow_profile(qsid2), error = function(e) "server")),
         error = function(e) list(verdict = "warn", error = conditionMessage(e)))
       # 护照结论回灌给旧的质检账，保证页面上的两处结论不会互相打架。
       #   为什么不删掉 quality：页面已有读它的地方，改了会一起坏。
@@ -4213,8 +5523,7 @@ serve_request <- function(con, req) {
     sess_saved <- NULL
     sess_why <- ""
     if (HAS_SESSIONS) {
-      sid <- as.character(b$session_id %||% "")
-      if (!nzchar(sid)) sid <- tryCatch(sess_current_id(APP_DIR), error = function(e) "")
+      sid <- sid_chk
       if (nzchar(sid)) {
         # sess_set_step 失败时返回的是 list(ok = FALSE)，不是抛异常。
         #   原来这里写成 { sess_set_step(...); TRUE }，等于把返回值丢掉、
@@ -4284,6 +5593,26 @@ serve_request <- function(con, req) {
       # 未通过时把 http 码也改成 409：让「脚本按退出码判断」的调用方
       #   也不会误以为这轮回写成功了。
       if (isFALSE(db_report$accepted)) {
+        # ---- 首轮拒绝：先落凭据，再回 409 ---------------------------
+        #   为什么必须在这里写：这是"首次、已选中"的正常路径。
+        #   上面两处短路只覆盖重复回调与未选中情形；首轮拒绝不落凭据的话，
+        #   attempt 里的 done 会让 flow 继续显示成完成，下游 merge 也就跟着放行。
+        #   实测过：只给两份产物的首次 done，接口回了 409，
+        #   但 flow 依然是 done —— 正是缺了这一处。
+        tryCatch({
+          side <- file.path(attempt_dir(APP_DIR, sid_chk, b$req_id),
+                            paste0("verdict_reject-", sid_step, ".json"))
+          sess_write_json(side, list(
+            session_id = sid_chk, req_id = b$req_id, step = sid_step,
+            proposed_status = as.character(stv),
+            code = as.character(db_report$code %||% "rejected"),
+            reason = as.character(db_report$error %||% ""),
+            failed_checks = db_report$failed_checks %||% NULL,
+            at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            rule = "首轮判定拒绝；申报保留在 attempt，本凭据只表示未通过判定"))
+          Sys.chmod(side, "0600")
+          resp$reject_recorded <- file.exists(side)
+        }, error = function(e) { resp$reject_recorded <- FALSE })
         resp$ok <- FALSE
         resp$error <- if (!is.null(db_report$error)) db_report$error else
           "回写已收到，但未通过判定，不能进入下一步。详见 failed_checks 与返工单。"
@@ -4291,6 +5620,10 @@ serve_request <- function(con, req) {
         return(send_json(con, 409, resp))
       }
     }
+    if (!is.null(db_report) && isTRUE(db_report$accepted))
+      resp$auto_fetch <- tryCatch(artifact_enqueue_verified(sid_chk, b$req_id, sid_step, stv,
+        blocked = identical(as.character((srPass %||% list())$verdict %||% ""), "block")),
+        error = function(e) list(error = conditionMessage(e)))
     if (stv %in% c("done", "failed", "stopped")) attempt_release_output(APP_DIR, sid_chk, b$req_id)
     resp$chain <- rc_callback(b, !is.null(db_report) && isTRUE(db_report$accepted) &&
       !identical(as.character((srPass %||% list())$verdict %||% ""), "block"))
@@ -4330,35 +5663,61 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/stop" && identical(req$method, "POST")) {
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
-    r <- tryCatch(stop_step(runDir), error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    if (isTRUE(ctx$run_dir_remote))
+      return(send_json(con, 409, c(list(ok = FALSE, code = "stop_not_supported_server",
+        error = "目标记录在服务器模式；应用本机不能停止远端进程。"), record_cap_fields(access$cap))))
+    r <- tryCatch(stop_step(ctx$run_dir),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   if (p == "/api/status") {
     if (!DB_READY) return(send_json(con, 503, list(ok = FALSE, error = "日志数据库不可用")))
-    log_sid <- cur_sid()
-    log_key <- owner_ctx_key(owner_ctx)
-    if (!nzchar(requested_sid) || !identical(requested_sid, log_sid) ||
-        !db_run_log_authorized(DB_CON, log_key, log_sid))
-      return(send_json(con, 403, list(ok = FALSE, code = "run_log_not_owner", error = "无权读取当前分析记录")))
+    access <- record_preflight$access
+    log_sid <- as.character(record_preflight$target$sid %||% "")
+    log_key <- as.character(access$cap$owner_key %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    runDir <- ctx$run_dir
+    st$runDir <- runDir
+    st$runDirRemote <- ctx$run_dir_remote
+    can_write <- isTRUE(access$cap$can_write)
     log_view <- function() {
-      rows <- db_run_log_read(DB_CON, log_key, log_sid, 200L)
+      rows <- db_run_log_read_record(DB_CON, log_key, log_sid, 200L)
       # Historical snapshots retain original imported_at, never become live callbacks.
       received <- db_scalar(DB_CON, "SELECT MAX(received_at) FROM run_log_observations WHERE owner_key=? AND session_id=? AND provenance='callback'", list(log_key, log_sid))
       if (is.na(received %||% NA_character_)) received <- character()
       list(log_entries = rows, log_read_at = db_now(),
            latest_received_at = if (length(received)) max(received) else NULL)
     }
-    if (is.null(runDir)) return(send_json(con, 200, c(list(ok = TRUE, status = "unknown", log = ""), log_view())))
+    cap_head <- c(list(session_id = log_sid, mode = ctx$mode,
+                       run_dir = enc2utf8(gsub("\\\\", "/", runDir))),
+                  record_cap_fields(access$cap))
     # 服务器模式：本机没有进程可看，状态只能来自助手回写。
     #   读的是 remote_steps.json —— 不然页面永远显示"空闲"。
     if (isTRUE(st$runDirRemote)) {
       # 只报当前这条分析的进度：全局表里混着别的分析时，
       #   页面上的状态灯会显示别人跑到哪了。
-      d <- remote_steps_read(cur_sid())
+      d <- remote_steps_read(log_sid)
+      d$steps <- lapply(d$steps, function(x) {
+        if (!nzchar(record_trim(x$session_id))) x$session_id <- log_sid
+        if (!nzchar(record_trim(x$run_dir))) x$run_dir <- runDir
+        x
+      })
       for (x in d$steps) {
-        if (nzchar(as.character(x$imported_at %||% ""))) {
+        if (isTRUE(can_write) && nzchar(as.character(x$imported_at %||% ""))) {
           # Do not re-import snapshots already captured by this version.
           known <- db_scalar(DB_CON, "SELECT COUNT(*) FROM run_log_observations WHERE owner_key=? AND session_id=? AND step_id=? AND provenance='callback'",
                              list(log_key, log_sid, as.character(x$id)))
@@ -4369,18 +5728,21 @@ serve_request <- function(con, req) {
         }
       }
       projection <- remote_status_projection(d$steps)
-      return(send_json(con, 200, c(list(ok = TRUE, remote = TRUE,
+      return(send_json(con, 200, c(cap_head, list(ok = TRUE, remote = TRUE,
         step = NULL, code = NULL, log = "", steps = d$steps), projection, log_view())))
     }
-    step_is_running(runDir)          # 顺便把「假运行」纠正掉
+    # A shared read must not write step_state.json. Only the owner may perform
+    # the stale-pid correction; shared readers just observe the stored state.
+    if (isTRUE(can_write)) step_is_running(runDir)
     s <- read_step_state(runDir)
     logtxt <- read_utf8_complete(step_log_file(runDir))
-    if (nzchar(logtxt)) db_run_log_append(DB_CON, log_key, log_sid, list(
+    if (isTRUE(can_write) && nzchar(logtxt)) db_run_log_append(DB_CON, log_key, log_sid, list(
       step_id = s$step, req_id = "", status = s$status, provenance = "local_snapshot",
       source = "existing run.log (complete UTF-8 content snapshot; not deduplicated stdout)",
       source_at = format(file.info(step_log_file(runDir))$mtime, "%Y-%m-%dT%H:%M:%S"),
       content = logtxt), identity = list(step = s$step, status = s$status, content = logtxt))
-    return(send_json(con, 200, c(list(ok = TRUE, log = substr(logtxt, max(1L, nchar(logtxt) - 40000L + 1L), nchar(logtxt))), s, log_view())))
+    return(send_json(con, 200, c(cap_head, list(ok = TRUE, remote = FALSE,
+      log = substr(logtxt, max(1L, nchar(logtxt) - 40000L + 1L), nchar(logtxt))), s, log_view())))
   }
 
   # 环境体检结果。
@@ -4389,10 +5751,16 @@ serve_request <- function(con, req) {
   #     不能读本机运行目录里的文件（那个目录在服务器上，本机不存在；
   #     就算存在也是本机的旧数据，拿它当服务器结果是错的）。
   if (p == "/api/envcheck") {
-    if (HAS_SESSIONS && nzchar(cur_sid()) &&
-        !identical(as.character(sess_find(APP_DIR, cur_sid())$mode %||% "local"), "local")) {
-      sid <- cur_sid()
-      ss <- sess_find(APP_DIR, sid)
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    if (isTRUE(ctx$run_dir_remote)) {
+      ss <- access$cap$record %||% sess_find(APP_DIR, sid)
       rr <- ss$identify$result %||% NULL
       # 只比识别槽。步骤/链条的号在这里出现，等于把别人的题次当成识别题次。
       want <- as.character(sess_get_pending(APP_DIR, sid, slot = "identify") %||% "")
@@ -4401,55 +5769,22 @@ serve_request <- function(con, req) {
       req_at <- as.character(sess_get_pending_at(APP_DIR, sid, slot = "identify") %||% "")
       imp_at <- as.character(rr$imported_at %||% "")
       after <- !nzchar(req_at) || !nzchar(imp_at) || imp_at >= req_at
-      return(send_json(con, 200, list(ok = TRUE, session_id = sid,
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = sid,
         result = rr, remote = !identical(as.character(ss$mode %||% "local"), "local"),
         stale = !is.null(rr) && !(nzchar(want) && identical(want, have) && bound && after),
         result_bound = bound, result_at = rr$imported_at %||% NULL,
         request_at = if (nzchar(req_at)) req_at else NULL,
         result_request = if (nzchar(have)) have else NULL,
-        pending_request = if (nzchar(want)) want else NULL)))
+        pending_request = if (nzchar(want)) want else NULL),
+        record_cap_fields(access$cap))))
     }
-    if (HAS_PLACE) {
-      pl <- tryCatch(place_read(APP_DIR), error = function(e) NULL)
-      if (!is.null(pl) && identical(as.character(pl$mode %||% ""), "server")) {
-        rf <- file.path(STATE_DIR, "remote_env.json")
-        # 新鲜度判定：这份结果属于「最近一次点保存并识别」那一次吗？
-        #   判据是请求标记 —— 发布时写入 last_commit.json，
-        #   回写结果时随结果一起存下。两边对得上才算本次结果。
-        #   对不上就只有参考价值：它可能是几小时前跑的另一轮，
-        #   拿它当"这次识别出来的结论"会让人以为按钮真的生效了。
-        lc <- tryCatch(read_json_file(file.path(STATE_DIR, "last_commit.json")),
-                       error = function(e) NULL)
-        want <- as.character(lc$id %||% "")
-        if (!file.exists(rf))
-          return(send_json(con, 200, list(ok = TRUE, result = NULL,
-                                         remote = TRUE, stale = FALSE,
-                                         pending_request = if (nzchar(want)) want else NULL)))
-        rr <- read_json_file(rf)
-        have <- as.character(rr$req_id %||% "")
-        # 新鲜度三条件：请求号对得上、回写自己声明绑定了请求号、
-        #   回写时间不早于本次请求发起时间。
-        #   第三条是补的：前两条只能证明"号相同"，证明不了"是这次写的"。
-        #   少了它，同一条请求隔几小时再看，页面仍会说"结果到了"。
-        bound <- isTRUE(rr$req_bound)
-        req_at <- as.character(lc$at %||% "")
-        imp_at <- as.character(rr$imported_at %||% "")
-        after <- !nzchar(req_at) || !nzchar(imp_at) || (imp_at >= req_at)
-        fresh <- nzchar(want) && nzchar(have) && identical(want, have) && bound && after
-        return(send_json(con, 200, list(ok = TRUE, result = rr, remote = TRUE,
-                                       stale = !fresh,
-                                       result_bound = bound,
-                                       result_at = if (nzchar(imp_at)) imp_at else NULL,
-                                       request_at = if (nzchar(req_at)) req_at else NULL,
-                                       result_request = if (nzchar(have)) have else NULL,
-                                       pending_request = if (nzchar(want)) want else NULL)))
-      }
-    }
-    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
-    f <- file.path(status_dir(runDir), "env_check.json")
-    if (!file.exists(f)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    f <- file.path(status_dir(ctx$run_dir), "env_check.json")
+    if (!file.exists(f))
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = sid,
+        result = NULL, remote = FALSE), record_cap_fields(access$cap))))
     r <- read_json_file(f)
-    return(send_json(con, 200, list(ok = TRUE, result = r)))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = sid,
+      result = r, remote = FALSE), record_cap_fields(access$cap))))
   }
 
   # 让应用自己去连服务器做体检。
@@ -4482,9 +5817,14 @@ serve_request <- function(con, req) {
     binding <- callback_owner(b)
     if (!isTRUE(binding$ok)) return(send_json(con, 409, binding))
     sid_req <- binding$sid
-    if (!db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, sid_req))
-      return(send_json(con, 403, list(ok = FALSE, code = "envcheck_not_owner",
-        error = "无权写入这条分析记录的环境检查结果")))
+    access <- record_access(DB_CON, APP_DIR, sid_req, owner_ctx, need = "write",
+                            require_ctx = FALSE)
+    if (!isTRUE(access$ok)) {
+      out <- access
+      out$body$code <- "envcheck_not_owner"
+      out$body$error <- "无权写入这条分析记录的环境检查结果"
+      return(send_json(con, out$status, out$body))
+    }
     b$session_id <- sid_req
     b$req_id <- binding$req_id
     obj <- b$result
@@ -4509,7 +5849,6 @@ serve_request <- function(con, req) {
     }
     if (nzchar(rq)) {
       env_sid <- sid_req
-      if (!nzchar(env_sid) && HAS_SESSIONS) env_sid <- sess_current_id(APP_DIR)
       pending_env <- if (HAS_SESSIONS && nzchar(env_sid))
         as.character(sess_get_pending(APP_DIR, env_sid, slot = "identify") %||% "") else ""
       if (!attempt_has(APP_DIR, env_sid, rq))
@@ -4533,20 +5872,25 @@ serve_request <- function(con, req) {
     #   记的是结果里自称的执行来源（checked_from），不进对话、不涉及口令。
     exec_from <- gsub("[^A-Za-z0-9._-]", "",
                       as.character(obj$checked_from %||% ""))
-    if (nzchar(exec_from) && !startsWith(as.character(obj$checked_via %||% ""), "local ") &&
-        identical(sid_req, cur_sid())) {
-      cur_p <- tryCatch(place_read(APP_DIR), error = function(e) NULL)
-      if (!is.null(cur_p) && !identical(as.character(cur_p$server$exec_pc %||% ""), exec_from)) {
-        try(place_write(APP_DIR, list(server = list(exec_pc = exec_from))), silent = TRUE)
+    if (nzchar(exec_from) && !startsWith(as.character(obj$checked_via %||% ""), "local ")) {
+      rec_p <- access$cap$place %||% list()
+      cur_pc <- as.character((rec_p$server %||% list())$exec_pc %||% "")
+      if (!identical(cur_pc, exec_from)) {
+        rec_p$server <- rec_p$server %||% list()
+        rec_p$server$exec_pc <- exec_from
+        try(sess_update(APP_DIR, sid_req, list(place = rec_p)), silent = TRUE)
       }
       obj$exec_pc <- exec_from
     }
-    rf <- file.path(STATE_DIR, "remote_env.json")
-    dir.create(dirname(rf), showWarnings = FALSE, recursive = TRUE)
-    con2 <- file(rf, open = "wb")
-    writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE,
-                                                 null = "null", digits = NA))), con2)
-    close(con2)
+    rf <- ""
+    if (!HAS_SESSIONS) {
+      rf <- file.path(STATE_DIR, "remote_env.json")
+      dir.create(dirname(rf), showWarnings = FALSE, recursive = TRUE)
+      con2 <- file(rf, open = "wb")
+      writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE,
+                                                   null = "null", digits = NA))), con2)
+      close(con2)
+    }
 
     # 同时存进「这一次分析」的记录里。
     #   为什么要存两份：remote_env.json 回答的是「最近一次识别是什么」——
@@ -4554,14 +5898,12 @@ serve_request <- function(con, req) {
     #   记录里的这一份回答的是「*这一次*识别出了什么」，切来切去也不会串。
     sess_saved <- NULL
     if (HAS_SESSIONS) {
-      sid <- as.character(b$session_id %||% "")
-      if (!nzchar(sid)) sid <- sess_current_id(APP_DIR)
+      sid <- sid_req
       if (nzchar(sid)) {
         r <- tryCatch(sess_set_identify(APP_DIR, sid, obj, req_id = if (nzchar(rq)) rq else NULL,
                                         extra = list(host = as.character(b$host %||% ""),
                                                      mode = as.character(
-                                                       tryCatch(place_read(APP_DIR)$mode,
-                                                                error = function(e) "local")))),
+                                                       (access$cap$mode %||% "local")))),
                       error = function(e) list(ok = FALSE, error = conditionMessage(e)))
         if (isTRUE(r$ok)) {
           sess_saved <- sid
@@ -4584,8 +5926,11 @@ serve_request <- function(con, req) {
     qualMade <- NULL
     # 质检与台账写入已移到 /api/step/import（原位置永远不会执行，见下）
 
-    persisted_env <- tryCatch(jsonlite::fromJSON(read_text_any(rf), simplifyVector = FALSE),
-                              error = function(e) NULL)
+    persisted_env <- if (HAS_SESSIONS) {
+      tryCatch((sess_find(APP_DIR, sid_req) %||% list())$identify$result,
+               error = function(e) NULL)
+    } else tryCatch(jsonlite::fromJSON(read_text_any(rf), simplifyVector = FALSE),
+                    error = function(e) NULL)
     if (is.null(persisted_env) ||
         !isTRUE(all.equal(persisted_env, obj, check.attributes = FALSE)))
       return(send_json(con, 500, list(ok = FALSE, code = "writeback_not_persisted",
@@ -4593,10 +5938,11 @@ serve_request <- function(con, req) {
     if (HAS_SESSIONS && is.null(sess_saved))
       return(send_json(con, 500, list(ok = FALSE, code = "session_identify_not_saved",
                                      error = "体检结果没有保存到分析记录，不能宣称回写成功。")))
-    return(send_json(con, 200, list(ok = TRUE, saved = enc2utf8(rf),
+    return(send_json(con, 200, c(list(ok = TRUE, saved = if (nzchar(rf)) enc2utf8(rf) else NULL,
                                     session = sess_saved,
                                     quality = qualMade,
-                                    req_id = if (nzchar(rq)) rq else NULL)))
+                                    req_id = if (nzchar(rq)) rq else NULL),
+                                    record_cap_fields(access$cap))))
   }
 
   # 自动判定的结论。
@@ -4604,11 +5950,20 @@ serve_request <- function(con, req) {
   #   和 step_plan.R 里的 read_decision() 读的是同一个文件，
   #   不在这里另做一遍判定 —— 两处判定早晚不一致。
   if (p == "/api/decision") {
-    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
-    f <- file.path(status_dir(runDir), "decision.json")
-    if (!file.exists(f)) return(send_json(con, 200, list(ok = TRUE, result = NULL)))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    f <- file.path(status_dir(ctx$run_dir), "decision.json")
+    if (!file.exists(f))
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = ctx$session_id,
+        result = NULL), record_cap_fields(access$cap))))
     r <- read_json_file(f)
-    return(send_json(con, 200, list(ok = TRUE, result = r)))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = ctx$session_id,
+      result = r), record_cap_fields(access$cap))))
   }
 
   # ---- 决策：到点生成的问题与人的答复 ------------------------------
@@ -4660,19 +6015,18 @@ serve_request <- function(con, req) {
   if (p == "/api/quality") {
     if (!isTRUE(HAS_QUALITY))
       return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/quality.R")))
-    qsid <- qget(req$target, "session")
-    if (!nzchar(qsid)) qsid <- cur_sid()
-    if (!nzchar(qsid)) qsid <- "_default"
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     d <- qual_read(qsid)
-    ord <- tryCatch(flow_run_order(), error = function(e) character(0))
+    ord <- if (isTRUE(HAS_FLOW)) tryCatch(FLOW_ORDER(flow_profile(qsid)), error = function(e) character(0)) else character(0)
     prevs <- lapply((d$steps %||% list()), function(x) {
       qual_prev_check(qsid, as.character(x$step %||% ""), order = ord)
     })
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, session_id = qsid,
       steps = d$steps, updated_at = d$updated_at,
       prev_checks = prevs,
-      blocking = FALSE)))
+      blocking = FALSE), record_cap_fields(access$cap))))
   }
 
   # ---- 环节审计看板：每环的前置审结论 + 最新护照 ----------------------
@@ -4684,27 +6038,28 @@ serve_request <- function(con, req) {
   if (p == "/api/reviewer") {
     if (!isTRUE(HAS_STAGE_REVIEWER))
       return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/stage_reviewer.R")))
-    qsid <- qget(req$target, "session")
-    if (!nzchar(qsid)) qsid <- cur_sid()
-    if (!nzchar(qsid)) qsid <- "_default"
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     stage <- qget(req$target, "stage")
     if (nzchar(stage)) {
       pre <- tryCatch(sr_preflight(APP_DIR, stage, sid = qsid,
-                                   profile = flow_profile(), note = "看板按需预检"),
+                                   profile = flow_profile(qsid), note = "看板按需预检"),
                       error = function(e) list(verdict = "unknown", error = conditionMessage(e)))
       pp <- tryCatch(sr_passport(APP_DIR, qsid, stage), error = function(e) NULL)
-      return(send_json(con, 200, list(
+      return(send_json(con, 200, c(list(
         ok = TRUE, session_id = qsid, stage = stage,
         rule_version = SR_RULE_VERSION,
         pre = pre,
         passport = pp,
         history = tryCatch(sr_passport_history(APP_DIR, qsid, stage), error = function(e) list()),
         blocking = TRUE,
-        meaning = "block=明确不合格必须修；warn=可以开但有未核项；pass=条件齐备")))
+        meaning = "block=明确不合格必须修；warn=可以开但有未核项；pass=条件齐备"),
+        record_cap_fields(access$cap))))
     }
-    ch <- tryCatch(sr_chain_all(APP_DIR, qsid, flow_profile()),
+    ch <- tryCatch(sr_chain_all(APP_DIR, qsid, flow_profile(qsid)),
                    error = function(e) list(stages = list(), error = conditionMessage(e)))
-    return(send_json(con, 200, c(list(ok = TRUE), ch,
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = qsid),
+                                 ch, record_cap_fields(access$cap),
                                  list(blocking = TRUE,
                                       meaning = "每环：最新护照结论 + 现在开跑的前置审结论"))))
   }
@@ -4717,8 +6072,8 @@ serve_request <- function(con, req) {
   if (p == "/api/reference/list") {
     if (!isTRUE(HAS_REFERENCE))
       return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/reference.R")))
-    qsid <- qget(req$target, "session")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     chosen <- NULL
     if (nzchar(qsid) && HAS_SESSIONS) {
       s0 <- tryCatch(sess_find(APP_DIR, qsid), error = function(e) NULL)
@@ -4733,10 +6088,10 @@ serve_request <- function(con, req) {
       ssp <- as.character((s0 %||% list())$species %||% "")
       sts <- as.character((s0 %||% list())$tissue %||% "")
     }
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, items = ref_list(species = ssp, tissue = sts),
       chosen = chosen, session_id = qsid,
-      species = ssp, tissue = sts)))
+      species = ssp, tissue = sts), record_cap_fields(access$cap))))
   }
 
   # 上传：前端把文件读成 base64 传上来，避开 multipart 解析。
@@ -4785,9 +6140,8 @@ serve_request <- function(con, req) {
       okRef <- nzchar(ref_path(rid)) || nzchar(ref_server_path(rid))
       if (!okRef) return(send_json(con, 404, list(ok = FALSE, error = "没有这份参考表")))
     }
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
-    if (!nzchar(qsid)) return(send_json(con, 400, list(ok = FALSE, error = "还没有分析记录")))
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
 
     # ---- 选之前先判适不适用 ----
     #   不适用不是"不让选"，是"选了要说明白后果"。
@@ -4812,20 +6166,20 @@ serve_request <- function(con, req) {
              patch = list(reference_id = if (nzchar(rid)) rid else "")) else
            list(ok = FALSE, error = "缺少 sessions.R")
     if (!isTRUE(r$ok)) return(send_json(con, 400, r))
-    return(send_json(con, 200, list(ok = TRUE, session_id = qsid,
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = qsid,
                                     reference_id = if (nzchar(rid)) rid else "",
                                     applicable = (apInfo %||% list())$verdict,
-                                    applicable_why = (apInfo %||% list())$why)))
+                                    applicable_why = (apInfo %||% list())$why),
+                                    record_cap_fields(access$cap))))
   }
 
   # 请助手去服务器上找一遍已有的参考表。
   #   为什么需要这一步而不是应用自己找：应用在公网侧，看不到对方内网磁盘。
   #   为什么只读：这是"列一下家底"，不该顺手改任何文件。
   if (p == "/api/reference/scan-request" && identical(req$method, "POST")) {
-    b <- body_json()
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
-    pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
+    pl <- access$cap$place
     srv <- (pl %||% list())$server %||% list()
     host <- as.character(srv$host %||% "")
     port <- as.character(srv$port %||% 22)
@@ -4954,8 +6308,8 @@ serve_request <- function(con, req) {
   #   全部要写回来，不能只回一句"我查好了"。
   if (p == "/api/reference/litdict" && identical(req$method, "POST")) {
     b <- body_json()
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     sp <- trimws(as.character(b$species %||% ""))
     ts <- trimws(as.character(b$tissue %||% ""))
     # 存档号：文献库里那一份的编号。给了号就不必再靠物种组织去筛 ——
@@ -4967,7 +6321,7 @@ serve_request <- function(con, req) {
         #   填这两项是为了让检索更准，不是为了审核资格；
         #   缺了就换个说法提示，不判不可用。
         error = "填一下物种和组织，检索会准一些（不填也能建，只是范围会宽）")))
-    dirQ <- pjoin(as.character(runDir %||% ""), "stages", "annotation")
+    dirQ <- pjoin(as.character(access$cap$run_dir %||% ""), "stages", "annotation")
     # ---- 2026-11-04 重写：从「建一份词典」改成「检索并引用已发表的」 ----
     #   上一版让助手"为这批数据建一份 marker 词典"，实际上默许了它会
     #   凭自己的理解去拼一份出来。产物就是那份 mouse_spleen_dict_draft.json：
@@ -5034,12 +6388,12 @@ serve_request <- function(con, req) {
   if (p == "/api/ledger/out") {
     if (!isTRUE(HAS_LEDGER_OUT))
       return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/ledger_out.R")))
-    qsid <- qget(req$target, "session")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     lines <- led_out_take(qsid)
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, session_id = qsid, count = length(lines),
-      run_id = led_run_id(qsid), lines = as.list(lines))))
+      run_id = led_run_id(qsid), lines = as.list(lines)), record_cap_fields(access$cap))))
   }
 
   # 执行端明确回报"这些行已经追加到服务器流水"，才允许清空。
@@ -5049,32 +6403,31 @@ serve_request <- function(con, req) {
     if (!isTRUE(HAS_LEDGER_OUT))
       return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/ledger_out.R")))
     b <- body_json()
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     if (!isTRUE(b$ok)) {
       return(send_json(con, 200, list(ok = FALSE, cleared = FALSE,
                                       error = as.character(b$error %||% "执行端未确认"))))
     }
     led_out_clear(qsid)
-    return(send_json(con, 200, list(ok = TRUE, cleared = TRUE, session_id = qsid)))
+    return(send_json(con, 200, c(list(ok = TRUE, cleared = TRUE, session_id = qsid),
+      record_cap_fields(access$cap))))
   }
 
   if (p == "/api/decisions") {
     if (!isTRUE(HAS_DECISIONS))
       return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/decisions.R")))
-    qs <- tryCatch(parse_query(req$query %||% ""), error = function(e) list())
-    qp <- (qs$q %||% list())
-    qsid <- as.character(qp$session %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     d <- dec_read(qsid)
     pend <- Filter(function(x) identical(as.character(x$status %||% ""), "asked"), d$items)
     done <- Filter(function(x) identical(as.character(x$status %||% ""), "answered"), d$items)
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, session_id = qsid,
       items = d$items,
       pending = length(pend),
       answered = length(done),
-      generated = length(d$items))))
+      generated = length(d$items)), record_cap_fields(access$cap))))
   }
 
   # 到点生成并真的发给人。
@@ -5086,8 +6439,8 @@ serve_request <- function(con, req) {
     b <- body_json()
     stepId <- as.character(b$step %||% "")
     if (!nzchar(stepId)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 step")))
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     made <- dec_ensure(stepId, qsid)
     delivered <- NULL
     if (length(made)) {
@@ -5099,23 +6452,24 @@ serve_request <- function(con, req) {
                             error = function(e) NULL)
     }
     d <- dec_read(qsid)
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, generated = length(made), session_id = qsid,
       items = made, pending = length(dec_pending(qsid)),
       queued = !is.null(delivered),
-      text = if (length(made)) dec_ask_text(made) else "")))
+      text = if (length(made)) dec_ask_text(made) else ""), record_cap_fields(access$cap))))
   }
 
   if (p == "/api/decisions/answer" && identical(req$method, "POST")) {
     if (!isTRUE(HAS_DECISIONS))
       return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/decisions.R")))
     b <- body_json()
-    qsid <- as.character(b$session_id %||% "")
-    if (!nzchar(qsid)) qsid <- cur_sid()
+    access <- record_preflight$access
+    qsid <- as.character(record_preflight$target$sid %||% "")
     it <- dec_answer(qsid, as.character(b$id %||% ""),
                      b$answer, as.character(b$detail %||% ""))
     if (is.null(it)) return(send_json(con, 404, list(ok = FALSE, error = "没有这一条")))
-    return(send_json(con, 200, list(ok = TRUE, item = it, pending = length(dec_pending(qsid)))))
+    return(send_json(con, 200, c(list(ok = TRUE, item = it,
+      pending = length(dec_pending(qsid))), record_cap_fields(access$cap))))
   }
 
   # 脚本库：库表 + 按当前环境查表的结果
@@ -5222,13 +6576,19 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/attempts/result" && identical(req$method, "GET")) {
-    sid <- qget(req$target, "session_id"); rq <- qget(req$target, "req_id")
-    if (!db_api_notebook_authorized(if (DB_READY) DB_CON else NULL, owner_ctx, sid))
-      return(send_json(con, 403, list(ok = FALSE, code = "attempt_not_owner")))
+    target <- record_session_target(q, list(), path = p, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx, need = "read")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    sid <- target$sid; rq <- qget(req$target, "req_id")
     if (!attempt_has(APP_DIR, sid, rq))
       return(send_json(con, 404, list(ok = FALSE, code = "attempt_not_registered")))
-    return(send_json(con, 200, list(ok = TRUE, session_id = sid, req_id = rq,
-      selected = attempt_selected(APP_DIR, sid, rq), result = attempt_results(APP_DIR, sid, rq))))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = sid, req_id = rq,
+      selected = attempt_selected(APP_DIR, sid, rq), result = attempt_results(APP_DIR, sid, rq)),
+      record_cap_fields(access$cap))))
   }
   # Private full instruction handoff. No client-controlled filesystem paths.
   if (p == "/api/instruction/prepare") {
@@ -5243,8 +6603,17 @@ serve_request <- function(con, req) {
     if (!isTRUE(resolved$ok)) return(send_json(con, resolved$http_status, resolved))
     b <- resolved$body
     scalar <- function(x) is.character(x) && length(x) == 1L && !is.na(x) && nzchar(x)
-    query_only <- identical(b$purpose, "query")
-    if ((!is.null(b$purpose) && !b$purpose %in% c("query", "execute")) ||
+    # ---- 只读语义只有一种：query 与 observe 同待遇 ---------------------
+    #   为什么要加 observe：前端在"作业已入队"时会把 purpose 标成 observe，
+    #   意思是"这条只是通知，别当成新任务"。原来白名单只有 query/execute，
+    #   observe 会被 400 挡掉 —— 而前端会把 400 当成投递失败，
+    #   于是真实通道明明通着，页面却报没发出去。
+    #   更糟的一种：如果这里放行但按 execute 走，它会重建执行正文、
+    #   申请回写凭据、抢占输出目录 —— 等于为一条"只观察"的通知准备了全套执行条件，
+    #   助手拿到手就可能真的再跑一遍。
+    #   所以 observe 必须和 query 走同一条只读分支：不重建正文、不发凭据、不抢目录。
+    query_only <- isTRUE(b$purpose %in% c("query", "observe"))
+    if ((!is.null(b$purpose) && !b$purpose %in% c("query", "execute", "observe")) ||
         !scalar(b$session_id) || (!query_only && !scalar(b$req_id)) ||
         !grepl("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", b$session_id) ||
         (!query_only && !grepl("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", b$req_id)))
@@ -5494,16 +6863,63 @@ serve_request <- function(con, req) {
         who <- as.character(b$by %||% "assistant")
         d <- inject_read()
         out <- NULL
+        stale_why <- ""
         for (i in seq_along(d$items)) {
           it <- d$items[[i]]
           if (!identical(as.character(it$id %||% ""), want)) next
           if (!is.null(it$dropped_at)) next
+          # 接管前重查：due 是一次读，这段时间里执行端可能已经把任务接走，
+          #   或者这一步已经被验收。runner 拿到旧 due 直接启动会话，
+          #   等于同一件事又有第二个执行者。
+          #   生产 runner 只对非 2xx 停下，所以过时与读不到都必须返回非 2xx。
+          if (HAS_EXEC_GUARD) {
+            ck <- inject_claim_check(it)
+            if (!isTRUE(ck$ok)) {
+              code_n <- if (identical(as.integer(ck$http %||% 409L), 503L)) 503L else 409L
+              if (code_n == 409L) {
+                d$items[[i]]$dropped_at <- inject_ts(Sys.time())
+                d$items[[i]]$drop_reason <- as.character(ck$reason %||% "")
+                d$items[[i]]$next_attempt_at <- NULL
+              }
+              inject_write(d)
+              tryCatch({
+                f <- file.path(STATE_DIR, "inject_stale_close.jsonl")
+                cat(paste0(jsonlite::toJSON(list(
+                  at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+                  kind = if (code_n == 409L) "stale_at_claim" else "guard_unavailable_at_claim",
+                  id = want, code = as.character(ck$code %||% ""),
+                  reason = as.character(ck$reason %||% ""), dispatched = FALSE,
+                  wrote_step_state = FALSE), auto_unbox = TRUE), "\n"),
+                  file = f, append = TRUE)
+              }, error = function(e) NULL)
+              return(send_json(con, code_n, list(
+                ok = FALSE, code = as.character(ck$code %||% ""), id = want,
+                reason = as.character(ck$reason %||% ""),
+                dispatched = FALSE, wrote_step_state = FALSE,
+                error = as.character(ck$reason %||% "这条通知已过时，不再派工。"))))
+            }
+          }
           d$items[[i]]$claimed_at <- inject_ts(Sys.time())
           d$items[[i]]$claimed_by <- who
           # 取走就撤掉"下次重试"：留着它，面板上会同时出现
           #   "助手已取走"和"下次 08:32"两句互相打架的话。
           d$items[[i]]$next_attempt_at <- NULL
           out <- d$items[[i]]
+        }
+        if (nzchar(stale_why)) {
+          inject_write(d)
+          tryCatch({
+            f <- file.path(STATE_DIR, "inject_stale_close.jsonl")
+            cat(paste0(jsonlite::toJSON(list(
+              at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"), kind = "stale_at_claim",
+              id = want, reason = stale_why, dispatched = FALSE,
+              wrote_step_state = FALSE), auto_unbox = TRUE), "\n"),
+              file = f, append = TRUE)
+          }, error = function(e) NULL)
+          return(send_json(con, 409, list(
+            ok = FALSE, code = "inject_stale_at_claim", id = want,
+            reason = stale_why, dispatched = FALSE, wrote_step_state = FALSE,
+            error = "这条通知已经过时，不再派工；已软关闭。")))
         }
         if (!is.null(out)) inject_write(d)
         return(send_json(con, 200, list(ok = !is.null(out), item = out)))
@@ -5633,15 +7049,47 @@ serve_request <- function(con, req) {
     tryCatch(exec_reap(), error = function(e) NULL)
     dq <- exec_due()
     dr <- exec_running()
+    # 每条任务带上它自己那条分析记录的 run_dir。
+    #   为什么必须按 session 解析：执行端原来只能拿全局 place.work_root，
+    #   于是 A 记录的任务去数 B 记录的产物目录，报出来的 files=14 是别人的文件。
+    #   取不到就留空串，由执行端保守处理（推心跳并报错），绝不回退全局目录 ——
+    #   回退看起来能跑，实际是把结果算到了另一条记录头上。
+    due_run_dir <- function(sid) {
+      s0 <- as.character(sid %||% "")
+      if (!nzchar(s0) || !DB_READY) return("")
+      rd <- tryCatch(db_scalar(DB_CON,
+        "SELECT run_dir FROM sessions WHERE session_id = ?", list(s0)),
+        error = function(e) NA_character_)
+      if (length(rd) != 1L || is.na(rd)) return("")
+      record_trim(rd)
+    }
     mk <- function(it, kind) list(
       id = it$id, step = it$step, session_id = it$session_id,
       req_id = it$req_id, chain_id = it$chain_id,
       created_at = it$created_at, kind = kind,
       claimed_at = it$claimed_at, last_seen = it$last_seen,
       job_id = it$job_id,
+      worker_id = as.character(it$worker_id %||% it$claimed_by %||% ""),
+      pool_id = exec_task_pool(it),
+      # 唯一数字作业号随派工下发：复用分支不再重跑作业，
+      #   但它仍要把"这份产物属于哪次作业"带给判定层，
+      #   而 worker 在复用路径上没有 submit 返回值，只能从这里取。
+      job_number = as.character(it$job_number %||% ""),
+      run_dir = if (nzchar(as.character(it$run_dir %||% "")))
+        as.character(it$run_dir) else due_run_dir(it$session_id),
+      mode = as.character(it$mode %||% ""),
+      reference_id = as.character(it$reference_id %||% ""),
+      ref_mode = as.character(it$ref_mode %||% ""),
+      ref_path = as.character(it$ref_path %||% ""),
       # 命令随任务给出，执行端照跑即可。
       script = as.character(it$script %||% ""),
-      script_args = as.character(it$script_args %||% ""))
+      script_args = as.character(it$script_args %||% ""),
+      # 结构参数必须随任务下发。
+      #   实测后果：只在 exec 记录里存了 params，due 不返回，
+      #   执行端 write_params 拿到 None，参数文件根本不会写，
+      #   作业就在「缺参数」或守卫那一步失败。
+      params = it$params %||% NULL,
+      params_rel = as.character(it$params_rel %||% ""))
     out <- c(lapply(dq, mk, kind = "queued"), lapply(dr, mk, kind = "running"))
     return(send_json(con, 200, list(
       ok = TRUE, count = length(out),
@@ -5654,30 +7102,91 @@ serve_request <- function(con, req) {
     b <- body_json()
     id <- as.character(b$id %||% "")
     if (!nzchar(id)) return(send_json(con, 400, list(ok = FALSE, error = "缺 id")))
+    claimed_w <- as.character(b$worker_id %||% b$by %||% "")
+    wa <- worker_route_auth(req, claimed_w, as.character(b$pool_id %||% ""), "queue")
+    if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
+    task0 <- Filter(function(it) identical(as.character(it$id %||% ""), id),
+                    exec_read()$items %||% list())
+    if (!length(task0))
+      return(send_json(con, 404, list(ok = FALSE, code = "exec_task_missing",
+                                      error = "没有这条执行任务。")))
+    owner_w <- trimws(as.character(task0[[1]]$worker_id %||% task0[[1]]$claimed_by %||% ""))
+    if (nzchar(owner_w) && !identical(owner_w, wa$worker_id))
+      return(send_json(con, 403, list(ok = FALSE, code = "exec_task_not_owned",
+        error = "这条任务由另一个执行端领取，不能由当前 worker 续命。")))
     # 注意：这里必须用 %||% 而不是 ||。
     #   R 的 || 只吃逻辑值，喂它 NULL / 字符串会直接抛
     #   "invalid 'x' type in 'x || y'" —— 端点看着在，一调就 500。
     jobv <- as.character(b$job %||% "")
     if (!nzchar(jobv)) jobv <- as.character(b$job_id %||% "")
-    exec_keepalive(id, job = jobv, note = as.character(b$note %||% ""))
-    return(send_json(con, 200, list(ok = TRUE, at = exec_ts())))
+    exec_keepalive(id, job = jobv, note = as.character(b$note %||% ""),
+                   job_number = as.character(b$job_number %||% ""),
+                   worker_id = wa$worker_id, pool_id = wa$pool_id)
+    # Long submit/watch paths stay inside handle(); a fresh task timestamp alone
+    # would still let the worker be judged offline. Keep both clocks moving.
+    exec_worker_hb_write(wa$worker_id, wa$pool_id,
+                         version = as.character(b$version %||% ""),
+                         note = "keepalive")
+    # 派工前脚本基线：执行端在提交 qsub 之前读一次脚本的路径/mtime/md5 存下来，
+    #   收尾时再读一次比对。只有这样才能回答「运行期间脚本变没变」。
+    #   为什么在这里收：keepalive 是执行端提交作业那一刻唯一会调的上报口，
+    #   换一个新端点等于多一条要维护的链路，而这条数据本来就属于这次执行。
+    #   只接受绝对路径 + 32 位 md5 + epoch 秒，三项齐全才落盘，缺一律不存。
+    bs <- b$script_baseline %||% NULL
+    if (is.list(bs)) {
+      bsp <- as.character(bs$script_path %||% "")
+      bsm <- tolower(as.character(bs$script_md5 %||% bs$md5 %||% ""))
+      bse <- suppressWarnings(as.numeric(as.character(bs$script_mtime_epoch %||% "")))
+      if (nzchar(bsp) && grepl("^/", bsp) && grepl("^[0-9a-f]{32}$", bsm) &&
+          !is.na(bse) && bse > 0) {
+        exec_set(id, list(script_baseline = list(
+          script_path = bsp, script_md5 = bsm,
+          script_mtime_epoch = as.numeric(bse),
+          captured_at = exec_ts(), captured_by = as.character(b$by %||% "worker"))))
+      }
+    }
+    return(send_json(con, 200, list(ok = TRUE, at = exec_ts(),
+                                    worker_id = wa$worker_id, pool_id = wa$pool_id)))
   }
   if (p == "/api/exec/claim" && identical(req$method, "POST")) {
     b <- body_json()
     want <- as.character(b$id %||% "")
-    who <- as.character(b$by %||% "worker")
+    claimed_w <- as.character(b$worker_id %||% b$by %||% "")
+    wa <- worker_route_auth(req, claimed_w, as.character(b$pool_id %||% ""), "queue")
+    if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
+    who <- wa$worker_id
     d <- exec_read()
     hit <- NULL
     for (it in (d$items %||% list())) {
       if (identical(as.character(it$id %||% ""), want) &&
           identical(as.character(it$status %||% ""), "queued")) hit <- it
     }
-    if (is.null(hit)) return(send_json(con, 200, list(ok = FALSE, error = "不在队列里")))
-    exec_set(want, list(status = "running", claimed_at = exec_ts(), claimed_by = who))
+    if (is.null(hit)) {
+      cur <- Filter(function(it) identical(as.character(it$id %||% ""), want),
+                    d$items %||% list())
+      if (length(cur) && identical(as.character(cur[[1]]$status %||% ""), "running") &&
+          identical(trimws(as.character(cur[[1]]$worker_id %||% cur[[1]]$claimed_by %||% "")),
+                    who))
+        return(send_json(con, 200, list(ok = TRUE, idempotent = TRUE, item = cur[[1]])))
+      return(send_json(con, 200, list(ok = FALSE, error = "不在队列里")))
+    }
+    task_pool <- exec_task_pool(hit)
+    if (!identical(task_pool, wa$pool_id))
+      return(send_json(con, 409, list(ok = FALSE, code = "worker_pool_mismatch_queue",
+        error = paste0("任务属于 pool ", task_pool, "，当前 worker 属于 ", wa$pool_id, "。"))))
+    now <- exec_ts()
+    exec_set(want, list(status = "running", claimed_at = now, last_seen = now,
+                        claimed_by = who, worker_id = who, pool_id = wa$pool_id))
+    exec_worker_hb_write(wa$worker_id, wa$pool_id,
+                         version = as.character(b$version %||% ""), note = "claim")
     return(send_json(con, 200, list(
       ok = TRUE,
       item = list(id = hit$id, step = hit$step, session_id = hit$session_id,
                   req_id = hit$req_id, chain_id = hit$chain_id,
+                  job_id = as.character(hit$job_id %||% ""),
+                  job_number = as.character(hit$job_number %||% ""),
+                  run_dir = as.character(hit$run_dir %||% ""),
+                  pool_id = task_pool, worker_id = who,
                   script = as.character(hit$script %||% ""),
                   script_args = as.character(hit$script_args %||% "")))))
   }
@@ -5686,44 +7195,75 @@ serve_request <- function(con, req) {
   if (p == "/api/exec/requeue" && identical(req$method, "POST")) {
     b <- body_json()
     want <- as.character(b$id %||% "")
+    wa <- worker_route_auth(req, as.character(b$worker_id %||% b$by %||% ""),
+                            as.character(b$pool_id %||% ""), "queue")
+    if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
     chain_task <- Filter(function(it) identical(it$id, want), exec_read()$items %||% list())
+    if (!length(chain_task))
+      return(send_json(con, 404, list(ok = FALSE, code = "exec_task_missing")))
+    task_w <- trimws(as.character(chain_task[[1]]$worker_id %||%
+                                  chain_task[[1]]$claimed_by %||% ""))
+    if (nzchar(task_w) && !identical(task_w, wa$worker_id))
+      return(send_json(con, 403, list(ok = FALSE, code = "exec_task_not_owned",
+        error = "这条任务由另一个执行端领取，不能由当前 worker 退回队列。")))
     if (length(chain_task) && nzchar(as.character(chain_task[[1]]$chain_id %||% ""))) {
       it <- chain_task[[1]]; c <- rc_read(it$session_id)
       if (is.null(c) || !identical(c$status, "running") ||
           !identical(it$step, c$todo[[c$index]]) || isTRUE(it$callback_received))
         return(send_json(con, 409, list(ok = FALSE, code = "chain_stage_not_active")))
     }
-    exec_set(want, list(status = "queued", claimed_at = NULL, claimed_by = NULL))
-    return(send_json(con, 200, list(ok = TRUE)))
+    exec_set(want, list(status = "queued", claimed_at = NULL, claimed_by = NULL,
+                        worker_id = NULL, requeued_at = exec_ts()))
+    exec_worker_hb_write(wa$worker_id, wa$pool_id, note = "requeue")
+    return(send_json(con, 200, list(ok = TRUE, worker_id = wa$worker_id,
+                                    pool_id = wa$pool_id)))
   }
   if (p == "/api/exec/done" && identical(req$method, "POST")) {
     b <- body_json()
     want <- as.character(b$id %||% "")
     okk <- isTRUE(b$ok)
+    wa <- worker_route_auth(req, as.character(b$worker_id %||% b$by %||% ""),
+                            as.character(b$pool_id %||% ""), "queue")
+    if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
     task <- Filter(function(it) identical(it$id, want), exec_read()$items %||% list())
+    if (!length(task))
+      return(send_json(con, 404, list(ok = FALSE, code = "exec_task_missing")))
+    task_w <- trimws(as.character(task[[1]]$worker_id %||% task[[1]]$claimed_by %||% ""))
+    if (nzchar(task_w) && !identical(task_w, wa$worker_id))
+      return(send_json(con, 403, list(ok = FALSE, code = "exec_task_not_owned",
+        error = "这条任务由另一个执行端领取，不能由当前 worker 收尾。")))
+    bind_w <- if (nzchar(task_w)) list() else list(worker_id = wa$worker_id)
     if (length(task) && nzchar(as.character(task[[1]]$chain_id %||% ""))) {
       it <- task[[1]]
       if (okk && (!isTRUE(it$callback_received) || !isTRUE(it$callback_accepted)))
         return(send_json(con, 409, list(ok = FALSE, code = "stage_callback_required")))
-      exec_set(want, list(status = if (okk) "done" else "failed",
-        finished_at = exec_ts(), error = if (okk) NULL else as.character(b$error %||% "")))
+      exec_set(want, c(bind_w, list(status = if (okk) "done" else "failed",
+        finished_at = exec_ts(), error = if (okk) NULL else as.character(b$error %||% ""))))
+      exec_worker_hb_write(wa$worker_id, wa$pool_id, note = "done")
       if (!okk) rc_callback(list(session_id = it$session_id, req_id = it$chain_id,
         step = it$step, status = "failed", code = 1L), FALSE)
       return(send_json(con, 200, list(ok = TRUE)))
     }
-    exec_set(want, list(status = if (okk) "done" else "failed",
+    exec_set(want, c(bind_w, list(status = if (okk) "done" else "failed",
                         finished_at = exec_ts(),
-                        error = if (okk) NULL else as.character(b$error %||% "")))
-    return(send_json(con, 200, list(ok = TRUE)))
+                        error = if (okk) NULL else as.character(b$error %||% ""))))
+    exec_worker_hb_write(wa$worker_id, wa$pool_id, note = "done")
+    return(send_json(con, 200, list(ok = TRUE, worker_id = wa$worker_id,
+                                    pool_id = wa$pool_id)))
   }
   # 执行端上报一次心跳：它每 60 秒来一次，说明它活着。
   if (p == "/api/exec/heartbeat" && identical(req$method, "POST")) {
     b <- body_json()
-    hb <- list(at = exec_ts(), by = as.character(b$by %||% "worker"),
-               version = as.character(b$version %||% ""),
-               note = as.character(b$note %||% ""))
-    write_json_file(EXEC_HB_FILE, hb)
-    return(send_json(con, 200, list(ok = TRUE)))
+    claimed_w <- as.character(b$worker_id %||% b$by %||% "")
+    wa <- worker_route_auth(req, claimed_w, as.character(b$pool_id %||% ""), "heartbeat")
+    if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
+    hb <- exec_worker_hb_write(wa$worker_id, wa$pool_id,
+                               version = as.character(b$version %||% ""),
+                               note = as.character(b$note %||% ""))
+    worker_audit(APP_DIR, "heartbeat", list(worker_id = wa$worker_id,
+                                             pool_id = wa$pool_id, at = hb$at))
+    return(send_json(con, 200, list(ok = TRUE, worker_id = wa$worker_id,
+                                    pool_id = wa$pool_id, at = hb$at)))
   }
 
   # -------------------------------------------------------------------
@@ -5750,6 +7290,14 @@ serve_request <- function(con, req) {
       return(send_json(con, 400, list(ok = FALSE, error = "body 不是合法 JSON")))
     snap <- list(
       at = exec_ts(),
+      # 这份上报属于哪条分析记录。
+      #   为什么必须记：这个文件是全局单文件，写入是整份覆盖。
+      #   不记归属的话，一条记录失败的结果会一直挂在别的记录页面上 ——
+      #   实测就是这样：bta0 那次 Connection refused 的快照，
+      #   让新记录 s-…-g5nq 在体检 ready 的情况下还显示"无法执行"。
+      #   老文件没有这个字段，读取端一律当"不属于本记录"，不拿它下结论。
+      session_id = as.character(b$session_id %||% ""),
+      req_id = as.character(b$req_id %||% ""),
       by = as.character(b$by %||% "worker"),
       host = as.character(b$host %||% ""),
       engine_dir = as.character(b$engine_dir %||% ""),
@@ -5772,13 +7320,10 @@ serve_request <- function(con, req) {
   #     agent    —— 会话指令队列里还有多少条没投递
   #   都取自磁盘上的真实状态，不做乐观估计。
   if (p == "/api/poller/status") {
-    hb <- tryCatch(read_json_file(EXEC_HB_FILE), error = function(e) NULL)
+    hbs <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+    hb <- exec_latest_heartbeat(hbs = hbs)
     hbAt <- as.character((hb %||% list())$at %||% "")
-    online <- FALSE
-    if (nzchar(hbAt)) {
-      t0 <- suppressWarnings(as.POSIXct(hbAt, format = "%Y-%m-%dT%H:%M:%S"))
-      if (!is.na(t0)) online <- as.numeric(difftime(Sys.time(), t0, units = "secs")) < 180
-    }
+    online <- exec_heartbeat_online(hb)
     ej <- tryCatch(exec_read(), error = function(e) list(items = list()))
     eitems <- ej$items %||% list()
     cnt <- function(st) sum(vapply(eitems, function(it)
@@ -5829,30 +7374,145 @@ serve_request <- function(con, req) {
     return(send_json(con, 200, list(ok = TRUE, present = TRUE, snapshot = sn)))
   }
 
+  if (p == "/api/exec/view") {
+    access <- record_preflight$access
+    sid_view <- as.character(record_preflight$target$sid %||% "")
+    d <- tryCatch(exec_read(), error = function(e) list(items = list()))
+    its <- Filter(function(it) identical(as.character(it$session_id %||% ""), sid_view),
+                  d$items %||% list())
+    its <- lapply(its, function(it) list(
+      id = it$id, step = it$step, session_id = it$session_id,
+      status = it$status, created_at = it$created_at, claimed_at = it$claimed_at,
+      finished_at = it$finished_at, error = it$error,
+      run_dir = if (nzchar(as.character(it$run_dir %||% "")))
+        as.character(it$run_dir) else "",
+      mode = as.character(it$mode %||% ""),
+      reference_id = as.character(it$reference_id %||% ""),
+      ref_mode = as.character(it$ref_mode %||% ""),
+      ref_path = as.character(it$ref_path %||% "")))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = sid_view,
+                                     items = its), record_cap_fields(access$cap))))
+  }
+
   if (p == "/api/exec") {
     # 页面看队列时同样先回收：一条 10-28 起就挂着、执行端早就没了的任务，
     #   不该继续显示成"正在跑"。
     d <- tryCatch(exec_reap(), error = function(e) exec_read())
     its <- lapply((d$items %||% list()), function(it) list(
-      id = it$id, step = it$step, status = it$status,
+      id = it$id, step = it$step, session_id = it$session_id, status = it$status,
       created_at = it$created_at, claimed_at = it$claimed_at,
       finished_at = it$finished_at, error = it$error))
-    hb <- tryCatch(read_json_file(EXEC_HB_FILE), error = function(e) NULL)
+    hbs <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+    hb <- exec_latest_heartbeat(hbs = hbs)
     hbAt <- as.character((hb %||% list())$at %||% "")
-    online <- FALSE
-    if (nzchar(hbAt)) {
-      t0 <- suppressWarnings(as.POSIXct(hbAt, format = "%Y-%m-%dT%H:%M:%S"))
-      if (!is.na(t0)) online <- as.numeric(difftime(Sys.time(), t0, units = "secs")) < 180
-    }
+    online <- exec_heartbeat_online(hb)
     return(send_json(con, 200, list(ok = TRUE, items = its,
                                     worker = list(online = online,
                                                   at = if (nzchar(hbAt)) hbAt else NULL,
-                                                  by = as.character((hb %||% list())$by %||% "")))))
+                                                  by = as.character((hb %||% list())$worker_id %||% ""),
+                                                  pool_id = as.character((hb %||% list())$pool_id %||% ""),
+                                                  workers = length(hbs)))))
+  }
+
+  # ---- 误报纠正（窄入口，候选）----------------------------------------
+  #   与 step/import 分开：import 必须拒绝"没有执行证据的终态"，
+  #   纠正做的是相反的事 —— 承认先前那份终态没有证据并撤下来。
+  #   鉴权沿用现有受控通路：先按 callback_owner 绑会话与请求，
+  #   再要求"本分析属主"或"该 exec 任务确实是本会话本环节在管的那条"。
+  #   不新增匿名通道；exec_id 本身只是绑定线索，不是凭据。
+  if (p == "/api/step/recover" && identical(req$method, "POST")) {
+    if (!HAS_EXEC_RECOVER)
+      return(send_json(con, 503, list(ok = FALSE, code = "recover_module_missing",
+        error = "纠正模块未加载")))
+    b <- body_json()
+    stp <- trimws(as.character(b$step %||% ""))
+    rq  <- trimws(as.character(b$req_id %||% ""))
+    sid_in <- trimws(as.character(b$session_id %||% ""))
+    exid <- trimws(as.character(b$exec_id %||% ""))
+    if (!nzchar(stp) || !nzchar(rq) || !nzchar(sid_in) || !nzchar(exid))
+      return(send_json(con, 400, list(ok = FALSE, code = "recover_fields_required",
+        error = "需要 step / req_id / session_id / exec_id；四者缺一不改。")))
+    binding <- callback_owner(b)
+    if (!isTRUE(binding$ok)) return(send_json(con, 409, binding))
+    sid <- binding$sid
+    rq  <- binding$req_id
+    items <- tryCatch(import_exec_items(), error = function(e) NULL)
+    if (is.null(items))
+      return(send_json(con, 503, list(ok = FALSE, code = "recover_exec_unavailable",
+        error = "读不到执行任务表，无法核对在管任务；不改。")))
+    ex <- NULL
+    for (it in items) if (identical(as.character(it$id %||% ""), exid)) ex <- it
+    if (is.null(ex))
+      return(send_json(con, 409, list(ok = FALSE, code = "recover_exec_not_found",
+        error = "找不到这条执行任务；不改。")))
+    # 授权：只认本分析的属主或已授权 agent 凭据。
+    #   为什么删掉"带对 exec_id 就放行"的兜底：exec_id 在 /api/flow 里就能看到，
+    #   任何能读页面的人都能抄一个。抄一个就能撤下终态，等于把纠错入口变成
+    #   匿名改状态的通道 —— 这正是这次故障要防的那类问题。
+    own_ok <- FALSE
+    tryCatch({
+      own_ok <- isTRUE(db_run_log_authorized(DB_CON, owner_ctx_key(owner_ctx), sid))
+    }, error = function(e) own_ok <<- FALSE)
+    if (!isTRUE(own_ok))
+      return(send_json(con, 403, list(ok = FALSE, code = "recover_not_authorized",
+        error = "调用方不是这个分析的属主，也没有该分析的授权凭据；不改。")))
+    latest_ex <- NULL; latest_err <- FALSE
+    tryCatch({ latest_ex <- exec_latest_for(stp, sid) },
+             error = function(e) latest_err <<- TRUE)
+    verified_n <- NULL; verified_err <- FALSE
+    tryCatch({
+      if (!DB_READY) verified_err <- TRUE else {
+        n <- db_scalar(DB_CON,
+          "SELECT COUNT(*) FROM step_attempts WHERE req_id = ? AND step_id = ? AND status = 'verified'",
+          list(rq, stp))
+        if (length(n) == 1L && !is.na(n)) verified_n <- as.integer(n) else verified_err <- TRUE
+      }
+    }, error = function(e) verified_err <<- TRUE)
+    # 待回写号读不出来时不能当成"没有后继请求"，那正是放过旧记录的路。
+    pend <- tryCatch(as.character(sess_get_pending(APP_DIR, sid, slot = "step") %||% ""),
+                     error = function(e) NA_character_)
+    if (length(pend) != 1L || is.na(pend))
+      return(send_json(con, 503, list(ok = FALSE, code = "recover_pending_unavailable",
+        error = "读不到这一环当前的待回写号，无法判断是否已有后继请求；不改。")))
+    pend <- as.character(pend)
+    # 当前有效值：必须就是那条失败投影，绝不回退去读旧 failed。
+    cur <- tryCatch(attempt_results(APP_DIR, sid, rq)$steps[[stp]], error = function(e) NULL)
+    ctx <- list(sid = sid, step = stp, req = rq, rec = cur, ex = ex,
+                latest_ex = latest_ex, latest_err = latest_err,
+                verified_n = verified_n, verified_err = verified_err,
+                pending_req = pend, facts = b$facts %||% NULL)
+    why <- recover_eligibility(ctx)
+    if (nzchar(why))
+      return(send_json(con, 409, list(ok = FALSE, code = "recover_not_eligible",
+        step = stp, reason = why, wrote_db_done_or_verified = FALSE,
+        old_files_kept = TRUE,
+        error = paste0("不符合纠正条件：", why, "。未改动任何状态。"))))
+    res <- recover_apply(APP_DIR, sid, stp, rq, cur, ex, b$facts %||% list(), STATE_DIR)
+    if (!isTRUE(res$ok))
+      return(send_json(con, 409, list(ok = FALSE,
+        code = as.character(res$code %||% "recover_failed"),
+        wrote_state = FALSE, wrote_db_done_or_verified = FALSE, old_files_kept = TRUE,
+        error = as.character(res$error %||% "纠正未写入"))))
+    return(send_json(con, 200, list(ok = TRUE, recovered = TRUE,
+      step = stp, session_id = sid, req_id = rq,
+      exec_id = as.character(ex$id %||% ""), job_id = as.character(ex$job_id %||% ""),
+      started_at = as.character(ex$created_at %||% ex$claimed_at %||% ""),
+      superseded = res$superseded, new_terminal_slot = res$new_terminal_slot,
+      old_files_kept = TRUE, wrote_db_done_or_verified = FALSE,
+      recovered_file = basename(as.character(res$recovered_file %||% "")))))
   }
 
   if (p == "/api/inject/due") {
     due <- inject_due()
-    return(send_json(con, 200, list(ok = TRUE, count = length(due), items = due)))
+    # 派工前先摘掉过时通知：同环节已有执行端在管、或该请求已验收的，
+    #   不再交给 runner 另起会话去"启动计算"，只软关闭并留原因。
+    closed_n <- 0L
+    if (HAS_EXEC_GUARD && length(due)) {
+      sc <- tryCatch(inject_stale_close(due), error = function(e) NULL)
+      if (!is.null(sc)) { due <- sc$kept; closed_n <- as.integer(sc$closed_n %||% 0L) }
+    }
+    return(send_json(con, 200, list(ok = TRUE, count = length(due), items = due,
+                                    stale_closed = closed_n)))
   }
 
   # 单条取全文：页面上"现在补发"按钮要用它。
@@ -5868,9 +7528,21 @@ serve_request <- function(con, req) {
   # ---- 环节质检：对指定环节跑 reviewer（skill + 脚本双检）-----------
   if (p == "/api/review") {
     b <- body_json()
+    access <- record_preflight$access
+    sid2 <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     stage <- as.character(b$stage %||% "")
-    rd <- as.character(b$run_dir %||% runDir %||% "")
+    rd <- as.character(b$run_dir %||% ctx$run_dir)
     if (!nzchar(rd)) return(send_json(con, 400, list(ok = FALSE, error = "缺运行目录")))
+    if (!identical(gsub("\\\\", "/", rd), gsub("\\\\", "/", ctx$run_dir)))
+      return(send_json(con, 409, c(list(ok = FALSE, code = "review_run_dir_mismatch",
+        error = "run_dir 不属于这条分析记录，未写质检结论。"),
+        record_cap_fields(access$cap))))
     # 不再跑服务器上的 reviewer.R，也不再往服务器派质检任务。
     #   为什么撤：服务器那份 reviewer.R 是另一份副本，阶段名单按老流程写
     #   （env/decide/precheck/pipeline1/plots/ppt/pack），本流程的
@@ -5880,14 +7552,11 @@ serve_request <- function(con, req) {
     #   状态是否 done、有没有产物清单、有没有运行目录、日志里有没有失败字样。
     if (!isTRUE(HAS_QUALITY))
       return(send_json(con, 200, list(ok = FALSE, error = "质检模块未加载（engine/quality.R）")))
-    sid2 <- as.character(b$session_id %||% "")
-    if (!nzchar(sid2)) sid2 <- tryCatch(sess_current_id(APP_DIR), error = function(e) "")
-    if (!nzchar(sid2)) sid2 <- "_default"
     q <- tryCatch(qual_of(sid2, stage), error = function(e) NULL)
     if (is.null(q)) {
       # 没有记录就说没有，不能当成通过。
       return(send_json(con, 200, list(
-        ok = FALSE, stage = stage, verdict = "missing", checked = FALSE,
+        ok = FALSE, session_id = sid2, stage = stage, verdict = "missing", checked = FALSE,
         output = paste0("「", stage, "」还没有应用侧质检记录 —— 不是通过了，是还没跑过。",
                         "质检在步骤回写时自动生成：回写里要带状态、运行目录、产物清单和日志。"))))
     }
@@ -5901,7 +7570,7 @@ serve_request <- function(con, req) {
                                if (nzchar(as.character(c0$detail %||% "")))
                                  paste0("（", as.character(c0$detail %||% ""), "）") else ""))
     }
-    return(send_json(con, 200, list(ok = okQ, stage = stage,
+    return(send_json(con, 200, list(ok = okQ, session_id = sid2, stage = stage,
                                     verdict = as.character(q$verdict %||% "unknown"),
                                     checks = q$checks %||% list(),
                                     output = paste(lines, collapse = "\n"))))
@@ -5915,18 +7584,26 @@ serve_request <- function(con, req) {
   if (p == "/api/task") {
     tf <- file.path(APP_DIR, "state", "tasks.jsonl")
     dir.create(dirname(tf), showWarnings = FALSE, recursive = TRUE)
+    access <- record_preflight$access
+    task_sid <- as.character(record_preflight$target$sid %||% "")
     if (identical(req$method, "POST")) {
       b <- body_json()
       stage <- as.character(b$stage %||% "")
       if (!nzchar(stage)) return(send_json(con, 400, list(ok = FALSE, error = "缺 stage")))
-      prof <- tryCatch(read_json_file(file.path(APP_DIR, "config", "server_profile.json")),
-                       error = function(e) NULL) %||% list()
-      srv <- prof$server %||% list()
+      ctx <- record_context(access$cap, require_run_dir = FALSE)
+      if (!isTRUE(ctx$ok)) {
+        out <- record_refusal(ctx)
+        out$body <- c(out$body, record_cap_fields(access$cap))
+        return(send_json(con, out$status, out$body))
+      }
+      srv <- ctx$server_place %||% list()
       task <- list(
         id = paste0("task-", format(Sys.time(), "%Y%m%d%H%M%S"), "-", stage),
+        session_id = task_sid,
         stage = stage,
         skill = as.character(b$skill %||% ""),
-        run_dir = as.character(b$run_dir %||% (srv$work_root %||% "")),
+        run_dir = ctx$run_dir,
+        mode = ctx$mode,
         note = as.character(b$note %||% ""),
         server = list(host = srv$host, port = srv$port, user = srv$user,
                       # 只放引用键，不放口令本体
@@ -5941,7 +7618,8 @@ serve_request <- function(con, req) {
       writeLines(jsonlite::toJSON(task, auto_unbox = TRUE, null = "null"), con2, useBytes = TRUE)
       close(con2)
       Sys.chmod(tf, mode = "0600")  # 不吞失败：设不上要能被看见
-      return(send_json(con, 200, list(ok = TRUE, task = task)))
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = task_sid, task = task),
+        record_cap_fields(access$cap))))
     }
     items <- list()
     if (file.exists(tf)) {
@@ -5951,13 +7629,15 @@ serve_request <- function(con, req) {
       items <- lapply(ln, function(x)
         tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE), error = function(e) NULL))
       items <- Filter(Negate(is.null), items)
+      items <- Filter(function(x) identical(as.character(x$session_id %||% ""), task_sid), items)
       # 口令只落盘给助手读，不回传给浏览器：这个应用是公网可访问的。
       items <- lapply(items, function(x) {
         if (!is.null(x$server)) x$server$password <- NULL
         x
       })
     }
-    return(send_json(con, 200, list(ok = TRUE, tasks = items)))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = task_sid, tasks = items),
+      record_cap_fields(access$cap))))
   }
 
   # ===================================================================
@@ -5999,11 +7679,25 @@ serve_request <- function(con, req) {
     for (g in (prog$stages %||% list())) gmap[[as.character(g$stage %||% "")]] <- g
 
     out <- list()
-    fprof <- flow_profile()
+    fprof <- flow_profile(sid)
     for (id in stepIds) {
       st <- if (HAS_FLOW) flow_stage(id, fprof) else NULL
       if (is.null(st)) next
       rec <- byId[[id]]
+      # 这一环在执行队列里的真实状态。
+      #   为什么状态要以它为准：作业一旦入队，跑不跑就不由会话决定了。
+      #   原来只按回写记录算，于是"已入队、执行端正在跑"被显示成
+      #   「交接未确认，尚无执行回写」—— 人看到这句会以为没派出去，再点一次。
+      exNow <- tryCatch(exec_active_for(id, if (is.null(sid)) cur_sid() else sid),
+                        error = function(e) NULL)
+      # 本 req 的这一环若被明确判失败（比如引擎版本不一致、根本没提交），
+      #   也要把它当成"这一步最近一次执行的真实结论"给出。
+      exFail <- tryCatch(
+        exec_failed_for(id, if (is.null(sid)) cur_sid() else sid,
+                        as.character((rec %||% list())$req_id %||% "")),
+        error = function(e) NULL)
+      exPick <- tryCatch(flow_exec_state(exNow, exFail, rec),
+                         error = function(e) NULL)
       subsIn <- list()
       if (!is.null(rec) && !is.null(rec$subs)) for (x in rec$subs) subsIn[[as.character(x$id %||% "")]] <- x
       gate <- gmap[[id]]
@@ -6065,6 +7759,9 @@ serve_request <- function(con, req) {
       coverBy <- as.character(st$cover_by %||% "")
       covered <- FALSE
       coverNote <- ""
+      upVerified <- FALSE
+      hitN <- 0L
+      want <- character(0)
       if (nzchar(coverBy)) {
         upRec <- byId[[coverBy]]
         upDone <- !is.null(upRec) && identical(as.character(upRec$status %||% ""), "done")
@@ -6077,14 +7774,35 @@ serve_request <- function(con, req) {
             if (nzchar(r0)) upRels <- c(upRels, r0)
           }
         }
-        hitN <- sum(want %in% upRels)
-        if (upDone) {
-          covered <- TRUE
-          coverNote <- paste0("这一步的产出已由「",
-                              as.character((flow_stage(coverBy, fprof) %||% list(title = coverBy))$title),
-                              "」一并算出：", paste(want, collapse = "、"),
-                              if (hitN > 0) paste0("（已确认 ", hitN, " 个）") else "（按流程定义覆盖）",
-                              "。不再重算，免得产出两份对不上的表。")
+        # 严格验收轴：同一 req 的这一环必须已 verified。
+        #   原来只认 status == done，而上游刚完成、还没判定（甚至已被拒）时
+        #   status 也是 done，于是 fullmark/diff 提前显示"已由终版覆盖"，
+        #   页面把两项算进已通过 —— 这就是 6/12 里多出来的那两项。
+        rqUp <- if (is.null(upRec)) "" else as.character(upRec$req_id %||% "")
+        if (nzchar(rqUp) && isTRUE(DB_READY)) {
+          vf <- tryCatch(DBI::dbGetQuery(DB_CON,
+                  "SELECT COUNT(*) AS n FROM step_attempts
+                    WHERE req_id = ? AND step_id = ? AND status = 'verified'",
+                  list(rqUp, as.character(coverBy))), error = function(e) NULL)
+          upVerified <- !is.null(vf) && nrow(vf) == 1L &&
+            isTRUE(as.integer(vf$n[[1]]) > 0L)
+        }
+        cd0 <- cover_decide(up_status = as.character(upRec$status %||% ""),
+                            up_verified = upVerified, want = want,
+                            up_rels = upRels)
+        covered <- isTRUE(cd0$covered)
+        hitN <- as.integer(cd0$hit %||% 0L)
+        upTitle <- as.character(
+          (flow_stage(coverBy, fprof) %||% list(title = coverBy))$title)
+        if (covered) {
+          coverNote <- paste0("这一步的产出已由「", upTitle, "」一并算出：",
+                              paste(want, collapse = "、"),
+                              "（已确认 ", hitN, " 个，上游已通过验收）。",
+                              "不再重算，免得产出两份对不上的表。")
+        } else {
+          coverNote <- paste0("这一步的产出由「", upTitle, "」负责，",
+                              as.character(cd0$why %||% "条件未满足"),
+                              "；本环节没有独立脚本，不要单独点运行。")
         }
       }
       out[[length(out) + 1]] <- list(
@@ -6109,7 +7827,65 @@ serve_request <- function(con, req) {
           nzchar(sk) && dir.exists(file.path(path.expand("~"), "skills", sk))
         },
         phase = if (is.null(st$phase) || is.na(st$phase)) "" else as.character(st$phase),
-        status = if (is.null(rec)) "todo" else rec_display_status(rec),
+        # 状态优先级：执行队列的真实状态 > 回写记录。
+        #   队列里有 queued/running，说明作业已经派出去并由执行端接管，
+        #   这时候再说「交接未确认」是错的 —— 那是"会话没送到"的说法，
+        #   而这里的执行本来就不靠会话。实测就是这个误报：
+        #   作业 60739 已经在 master01 上跑，页面还写着交接未确认。
+        #   只在没有回写、或回写还没开始时才用队列状态，避免盖掉真实结论。
+        status = {
+          # 先按「执行队列优先、其次回写」得一个状态，再校正一种特例：
+          #   申报 done、但判定器拒过。
+          st0 <- {
+            # 队列结论优先（含"本 req 明确失败"），其次回写。
+            #   判据集中在 flow_exec_state 里，可单测；这里只做回退。
+            es <- exPick
+            esSt <- if (is.null(es)) "" else as.character(es$status %||% "")
+            if (nzchar(esSt)) esSt
+            else if (is.null(rec)) "todo" else rec_display_status(rec)
+          }
+          # 为什么必须校正：attempt 里写的是申报值 done，页面照着读就会把
+          #   一次被拒的完成画成"已完成"，还能让下游 merge 放行。
+          #   实测就是这样：只给两个产物的 done 被 409 拒了，
+          #   /api/flow 仍显示 doublet done。
+          #   判据用回写那一刻留下的拒绝凭据，不动 attempt 里的原申报。
+          if (identical(as.character(st0), "done")) {
+            sid0 <- if (is.null(sid)) cur_sid() else sid
+            rq0 <- as.character((rec %||% list())$req_id %||% "")
+            if (!nzchar(rq0) && HAS_SESSIONS && nzchar(sid0))
+              rq0 <- as.character(sess_get_pending(APP_DIR, sid0, slot = "step") %||% "")
+            if (nzchar(rq0)) {
+              # 拒绝凭据的效力边界：只在该 req 的该步「库里没有 verified 行」时才生效。
+              #   为什么要这条判据：判定判据修正后，同一个 req 重验通过、库里已有
+              #   verified 行，但第一次的拒绝凭据还留在目录里。旧逻辑只看文件在不在，
+              #   于是页面永远停在「完成申报未通过」，下游也永远被挡。
+              #   这不是放宽：真被拒的 req 不会有 verified 行，显示照旧是 rejected。
+              vf0 <- tryCatch(db_scalar(DB_CON,
+                paste0("SELECT COUNT(*) FROM step_attempts ",
+                       "WHERE req_id = ? AND step_id = ? AND status = 'verified'"),
+                list(rq0, id)), error = function(e) NA)
+              reject_eff_verified <- !(length(vf0) == 1L && !is.na(vf0) &&
+                                         as.integer(vf0) > 0L)
+              rj <- file.path(attempt_dir(APP_DIR, sid0, rq0),
+                              paste0("verdict_reject-", id, ".json"))
+              if (reject_eff_verified && file.exists(rj)) st0 <- "rejected"
+            }
+          }
+          st0
+        },
+        # 队列侧的信息单独给出一份，前端据此显示"执行端正在跑（作业名）"，
+        #   而不是笼统地写"已交给助手"。
+        exec_id = if (is.null(exPick)) NULL else as.character(exPick$exec_id %||% ""),
+        exec_status = if (is.null(exPick)) NULL else as.character(exPick$exec_status %||% ""),
+        exec_job = if (is.null(exPick)) NULL else as.character(exPick$exec_job %||% ""),
+        # 执行端原文错误：页面照原样显示，别让"交接未确认"掩盖一次明确拒绝。
+        exec_error = if (is.null(exPick)) NULL else (exPick$exec_error %||% NULL),
+        # 执行端最后一次报到的时间。
+        #   为什么要单独给出来：中途没有 step/import 回写是很正常的 ——
+        #   一个样本跑十几分钟，执行端只按分钟报 keepalive。
+        #   页面原来只拿回写时间算"多久没更新"，于是把"正常在跑但没回写"
+        #   算成了失联，实测报了 1 小时 31 分钟。
+        exec_last_seen = if (is.null(exPick)) NULL else as.character(exPick$exec_last_seen %||% ""),
         conflict = conflict,
         covered = covered, cover_by = coverBy, cover_note = coverNote,
         # 这一步要不要人先定注释依据。前端据此拦一下，别让人点完才发现没依据。
@@ -6150,11 +7926,17 @@ serve_request <- function(con, req) {
     #   表现就是：取哪一步的全文，拿到的都是 doublet 那一条 ——
     #   助手照着它去跑，等于点 figs 却去跑了去双。这个坑踩过两次
     #   （先是在 /api/consistency，这里是同一处），所以统一走 qget。
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
     stepId <- qget(req$target, "step")
-    if (!nzchar(stepId)) stepId <- flow_run_order()[1] %||% "doublet"
-    pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
-    sid <- qget(req$target, "session")
-    if (!nzchar(sid) && HAS_SESSIONS) sid <- tryCatch(sess_current_id(APP_DIR), error = function(e) "") else ""
+    if (!nzchar(stepId)) stepId <- flow_run_order(sid)[1] %||% "doublet"
+    ctx <- record_context(access$cap, require_run_dir = FALSE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    pl <- ctx$place
     rq <- qget(req$target, "req")
     if (!nzchar(rq)) {
       rq <- if (HAS_SESSIONS && nzchar(sid))
@@ -6169,26 +7951,50 @@ serve_request <- function(con, req) {
       recG <- remote_step_get(stepId, as.character(sid %||% ""))
       gateNote <- as.character((recG %||% list())$gate_note %||% "")
     }, error = function(e) NULL)
-    txt <- remote_step_instruction(stepId, pl, session_id = as.character(sid %||% ""),
-                                   req_id = rq, gate_note = gateNote)
-    stage <- if (HAS_FLOW) flow_stage(stepId) else NULL
+    # ---- 已入队时，brief 也必须是"只观察"那一版 --------------------------
+    #   为什么不能只改 run 端点的 session_text：
+    #     助手进会话看到的是短句，接着它按短句里的地址来取全文。
+    #     如果 brief 照样回"照这条命令跑"，那前面那句"只观察"就白写了 ——
+    #     两处说法打架，助手会按更具体的那条去做，于是又出现第二个执行者。
+    #   所以这里先问执行队列：这一环已有 queued/running 的任务，
+    #   就把 mode 标成 observe，并把全文换成观察版本。
+    exActive <- tryCatch(exec_active_for(stepId, as.character(sid %||% "")),
+                         error = function(e) NULL)
+    txt <- if (!is.null(exActive)) {
+      remote_step_observe_text(stepId, sid = as.character(sid %||% ""), ex = exActive)
+    } else {
+      remote_step_instruction(stepId, pl, session_id = as.character(sid %||% ""),
+                              req_id = rq, gate_note = gateNote)
+    }
+    stage <- if (HAS_FLOW) flow_stage(stepId, flow_profile(sid)) else NULL
     return(send_json(con, 200, list(
-      ok = TRUE, step = stepId,
+      ok = TRUE, session_id = sid, step = stepId,
       title = if (is.null(stage)) stepId else stage$title,
       skill = if (is.null(stage)) NULL else stage$skill,
       subs = flow_subs_of(stepId),
+      mode = if (is.null(exActive)) "execute" else "observe",
+      exec_id = if (is.null(exActive)) NULL else as.character(exActive$id %||% ""),
+      exec_status = if (is.null(exActive)) NULL else as.character(exActive$status %||% ""),
       text = txt,
       chars = nchar(txt))))
   }
 
   if (p == "/api/flow") {
-    if (!DB_READY || !nzchar(requested_sid) ||
-        !db_run_log_authorized(DB_CON, owner_ctx_key(owner_ctx), requested_sid))
-      return(send_json(con, 403, list(ok = FALSE, code = "run_log_not_owner", error = "无权读取分析进度")))
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    runDir <- ctx$run_dir
+    st$runDir <- runDir
+    st$runDirRemote <- ctx$run_dir_remote
     if (!HAS_FLOW) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/flow_spec.R")))
     sc <- b_placeholder <- NULL
     # 只报「这一段要用的阶段」：跑分析里的阶段，加上 env/decide/precheck 这三步识别腿。
-    prof <- flow_profile()
+    prof <- flow_profile(sid)
     want <- FLOW_ORDER(prof)
     chk <- tryCatch(flow_spec_selfcheck(ENGINE_DIR), error = function(e) list(ok = FALSE, problems = conditionMessage(e)))
     # 服务器档没有 PPT 与打包这两步 —— 如实报出来，让人知道是"没有"，
@@ -6207,6 +8013,16 @@ serve_request <- function(con, req) {
                        sn <- tryCatch(read_json_file(file.path(STATE_DIR, "server_engine_snapshot.json")),
                                       error = function(e) NULL)
                        if (is.null(sn)) return(NULL)
+                       # 只认属于当前这条记录的那一份。
+                       #   这个文件是全局单文件、整份覆盖，谁最后写就是谁。
+                       #   以前不判归属，于是一条旧记录（bta0）的失败快照
+                       #   会一直挂在新记录的页面上，和这次真跑出来的结论打架。
+                       #   老文件没有 session_id：一样当"不属本记录"，
+                       #   宁可不给判断，也不拿别人的结论下注。
+                       cur_snap_sid <- sid
+                       sn_sid <- as.character(sn$session_id %||% "")
+                       if (!nzchar(sn_sid) || !identical(sn_sid, as.character(cur_snap_sid)))
+                         return(NULL)
                        list(readable = isTRUE(sn$readable),
                             chain_order = as.character(sn$chain_order %||% character(0)),
                             why = as.character(sn$why %||% ""))
@@ -6217,10 +8033,10 @@ serve_request <- function(con, req) {
       else list(ok = FALSE, issues = list(list(
         level = "unknown", where = "engine/contract.R", what = "模块没加载", fix = "检查文件是否存在。")))
     return(send_json(con, 200, list(
-      ok = TRUE, order = as.list(want),
+      ok = TRUE, session_id = sid, mode = ctx$mode, order = as.list(want),
       profile = prof,
       missing = missing,
-      stages = flow_progress(want),
+      stages = flow_progress(want, sid),
       # 进度的三种数法分开给，不再让人自己数卡片：
       #   done      真正跑完的
       #   covered   产出已由上游一并算出、不需要再跑的
@@ -6236,11 +8052,11 @@ serve_request <- function(con, req) {
              passed = length(d) + length(cv), total = length(ss),
              done_ids = as.list(vapply(d, function(x) as.character(x$id %||% ""), "")),
              covered_ids = as.list(vapply(cv, function(x) as.character(x$id %||% ""), "")))
-      })(flow_progress(want)),
+      })(flow_progress(want, sid)),
       gates = FLOW_GATES,
       selfcheck = chk,
       contract = cchk,
-      run_dir = if (is.null(runDir)) NULL else enc2utf8(gsub("\\\\", "/", runDir)))))
+      run_dir = enc2utf8(gsub("\\\\", "/", runDir)))))
   }
 
   # 质检回写：执行端在服务器上跑完 reviewer.R 之后，把结论送回来。
@@ -6251,8 +8067,15 @@ serve_request <- function(con, req) {
     b <- body_json()
     stage_id <- as.character(b$stage %||% "")
     if (!nzchar(stage_id)) return(send_json(con, 400, list(ok = FALSE, error = "缺 stage")))
-    rev_sid <- if (nzchar(as.character(b$session_id %||% "")))
-      as.character(b$session_id) else cur_sid()
+    target <- record_session_target(q, list(session_id = b$session_id %||% ""),
+                                    path = p, require = TRUE)
+    if (!isTRUE(target$ok)) {
+      refused <- record_refusal(target)
+      return(send_json(con, refused$status, refused$body))
+    }
+    access <- record_access(DB_CON, APP_DIR, target$sid, owner_ctx, need = "write")
+    if (!isTRUE(access$ok)) return(send_json(con, access$status, access$body))
+    rev_sid <- target$sid
     d <- flow_prog_read(sid = "")
     keep <- Filter(function(x)
       !(identical(as.character(x$stage %||% ""), stage_id) && rec_belongs(x, rev_sid)),
@@ -6268,14 +8091,15 @@ serve_request <- function(con, req) {
       host = as.character(b$host %||% ""),
       imported_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
     # 「确实在服务器上跑」这一条用回写里的机器信息核，能核就核，不能核就说不能核。
-    pl <- if (HAS_PLACE) tryCatch(place_read(APP_DIR), error = function(e) NULL) else NULL
+    pl <- access$cap$place
     srvHost <- as.character(((pl %||% list())$server %||% list())$host %||% "")
     item$on_server <- if (!nzchar(item$host)) "unknown"
                       else if (!nzchar(srvHost)) "unknown"
                       else if (identical(item$host, srvHost)) "yes" else "no"
     d$stages <- c(keep, list(item))
     write_json_file(FLOW_PROG_FILE, d)
-    return(send_json(con, 200, list(ok = TRUE, stage = stage_id, verdict = item)))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = rev_sid,
+      stage = stage_id, verdict = item), record_cap_fields(access$cap))))
   }
 
   # ---- 按环节分组的脚本清单 ---------------------------------------
@@ -6287,12 +8111,20 @@ serve_request <- function(con, req) {
     if (!isTRUE(HAS_SCRIPT_RESOLVE) || !isTRUE(HAS_FLOW))
       return(send_json(con, 200, list(ok = FALSE,
         error = "缺少 engine/script_resolve.R 或 engine/flow_spec.R")))
-    ids <- tryCatch(FLOW_ORDER(flow_profile()), error = function(e) character(0))
+    access <- record_preflight$access
+    sid <- as.character(record_preflight$target$sid %||% "")
+    want_drafts <- identical(qget(q, "drafts"), "1")
+    if (isTRUE(want_drafts) && !isTRUE(access$cap$can_write))
+      return(send_json(con, 403, c(list(ok = FALSE, code = "not_owner",
+        error = "只有记录所有者可以生成脚本草稿。"),
+        record_cap_fields(access$cap))))
+    prof <- flow_profile(sid)
+    ids <- tryCatch(FLOW_ORDER(prof), error = function(e) character(0))
     res <- tryCatch(script_resolve_all(ENGINE_DIR, APP_DIR, ids,
-             stage_getter = function(id) flow_stage(id, flow_profile()),
-             sup_getter = function() supplement_index(), sid = cur_sid()),
+             stage_getter = function(id) flow_stage(id, prof),
+             sup_getter = function() supplement_index(), sid = sid),
            error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    if (identical(qget(q, "drafts"), "1") && isTRUE(res$ok)) {
+    if (isTRUE(want_drafts) && isTRUE(res$ok)) {
       made <- list()
       for (one in res$stages) {
         if (identical(one$plan, "draft"))
@@ -6308,8 +8140,16 @@ serve_request <- function(con, req) {
   if (p == "/api/stage-scripts") {
     sf <- file.path(ENGINE_DIR, "stage_scripts.R")
     if (!file.exists(sf)) return(send_json(con, 200, list(ok = FALSE, error = "找不到 engine/stage_scripts.R")))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     source(sf, local = TRUE)
-    return(send_json(con, 200, stage_scripts(ENGINE_DIR, runDir)))
+    return(send_json(con, 200, c(stage_scripts(ENGINE_DIR, ctx$run_dir),
+                                 record_cap_fields(access$cap))))
   }
 
   # ===================================================================
@@ -6324,27 +8164,42 @@ serve_request <- function(con, req) {
   # 历次运行：按 run_id 归并，给出时间、涉及步骤、用的是哪套脚本
   if (p == "/api/history") {
     if (!HAS_HISTORY) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/history.R")))
-    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, runs = list(), steps = list())))
-    return(send_json(con, 200, list(
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    runDirTarget <- ctx$run_dir
+    return(send_json(con, 200, c(list(
       ok = TRUE,
-      run_dir = enc2utf8(gsub("\\\\", "/", runDir)),
-      runs = hist_runs(runDir),
-      steps = hist_step_states(runDir, STEP_ORDER),
+      session_id = ctx$session_id,
+      run_dir = enc2utf8(gsub("\\\\", "/", runDirTarget)),
+      runs = hist_runs(runDirTarget),
+      steps = hist_step_states(runDirTarget, STEP_ORDER),
       order = as.list(STEP_ORDER),
-      snapshots = hist_snapshots(runDir),
-      mark = hist_read_json(hist_roll_file(runDir))
-    )))
+      snapshots = hist_snapshots(runDirTarget),
+      mark = hist_read_json(hist_roll_file(runDirTarget))
+    ), record_cap_fields(access$cap))))
   }
 
   # 手动存一个快照（也可以在保存设置时自动存）
   if (p == "/api/snapshot" && identical(req$method, "POST")) {
     if (!HAS_HISTORY) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/history.R")))
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     b <- body_json()
-    r <- tryCatch(hist_snapshot(runDir, label = as.character(b$label %||% "manual"),
+    r <- tryCatch(hist_snapshot(ctx$run_dir, label = as.character(b$label %||% "manual"),
                                 kind = "manual", note = as.character(b$note %||% "")),
                   error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   # 回退：恢复某个快照；或只做"从某一步往后重跑"的标记
@@ -6353,18 +8208,25 @@ serve_request <- function(con, req) {
   #   两种都不删产物：删是不可逆的，而重跑本来会覆盖。
   if (p == "/api/rollback" && identical(req$method, "POST")) {
     if (!HAS_HISTORY) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/history.R")))
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     b <- body_json()
     mode <- as.character(b$mode %||% "rerun")
     r <- tryCatch({
       if (identical(mode, "restore")) {
-        hist_rollback(runDir, as.character(b$snapshot %||% ""), STEP_ORDER,
+        hist_rollback(ctx$run_dir, as.character(b$snapshot %||% ""), STEP_ORDER,
                       from_step = as.character(b$from_step %||% "") )
       } else {
-        hist_mark_rerun(runDir, as.character(b$from_step %||% ""), STEP_ORDER)
+        hist_mark_rerun(ctx$run_dir, as.character(b$from_step %||% ""), STEP_ORDER)
       }
     }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   # 最近用过的运行目录：换回来 / 退回到欢迎页
@@ -6551,6 +8413,7 @@ serve_request <- function(con, req) {
   # 写入：置换已有脚本（必须存在）/ 新增（必须不存在）
   if (p == "/api/script-put" && identical(req$method, "POST")) {
     if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    denied <- code_write_denied(); if (!is.null(denied)) return(denied)
     b <- body_json()
     r <- tryCatch(sop_put(ENGINE_DIR, as.character(b$rel %||% ""),
                           as.character(b$content %||% ""),
@@ -6571,6 +8434,7 @@ serve_request <- function(con, req) {
   #   前端列表里回传的也是这个 ID，两边保持一致。
   if (p == "/api/script-restore" && identical(req$method, "POST")) {
     if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    denied <- code_write_denied(); if (!is.null(denied)) return(denied)
     b <- body_json()
     r <- tryCatch(sop_restore_backup(ENGINE_DIR, as.character(b$backup %||% b$backup_id %||% "")),
                   error = function(e) list(ok = FALSE, error = conditionMessage(e)))
@@ -6581,6 +8445,7 @@ serve_request <- function(con, req) {
   #   直接覆盖等于让未审阅的代码变成在用代码，而且没有回头路。
   if (p == "/api/script-upload" && identical(req$method, "POST")) {
     if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    denied <- code_write_denied(); if (!is.null(denied)) return(denied)
     b <- body_json()
     r <- tryCatch(sop_incoming_add(ENGINE_DIR, as.character(b$name %||% "upload.R"),
                                    as.character(b$content %||% ""),
@@ -6592,9 +8457,12 @@ serve_request <- function(con, req) {
   if (p == "/api/incoming") {
     if (!HAS_SCRIPT_OPS) return(send_json(con, 200, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
     if (identical(req$method, "POST")) {
+      # 采纳会把上传件写成在用脚本，等同于改应用代码，先过同一道门。
+      #   drop 只是丢弃一个没采纳的上传件，不碰在用脚本，所以不拦。
       b <- body_json()
       act <- as.character(b$action %||% "drop")
       id <- as.character(b$id %||% "")
+      if (!identical(act, "drop")) { denied <- code_write_denied(); if (!is.null(denied)) return(denied) }
       if (identical(act, "drop")) {
         return(send_json(con, 200, sop_incoming_drop(ENGINE_DIR, id)))
       }
@@ -6615,6 +8483,8 @@ serve_request <- function(con, req) {
   # 有改动想法但没有现成脚本：把请求连同当前文件一起交给助手
   if (p == "/api/script-change" && identical(req$method, "POST")) {
     if (!HAS_SCRIPT_OPS) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/script_ops.R")))
+    # 这条路是把「改这个脚本」交给助手，等于让助手改应用代码，同样要过门。
+    denied <- code_write_denied(); if (!is.null(denied)) return(denied)
     b <- body_json()
     rel <- as.character(b$rel %||% "")
     idea <- as.character(b$idea %||% "")
@@ -6943,7 +8813,17 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/artifacts") {
-    if (is.null(runDir)) return(send_json(con, 200, list(ok = TRUE, items = list())))
+    access <- record_preflight$access
+    sid_art <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    runDir <- ctx$run_dir
+    st$runDir <- runDir
+    st$runDirRemote <- ctx$run_dir_remote
     # 服务器模式：运行目录在服务器上，本机 dir.exists 永远是假。
     #   以前这里照本机那套 list.files 去列，结果永远 items=[]，
     #   页面就写「还没有产物」—— 而服务器上那些图、表、rds 都在。
@@ -6954,7 +8834,6 @@ serve_request <- function(con, req) {
       #   实际使用中没人会去点它，于是页面永远显示"还没让执行端列过"——
       #   而每个步骤回写时早就把产物路径与大小带回来了。手上有的东西不摆出来，
       #   等于让人以为没产物。
-      sid_art <- cur_sid()
       dArt <- remote_steps_read(sid_art)
       items <- list()
       seen <- character(0)
@@ -6977,22 +8856,21 @@ serve_request <- function(con, req) {
             full = NULL)
         }
       }
-      # 老路径兜底：如果 artifacts.json 有更全的清单，补进来（不覆盖）。
-      f0 <- file.path(STATE_DIR, "artifacts.json")
-      if (file.exists(f0)) {
-        a0 <- tryCatch(read_json_file(f0), error = function(e) NULL)
-        for (x in ((a0 %||% list())$items %||% list())) {
-          rel <- as.character(x$rel %||% "")
-          if (!nzchar(rel) || rel %in% seen) next
-          seen <- c(seen, rel)
-          items[[length(items) + 1L]] <- x
-        }
+      # The legacy global artifacts.json is intentionally not consulted:
+      # it mixes records. Only this session's index is allowed to supplement
+      # the verified writeback list.
+      a0 <- record_artifact_index_read(APP_DIR, sid_art)
+      for (x in (a0$items %||% list())) {
+        rel <- as.character(x$rel %||% "")
+        if (!nzchar(rel) || rel %in% seen) next
+        seen <- c(seen, rel)
+        items[[length(items) + 1L]] <- x
       }
       listed <- length(items) > 0
       # 给每个产物标三件事：能不能在应用里看、多大、取回了没有。
       #   不标这三件，页面只能一律写「需从服务器取」——
       #   人没法判断"哪些我可以马上看、哪些太大、哪些还得取"。
-      sidA <- if (nzchar(cur_sid())) cur_sid() else "_default"
+      sidA <- sid_art
       items <- lapply(items, function(x) {
         rel <- as.character(x$rel %||% "")
         k <- if (isTRUE(HAS_MIRROR)) mirror_kind(rel) else ""
@@ -7000,19 +8878,52 @@ serve_request <- function(con, req) {
                              as.numeric(x$size %||% 0) <= MIRROR_MAX_BYTES)
         x$view_kind <- k
         x$viewable <- isTRUE(can)
-        x$mirrored <- if (isTRUE(HAS_MIRROR)) mirror_has(sidA, rel) else FALSE
+        # 已取回的判据从"文件在不在"改成"这份缓存是否就是最新那一份"。
+        #   事故原样：重新生成后旧镜像还在，页面写已取回，下载拿到旧版。
+        wantMd5 <- if (isTRUE(HAS_MIRROR)) artifact_expected_md5(sidA, rel) else ""
+        vv <- if (isTRUE(HAS_MIRROR)) tryCatch(mirror_validity(sidA, rel, wantMd5),
+                                               error = function(e) NULL) else NULL
+        cacheSt <- if (is.null(vv)) "missing" else as.character(vv$state %||% "missing")
+        if (identical(cacheSt, "stale")) {
+          # 旧缓存不删，挪到 _stale；随后按未取回呈现，人正常点取回即可。
+          mv <- tryCatch(mirror_quarantine(sidA, rel), error = function(e) "")
+          if (nzchar(mv)) message("mirror_stale_quarantined ", rel, " -> ", mv)
+        }
+        x$mirrored <- identical(cacheSt, "ok")
+        x$cache_state <- cacheSt
+        x$mirror_md5 <- if (is.null(vv)) "" else as.character(vv$actual %||% "")
+        x$expected_md5 <- if (is.null(vv)) "" else as.character(vv$want %||% "")
         x$too_big <- nzchar(k) && !isTRUE(can)
+        # 单个文件能不能取回、取到哪一步，随每条一起给。
+        #   原来只按 8MB 判"太大"，PPT 与打包 ZIP 全被藏掉，页面只剩
+        #   "需从服务器取"；实际上分片通道能搬，缺的是这一层的状态。
+        st1 <- if (isTRUE(HAS_MIRROR)) mirror_item_state(sidA, rel, wantMd5)
+               else list(state = "", error = "")
+        has_pipe <- isTRUE(HAS_MIRROR) && (nzchar(k) || grepl("\\.(pptx?|zip)$", rel))
+        x$fetchable <- isTRUE(has_pipe)
+        # 只有"内容等于最新基准"才写 done；否则交回真实排队状态，
+        #   这样取回按钮不会被一条历史 done 永久遮住。
+        x$fetch_state <- if (isTRUE(x$mirrored)) "done" else as.character(st1$state %||% "")
+        # 排队位次：把「正在取回…」变成可判断的等待。
+        #   原来只有一个 pending，人看不出是排第 1 还是第 59，只能反复点、反复切页面。
+        #   0 表示不在队列里（已取回、已失败，或根本没登记）。
+        x$fetch_rank <- if (isTRUE(HAS_MIRROR) && !isTRUE(x$mirrored) &&
+                            identical(as.character(x$fetch_state %||% ""), "pending"))
+          tryCatch(mirror_queue_rank(sidA, rel), error = function(e) 0L) else 0L
+        if (identical(cacheSt, "unverified"))
+          x$fetch_error <- "本地有文件但查不到最新基准 md5，无法确认它是不是最新版本；不能据此下载"
+        else x$fetch_error <- as.character(st1$error %||% "")
         x
       })
       return(send_json(con, 200, list(
-        ok = TRUE, remote = TRUE, listed = listed,
+        ok = TRUE, session_id = sid_art, mode = ctx$mode, remote = TRUE, listed = listed,
         outdir = enc2utf8(runDir),
         listed_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
         total = length(items),
         items = items)))
     }
     r <- list_artifacts(runDir)
-    sidA2 <- if (nzchar(cur_sid())) cur_sid() else "_default"
+    sidA2 <- sid_art
     its2 <- lapply(r$items, function(x) {
       y <- x[names(x) != "full"]
       rel <- as.character(y$rel %||% "")
@@ -7024,7 +8935,8 @@ serve_request <- function(con, req) {
       y
     })
     return(send_json(con, 200, list(
-      ok = TRUE, outdir = enc2utf8(gsub("\\\\", "/", r$outdir)),
+      ok = TRUE, session_id = sid_art, mode = ctx$mode, remote = FALSE,
+      outdir = enc2utf8(gsub("\\\\", "/", r$outdir)),
       items = its2)))
   }
 
@@ -7034,6 +8946,8 @@ serve_request <- function(con, req) {
   #   下载仍然走执行端或由人从服务器取，这一点在页面上写清楚。
   if (p == "/api/artifacts/import" && identical(req$method, "POST")) {
     b <- body_json()
+    access <- record_preflight$access
+    sid_art <- as.character(record_preflight$target$sid %||% "")
     its <- b$items %||% list()
     if (!is.list(its)) return(send_json(con, 400, list(ok = FALSE, error = "items 要是数组")))
     clean <- list()
@@ -7051,14 +8965,16 @@ serve_request <- function(con, req) {
         mtime = as.character(x$mtime %||% ""),
         full = NULL)
     }
-    obj <- list(outdir = enc2utf8(as.character(b$outdir %||% runDir %||% "")),
+    obj <- list(session_id = sid_art,
+                outdir = enc2utf8(as.character(b$outdir %||% access$cap$run_dir %||% "")),
                 host = as.character(b$host %||% ""),
                 exec_pc = as.character(b$exec_pc %||% ""),
                 listed_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
                 items = clean)
-    write_json_file(file.path(STATE_DIR, "artifacts.json"), obj)
-    return(send_json(con, 200, list(ok = TRUE, total = length(clean),
-                                    outdir = obj$outdir, listed_at = obj$listed_at)))
+    record_artifact_index_write(APP_DIR, sid_art, obj)
+    return(send_json(con, 200, c(list(ok = TRUE, total = length(clean),
+                                    outdir = obj$outdir, listed_at = obj$listed_at),
+                                 record_cap_fields(access$cap))))
   }
 
   # ---- 产物取回：让人在应用里直接点开看 ----
@@ -7068,18 +8984,47 @@ serve_request <- function(con, req) {
   if (p == "/api/artifact/request" && identical(req$method, "POST")) {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/mirror.R")))
     b <- body_json()
-    sid2 <- as.character(b$session_id %||% "")
-    if (!nzchar(sid2)) sid2 <- cur_sid()
+    access <- record_preflight$access
+    sid2 <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     rel <- as.character(b$rel %||% "")
     if (!nzchar(rel)) return(send_json(con, 400, list(ok = FALSE, error = "缺 rel")))
-    r <- mirror_request(sid2, rel, bytes = b$bytes, run_dir = as.character(runDir %||% ""))
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
+    # 以已知的最新基准为准，请求里带来的大小只作兜底。
+    #   反例：页面停在旧版，用户点取回时 b$bytes 还是上一版的字节数；
+    #   若优先采信它，新文件一回传就被判"大小与登记不一致"。
+    #   所以只要库里能查到该产物最新验收的字节数，就必须覆盖浏览器送来的值。
+    bBytes <- artifact_request_bytes(sid2, rel, b$bytes)
+    r <- mirror_request(sid2, rel, bytes = bBytes,
+                        run_dir = as.character(ctx$run_dir %||% ""),
+                        want_md5 = artifact_expected_md5(sid2, rel))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   # 执行端来取：还没取回的清单。
   if (p == "/api/mirror/pending") {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 200, list(ok = TRUE, items = list())))
-    return(send_json(con, 200, list(ok = TRUE, items = mirror_pending())))
+    auth <- mirror_receipt_auth(req, owner_ctx, b = c(q, body_json()))
+    if (!isTRUE(auth$ok)) return(send_json(con, auth$status, auth))
+    reconciled <- tryCatch(artifact_reconcile_pending(owner_key =
+      if (isTRUE(auth$worker)) NULL else owner_ctx$key),
+      error = function(e) list(issues = list(list(error = conditionMessage(e)))))
+    # 允许执行端指定本批条数：默认 24，最多 500。
+    #   为什么需要：队列里混着各种类型，只按固定条数取时，后面类型的活会长期轮不到。
+    lim <- suppressWarnings(as.integer(qget(q, "limit") %||% 24L))
+    if (is.na(lim) || lim < 1L) lim <- 24L
+    if (lim > 500L) lim <- 500L
+    items <- mirror_pending(lim)
+    if (!isTRUE(auth$worker)) items <- Filter(function(it) {
+      cap <- record_capability(DB_CON, APP_DIR, it$session, owner_ctx)
+      isTRUE(cap$ok) && isTRUE(cap$is_owner) && isTRUE(cap$can_write)
+    }, items)
+    return(send_json(con, 200, list(ok = TRUE, items = items, reconcile = reconciled)))
   }
 
   # 执行端把文件内容传回来。md5 对不上就拒收并删掉。
@@ -7087,10 +9032,14 @@ serve_request <- function(con, req) {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/mirror.R")))
     b <- body_json()
     sid2 <- as.character(b$session_id %||% "")
-    if (!nzchar(sid2)) sid2 <- cur_sid()
-    r <- mirror_put(sid2, as.character(b$rel %||% ""), b$b64,
-                    want_md5 = as.character(b$md5 %||% ""))
-    if (isTRUE(r$ok)) mirror_done(sid2, as.character(b$rel %||% ""))
+    rel2 <- as.character(b$rel %||% "")
+    if (!nzchar(sid2) || !nzchar(rel2))
+      return(send_json(con, 400, list(ok = FALSE, code = "binding_fields_required",
+        error = "mirror 回传必须带 session_id 与 rel")))
+    guard <- mirror_receipt_guard(req, owner_ctx, b)
+    if (!isTRUE(guard$ok)) return(send_json(con, guard$status, guard))
+    r <- mirror_put(sid2, rel2, b$b64, want_md5 = guard$md5, bytes = guard$bytes)
+    if (isTRUE(r$ok)) mirror_done(sid2, rel2)
     return(send_json(con, if (isTRUE(r$ok)) 200 else 400,
                      r[setdiff(names(r), "path")]))
   }
@@ -7099,22 +9048,65 @@ serve_request <- function(con, req) {
   #   走 /api/mirror/put 会直接 413。这里按片上传，最后一片拼装并校验 md5。
   #   为什么不用 /api/artifact/chunk：那条要求先有 fetch_jobs 的 expected_bytes，
   #   而取回器是按清单批量搬的，拿不到那个号。
+  # 执行端取不回来（文件不在、大小不符、分片被拒）时登记原因。
+  #   登记后该条不再进 pending，避免每分钟重试同一件注定失败的事。
+  if (p == "/api/mirror/fail" && identical(req$method, "POST")) {
+    if (!isTRUE(HAS_MIRROR)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/mirror.R")))
+    b <- body_json()
+    sid2 <- as.character(b$session_id %||% "")
+    if (!nzchar(sid2))
+      return(send_json(con, 400, list(ok = FALSE, code = "session_required",
+        error = "mirror fail 必须带 session_id")))
+    guard <- mirror_receipt_guard(req, owner_ctx, b, failure = TRUE)
+    if (!isTRUE(guard$ok)) return(send_json(con, guard$status, guard))
+    r <- mirror_fail(sid2, as.character(b$rel %||% ""), as.character(b$error %||% ""))
+    if (!isTRUE(r$ok))
+      return(send_json(con, 409, list(ok = FALSE, code = "not_registered",
+        error = "这条取回没有登记，拒绝登记失败状态")))
+    return(send_json(con, 200, r))
+  }
+
   if (p == "/api/mirror/put-chunk" && identical(req$method, "POST")) {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/mirror.R")))
     b <- body_json()
     sid2 <- as.character(b$session_id %||% "")
-    if (!nzchar(sid2)) sid2 <- tryCatch(cur_sid(), error = function(e) "")
+    if (!nzchar(sid2))
+      return(send_json(con, 400, list(ok = FALSE, code = "session_required",
+        error = "mirror chunk 必须带 session_id")))
+    guard <- mirror_receipt_guard(req, owner_ctx, b)
+    if (!isTRUE(guard$ok)) return(send_json(con, guard$status, guard))
     rel2 <- as.character(b$rel %||% "")
     idx <- suppressWarnings(as.integer(b$chunk_index %||% 0L))
     tot <- suppressWarnings(as.integer(b$chunks %||% 1L))
     if (!nzchar(rel2) || is.na(idx) || is.na(tot) || idx < 0L || tot < 1L || idx >= tot)
       return(send_json(con, 400, list(ok = FALSE, error = "缺 rel / chunk_index / chunks，或越界")))
+    # 分片必须自带合法 md5 与登记总量：没有这两项就没法判断拼装结果对不对，
+    #   放行等于把未经校验的字节落成"已取回"。
+    want_md5 <- tolower(as.character(b$md5 %||% ""))
+    total_bytes <- suppressWarnings(as.numeric(b$bytes %||% NA))
+    if (length(want_md5) != 1L || is.na(want_md5) || !grepl("^[0-9a-f]{32}$", want_md5))
+      return(send_json(con, 400, list(ok = FALSE, code = "bad_md5",
+                                      error = "分片请求必须带 32 位 md5")))
+    if (is.na(total_bytes) || total_bytes <= 0 || total_bytes != round(total_bytes))
+      return(send_json(con, 400, list(ok = FALSE, code = "bad_size",
+                                      error = "分片请求必须带登记字节数")))
+    if (total_bytes > MIRROR_LARGE_BYTES)
+      return(send_json(con, 413, list(ok = FALSE, code = "too_large",
+        error = sprintf("超过分片通道上限 %s 字节", format(MIRROR_LARGE_BYTES, scientific = FALSE)))))
+    baseline_verified <- TRUE
     fin <- mirror_path(sid2, rel2)
     if (!nzchar(fin)) return(send_json(con, 400, list(ok = FALSE, error = "路径不合法")))
     dir.create(dirname(fin), showWarnings = FALSE, recursive = TRUE)
     part <- tryCatch(jsonlite::base64_dec(as.character(b$b64 %||% "")), error = function(e) NULL)
     if (is.null(part)) return(send_json(con, 400, list(ok = FALSE, error = "分片不是合法 base64")))
     pf <- paste0(fin, ".part", sprintf("%04d", idx))
+    # 同一片重复上传且内容不同，说明两次传输对不上，直接拒，别拼出坏文件。
+    if (file.exists(pf)) {
+      keep <- readBin(pf, "raw", file.info(pf)$size)
+      if (!identical(keep, part))
+        return(send_json(con, 409, list(ok = FALSE, code = "chunk_conflict",
+          error = sprintf("第 %d 片与已收到的内容不一致", idx))))
+    }
     con2 <- file(pf, open = "wb"); writeBin(part, con2); close(con2)
     if (idx + 1L < tot) return(send_json(con, 200, list(ok = TRUE, chunk_index = idx, complete = FALSE)))
     # 最后一片到了：按序拼装，校验，然后落到正式位置。
@@ -7124,19 +9116,17 @@ serve_request <- function(con, req) {
       return(send_json(con, 409, list(ok = FALSE, code = "missing_chunks",
         error = "有分片没到，已清掉半成品，请重传")))
     }
-    out <- file(fin, open = "wb")
-    for (x in parts) { r <- readBin(x, "raw", file.info(x)$size); writeBin(r, out) }
-    close(out); unlink(parts)
-    got <- unname(tools::md5sum(fin))
-    want <- as.character(b$md5 %||% "")
-    if (nzchar(want) && !identical(got, want)) {
-      unlink(fin)
-      return(send_json(con, 409, list(ok = FALSE, code = "md5_mismatch",
-        error = "拼接后校验不符，已删除", expected = want, actual = got)))
+    fz <- mirror_chunk_finalize(fin, tot, want_md5, total_bytes)
+    if (!isTRUE(fz$ok)) {
+      if (identical(fz$code, "missing_chunks"))
+        return(send_json(con, 409, list(ok = FALSE, code = "missing_chunks",
+          error = "有分片没到，已清掉半成品，请重传")))
+      return(send_json(con, 409, c(fz, list(rel = rel2))))
     }
     tryCatch(mirror_done(sid2, rel2), error = function(e) NULL)
-    return(send_json(con, 200, list(ok = TRUE, rel = rel2, bytes = file.info(fin)$size,
-                                    md5 = got, complete = TRUE)))
+    return(send_json(con, 200, list(ok = TRUE, rel = rel2, bytes = fz$bytes,
+                                    md5 = fz$md5, complete = TRUE,
+                                    baseline_verified = baseline_verified)))
   }
 
   # ---- 生成交付 PPT（在应用本机做，不等服务器）----------------------
@@ -7150,11 +9140,14 @@ serve_request <- function(con, req) {
       return(send_json(con, 400, list(ok = FALSE, code = "no_module",
         error = "缺少 engine/ppt_build.R")))
     b <- body_json()
-    sid_b <- as.character(b$session_id %||% "")
-    if (!nzchar(sid_b)) sid_b <- tryCatch(cur_sid(), error = function(e) "")
-    if (!nzchar(sid_b))
-      return(send_json(con, 400, list(ok = FALSE, code = "no_session",
-        error = "不知道是哪一个分析记录，先在页面上选中一份")))
+    access <- record_preflight$access
+    sid_b <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     mroot <- mirror_dir(sid_b)
     if (!dir.exists(mroot))
       return(send_json(con, 409, list(ok = FALSE, code = "no_mirror",
@@ -7178,8 +9171,7 @@ serve_request <- function(con, req) {
                                     error = conditionMessage(e)))
     if (isTRUE(r$ok)) {
       # 登记成产物，页面「产物下载」里直接能看到并下载。
-      f0 <- file.path(STATE_DIR, "artifacts.json")
-      aj <- tryCatch(read_json_file(f0), error = function(e) NULL) %||% list(items = list())
+      aj <- record_artifact_index_read(APP_DIR, sid_b)
       its <- aj$items %||% list()
       has <- FALSE
       for (i in seq_along(its)) {
@@ -7193,8 +9185,8 @@ serve_request <- function(con, req) {
         size = r$bytes, mtime = format(Sys.time(), "%Y-%m-%dT%H:%M"), full = NULL)
       aj$items <- its
       aj$listed_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
-      tryCatch(write_json_file(f0, aj), error = function(e) NULL)
-      tryCatch(db_event(DB_CON, "ppt_built", owner_key = owner_ctx$key,
+      tryCatch(record_artifact_index_write(APP_DIR, sid_b, aj), error = function(e) NULL)
+      tryCatch(db_event(DB_CON, "ppt_built", owner_key = access$cap$owner_key,
                         payload = list(session = sid_b, rel = r$out_rel,
                                        bytes = r$bytes, missing = r$missing_dirs)),
                error = function(e) NULL)
@@ -7216,18 +9208,23 @@ serve_request <- function(con, req) {
         queued <- list()
         for (sd in stages_need) {
           ctr <- tryCatch({
-            stg <- flow_stage(sd, flow_profile())
+            stg <- flow_stage(sd, flow_profile(sid_b))
             if (is.null(stg)) NULL else flow_execution(stg, flow_vars(
-              (place_read(APP_DIR) %||% list())$server %||% list(), sid = sid_b))
+              ctx$server_place %||% list(), sid = sid_b))
           }, error = function(e) NULL)
           if (is.null(ctr) || !isTRUE(ctr$ok)) next
+          autofix_sess <- tryCatch(sess_find(APP_DIR, sid_b), error = function(e) NULL)
+          autofix_ref <- as.character((autofix_sess %||% list())$reference_id %||% "")
           tryCatch(exec_enqueue(sd, session_id = sid_b,
                                 script = ctr$script,
                                 script_args = paste(vapply(ctr$argv, shQuote, "", type = "sh"),
-                                                    collapse = " ")),
+                                                    collapse = " "),
+                                run_dir = ctx$run_dir, mode = ctx$mode,
+                                reference_id = autofix_ref,
+                                ref_mode = ctx$ref_mode, ref_path = ctx$ref_path),
                    error = function(e) NULL)
           instr <- tryCatch(remote_step_instruction(sd,
-                     (place_read(APP_DIR) %||% list())$server %||% list(),
+                     ctx$server_place %||% list(),
                      session_id = sid_b, req_id = ""),
                    error = function(e) "")
           if (nzchar(instr))
@@ -7253,7 +9250,8 @@ serve_request <- function(con, req) {
           "）不是出图脚本产出的，重跑补不出来，需要单独确认数据来源。")
       }
     }
-    return(send_json(con, if (isTRUE(r$ok)) 200 else 409, r))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 409,
+                     c(r, record_cap_fields(access$cap))))
   }
 
   # 打包交付物：把镜像里的图与 PPT 压成一个 zip。
@@ -7264,11 +9262,14 @@ serve_request <- function(con, req) {
   #   所以这里单开一条本机通道：素材在本机就能打，打完直接登记成产物可下载。
   if (p == "/api/pack/build" && identical(req$method, "POST")) {
     b <- body_json()
-    sid_p <- as.character(b$session_id %||% "")
-    if (!nzchar(sid_p)) sid_p <- tryCatch(cur_sid(), error = function(e) "")
-    if (!nzchar(sid_p))
-      return(send_json(con, 400, list(ok = FALSE, code = "no_session",
-        error = "不知道是哪一个分析记录，先在页面上选中一份")))
+    access <- record_preflight$access
+    sid_p <- as.character(record_preflight$target$sid %||% "")
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
     mroot <- mirror_dir(sid_p)
     if (!dir.exists(mroot))
       return(send_json(con, 409, list(ok = FALSE, code = "no_mirror",
@@ -7332,8 +9333,7 @@ serve_request <- function(con, req) {
     md5v <- tryCatch(as.character(tools::md5sum(out_abs)), error = function(e) NA_character_)
 
     # 登记成产物：页面「产物下载」里直接能看到并下载，不必再走取回。
-    f0 <- file.path(STATE_DIR, "artifacts.json")
-    aj <- tryCatch(read_json_file(f0), error = function(e) NULL) %||% list(items = list())
+    aj <- record_artifact_index_read(APP_DIR, sid_p)
     its <- aj$items %||% list()
     has <- FALSE
     for (i in seq_along(its)) {
@@ -7348,21 +9348,21 @@ serve_request <- function(con, req) {
       size = bytes, mtime = format(Sys.time(), "%Y-%m-%dT%H:%M"), full = NULL)
     aj$items <- its
     aj$listed_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
-    tryCatch(write_json_file(f0, aj), error = function(e) NULL)
-    tryCatch(db_event(DB_CON, "pack_built", owner_key = owner_ctx$key,
+    tryCatch(record_artifact_index_write(APP_DIR, sid_p, aj), error = function(e) NULL)
+    tryCatch(db_event(DB_CON, "pack_built", owner_key = access$cap$owner_key,
                       payload = list(session = sid_p, rel = out_rel,
                                      bytes = bytes, included = as.list(have),
                                      lacking = as.list(lack))),
              error = function(e) NULL)
 
-    return(send_json(con, 200, list(
+    return(send_json(con, 200, c(list(
       ok = TRUE, code = "ok", out_rel = out_rel, bytes = bytes,
       md5 = md5v, included = as.list(have), lacking = as.list(lack),
       log = as.list(blog),
       download_url = paste0("/api/artifact/download?session=",
                             utils::URLencode(sid_p, reserved = TRUE),
                             "&rel=", utils::URLencode(out_rel, reserved = TRUE)),
-      ready = TRUE)))
+      ready = TRUE), record_cap_fields(access$cap))))
   }
 
   # 看图 / 看 PDF：直接从镜像读，浏览器内联显示。
@@ -7370,8 +9370,8 @@ serve_request <- function(con, req) {
   #   为什么单独存：这些不是"某一步的产物清单"，而是"同一环节跑出来的几套结果，
   #   等人挑一套给下游用"。挑中的那套要能被下游读到，所以必须落盘，不能只放在浏览器里。
   if (p == "/api/variants") {
-    vsid <- as.character(q$session %||% "")
-    if (!nzchar(vsid)) vsid <- cur_sid()
+    access <- record_preflight$access
+    vsid <- as.character(record_preflight$target$sid %||% "")
     vfile <- file.path(STATE_DIR, paste0("variants_",
       gsub("[^A-Za-z0-9_-]", "_", if (nzchar(vsid)) vsid else "_default"), ".json"))
     vread <- function() {
@@ -7380,7 +9380,8 @@ serve_request <- function(con, req) {
     }
 
     if (identical(req$method, "GET")) {
-      return(send_json(con, 200, list(ok = TRUE, session_id = vsid, stages = vread()$stages)))
+      return(send_json(con, 200, c(list(ok = TRUE, session_id = vsid, stages = vread()$stages),
+                                    record_cap_fields(access$cap))))
     }
 
     b <- body_json()
@@ -7421,18 +9422,44 @@ serve_request <- function(con, req) {
     }
     d$stages[[stage]] <- st0
     write_json_file(vfile, d)
-    return(send_json(con, 200, list(ok = TRUE, stage = stage,
-                                    items = st0$items, chosen = st0$chosen)))
+    return(send_json(con, 200, c(list(ok = TRUE, session_id = vsid, stage = stage,
+                                    items = st0$items, chosen = st0$chosen),
+                                 record_cap_fields(access$cap))))
   }
 
   if (p == "/api/artifact/file") {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 404, list(ok = FALSE, error = "缺少 engine/mirror.R")))
-    sid2 <- as.character(q$session %||% "")
-    if (!nzchar(sid2)) sid2 <- cur_sid()
+    sid2 <- as.character(record_preflight$target$sid %||% "")
     rel <- as.character(q$rel %||% "")
     fp <- mirror_path(sid2, rel)
     if (!nzchar(fp) || !file.exists(fp))
       return(send_json(con, 404, list(ok = FALSE, error = "还没取回这个文件")))
+    # 缓存与最新验收版本不一致时不给旧文件。
+    #   宁可 409 让人重新取回，也不能让人以为手里的是新结果。
+    wmv <- artifact_expected_md5(sid2, rel)
+    vvv <- mirror_validity(sid2, rel, wmv)
+    if (!isTRUE(vvv$ok)) {
+      # 三态分开说，别用一句"请重新取回"盖掉"根本没法核实"。
+      code <- as.character(vvv$state %||% "stale")
+      msg <- switch(code,
+        unverified = "这份缓存查不到最新基准 md5，无法确认是否最新，暂不提供下载",
+        stale = "本地缓存不是最新已验收版本，请重新取回",
+        "本地没有这份文件的缓存，请先取回")
+      return(send_json(con, 409, list(
+        ok = FALSE, code = paste0("mirror_", code), error = msg,
+        expected_md5 = as.character(vvv$want %||% ""),
+        cached_md5 = as.character(vvv$actual %||% ""))))
+    }
+    expP <- artifact_expected_md5(sid2, rel)
+    if (nzchar(expP)) {
+      actP <- mirror_actual_md5(fp)
+      if (!identical(actP, expP)) {
+        return(send_json(con, 409, list(
+          ok = FALSE, code = "mirror_stale",
+          error = "本地预览文件不是最新已验收版本，请重新取回",
+          expected_md5 = expP, cached_md5 = actP)))
+      }
+    }
     ext <- tolower(tools::file_ext(fp))
     ctype <- switch(ext,
       png = "image/png", jpg = "image/jpeg", jpeg = "image/jpeg",
@@ -7445,7 +9472,9 @@ serve_request <- function(con, req) {
                   "Content-Type: ", ctype, "\r\n",
                   "Content-Length: ", info$size, "\r\n",
                   "Content-Disposition: inline\r\n",
-                  "Cache-Control: private, max-age=300\r\nConnection: close\r\n\r\n")
+                  # 同名产物重新生成后，同一个 URL 不能让浏览器继续喂旧内容。
+                  #   max-age=300 会让旧预览存活五分钟，正是这次"下载到旧版"的同类坑。
+                  "Cache-Control: no-store, must-revalidate\r\nConnection: close\r\n\r\n")
     writeBin(charToRaw(enc2utf8(hdr)), con)
     fc <- file(fp, open = "rb")
     repeat {
@@ -7461,8 +9490,7 @@ serve_request <- function(con, req) {
   #   .xls 在这里多是制表符分隔的文本，不是真 Excel；两种都试。
   if (p == "/api/artifact/preview") {
     if (!isTRUE(HAS_MIRROR)) return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/mirror.R")))
-    sid2 <- as.character(q$session %||% "")
-    if (!nzchar(sid2)) sid2 <- cur_sid()
+    sid2 <- as.character(record_preflight$target$sid %||% "")
     rel <- as.character(q$rel %||% "")
     fp <- mirror_path(sid2, rel)
     if (!nzchar(fp) || !file.exists(fp))
@@ -7473,7 +9501,14 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/download") {
-    if (is.null(runDir)) return(send_json(con, 400, list(ok = FALSE, error = "还没选运行目录")))
+    access <- record_preflight$access
+    ctx <- record_context(access$cap, require_run_dir = TRUE)
+    if (!isTRUE(ctx$ok)) {
+      out <- record_refusal(ctx)
+      out$body <- c(out$body, record_cap_fields(access$cap))
+      return(send_json(con, out$status, out$body))
+    }
+    runDir <- ctx$run_dir
     rel <- as.character(q$rel %||% "")
     r <- list_artifacts(runDir)
     hit <- Filter(function(x) identical(x$rel, rel), r$items)
@@ -7517,7 +9552,7 @@ serve_request <- function(con, req) {
 # 数据层启动：连库、建表、必要时迁移历史
 # =====================================================================
 DB_CON <- NULL
-if (HAS_DB) {
+if (!isTRUE(getOption("pa.serve.definitions_only", FALSE)) && HAS_DB) {
   DB_CON <- tryCatch(db_api_boot(APP_DIR), error = function(e) { say("[warn] 数据库起不来：", conditionMessage(e)); NULL })
   if (!is.null(DB_CON)) {
     DB_READY <- TRUE
@@ -7612,4 +9647,4 @@ main <- function() {
   }
 }
 
-main()
+if (!isTRUE(getOption("pa.serve.definitions_only", FALSE))) main()

@@ -1,0 +1,48 @@
+{
+  "contract_version": "catsco.artifact-manifest.v3",
+  "purpose": "把「让助手到服务器上做一件事」变成一次真实的会话：页面把连接信息和要办的事打包交给助手，助手执行完把结果写回页面。",
+  "views": ["instruct"],
+  "entities": ["instruction"],
+  "observation_capabilities": ["semantic_context"],
+  "result_sinks": [
+    {
+      "id": "instruction.result.v1",
+      "description": "把助手执行完的结果写回「让助手去做」那一栏。",
+      "input_schema": {
+        "type": "object",
+        "required": ["summary"],
+        "additionalProperties": false,
+        "properties": {
+          "instruction_id": { "type": "string", "maxLength": 80 },
+          "status": { "type": "string", "enum": ["done", "failed"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 500 },
+          "detail": { "type": "string", "maxLength": 8000 },
+          "executed_via": { "type": "string", "maxLength": 200 }
+        }
+      }
+    }
+  ],
+  "task_intents": [
+    {
+      "id": "assistant.connect.v1",
+      "title": "让助手连服务器",
+      "description": "把目标服务器的连接信息和要办的事交给助手。助手会在能连上这台服务器的电脑上执行，结果写回页面。",
+      "input_schema": {
+        "type": "object",
+        "required": ["text"],
+        "additionalProperties": false,
+        "properties": {
+          "text": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "host": { "type": "string", "maxLength": 200 },
+          "port": { "type": "integer" },
+          "user": { "type": "string", "maxLength": 100 },
+          "data_root": { "type": "string", "maxLength": 500 },
+          "script_root": { "type": "string", "maxLength": 500 },
+          "work_root": { "type": "string", "maxLength": 500 },
+          "mode": { "type": "string", "maxLength": 20 }
+        }
+      },
+      "result_sink": "instruction.result.v1"
+    }
+  ]
+}

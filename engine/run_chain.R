@@ -38,11 +38,20 @@ rc_dispatch <- function(c) {
   ctx$cur_sid <- function() c$session_id
   ctx$read_state <- function() list(runDir = c$run_dir, runDirRemote = TRUE)
   ctx$flow_profile <- function() "server"
-  ctx$RC_DISPATCH <- TRUE
   ctx$db_api_owner <- function(...) c$owner_ctx
   ctx$send_json <- function(con, code, body) list(code = code, body = body)
   handler <- serve_request; environment(handler) <- ctx
+  # 链派工标记写在 req 上，由 run_enqueue 直接读。
+  #   为什么不放环境里（2026-11-16 修）：run_enqueue 是 serve.R 顶层 source 出来的
+  #   函数，闭包挂在顶层环境；ctx 只是 serve_request 这一层的环境，中间隔着
+  #   run_enqueue 自己的帧。get0("RC_DISPATCH", inherits=TRUE) 从 run_enqueue
+  #   帧往上找的是顶层环境，永远看不到 ctx 里的标记，恒定 FALSE。
+  #   后果：链派第一步被自己的「链进行中」守卫 409，链写成 blocked，
+  #   而 blocked 又在拦截名单里，页面每次重试都撞同一句，永不自愈。
+  #   走 req 而不是 body：req 由这里构造，客户端塞不进来；body 外部可控，
+  #   放行类标记一律不能从 body 读。
   ans <- handler(NULL, list(target = "/api/run", method = "POST", headers = list(),
+    pa_chain_dispatch = TRUE,
     body = as.character(jsonlite::toJSON(list(step = stage, session_id = c$session_id,
       req_id = c$req_id), auto_unbox = TRUE))))
   c$status <- if (ans$code == 200L) "running" else "blocked"
@@ -51,11 +60,55 @@ rc_dispatch <- function(c) {
   ans$body$chain_id <- c$req_id
   ans
 }
+# 单步点击的链守卫：只有一个地方判断「现在能不能派这一步」。
+#   chain_dispatch=TRUE 表示这次派工由协调器在回调之后发起，它比任何状态判断
+#   都更清楚该不该跑，直接放行。
+#   blocked 不拦：它是「上一次没派出去」的痕迹，不是「正在跑」。
+#   拿它拦下一次点击，等于把一次失败放大成永久阻塞 —— 2026-11-16 实测的
+#   那个死锁就是这么来的。
+rc_step_guard <- function(active_chain, chain_dispatch = FALSE) {
+  if (is.null(active_chain)) return(NULL)
+  st <- as.character(active_chain$status %||% "")
+  # 暂停先判，而且不认 chain_dispatch：暂停是唯一「有意的停顿」，
+  #   任何派工路径都不能绕过，否则暂停形同虚设。
+  if (identical(st, "paused"))
+    return(list(code = 409L, body = list(ok = FALSE, code = "chain_paused",
+      chain_id = as.character(active_chain$req_id %||% ""),
+      paused_after = as.character(active_chain$paused_after %||% ""),
+      next_step = as.character(active_chain$todo[[active_chain$index]] %||% ""),
+      error = "这条流程已暂停；要继续请用显式恢复操作。")))
+  if (isTRUE(chain_dispatch)) return(NULL)
+  if (st %in% c("running", "starting"))
+    return(list(code = 409L, body = list(ok = FALSE, code = "chain_in_progress",
+      chain_id = as.character(active_chain$req_id %||% ""),
+      chain_status = st)))
+  NULL
+}
 rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = FALSE) {
   c <- rc_read(sid)
   if (!is.null(c)) {
     same <- !nzchar(req_id) || identical(req_id, c$req_id)
+    # paused 优先于一切：这是唯一「有意的停顿」，不能被任何路径顺手重启。
+    #   判据放在 same/overwrite 之前 —— 否则 overwrite=true 那条路会把
+    #   暂停中的链当成「重跑」直接取代并重建，等于暂停没有生效。
+    if (identical(c$status, "paused"))
+      return(list(code = 409L, body = list(ok = FALSE, code = "chain_paused",
+        chain_id = c$req_id, paused_after = as.character(c$paused_after %||% ""),
+        next_step = as.character(c$todo[[c$index]] %||% ""),
+        error = "这条流程在指定步骤完成后已暂停；要继续请用显式恢复操作。")))
     if (identical(c$status, "blocked") && same) return(rc_dispatch(c))
+    # blocked 且换了请求号 = 页面上又点了一次同一个按钮，视为重试：
+    #   直接取代旧链重开一轮，不要求 overwrite、也不报 chain_in_progress。
+    #   为什么（2026-11-16）：blocked 只是「上次派工没派出去」的痕迹，不是「在跑」。
+    #   以前它和 running 一起被拦，于是链一旦 blocked 就再也没有出口 ——
+    #   单步被拦、全流程也被拦，页面永远停在同一个红色提示上。
+    if (identical(c$status, "blocked") && !same) {
+      c$status <- "superseded"
+      c$superseded_by <- req_id
+      c$superseded_at <- exec_ts()
+      rc_write(c)
+      c <- NULL
+    }
     if (same && c$status %in% c("running", "starting", "done"))
       return(list(code = 200L, body = list(ok = TRUE, delegated = identical(c$status, "running"),
         duplicate = TRUE, chain_id = c$req_id, step = c$todo[[c$index]], chain_status = c$status)))
@@ -69,7 +122,7 @@ rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = 
       rc_write(c)
       c <- NULL
     }
-    if (!is.null(c) && !same && c$status %in% c("running", "starting", "blocked")) {
+    if (!is.null(c) && !same && c$status %in% c("running", "starting")) {
       if (!isTRUE(overwrite))
         return(list(code = 409L, body = list(ok = FALSE, code = "chain_in_progress")))
       active <- Filter(function(it) identical(it$session_id, sid) &&
@@ -140,9 +193,55 @@ rc_callback <- function(b, accepted) {
     exec_set(it$id, list(callback_received = TRUE, callback_accepted = if (has_sub) FALSE else success))
   if (!success) { c$status <- "failed"; rc_write(c); return(list(status = "failed")) }
   c$completed <- c(c$completed, list(b$step))
+  # 本步完成后暂停：一次性标记，命中就清掉，避免同一条链被反复挂住。
+  #   为什么必须在这一刻判而不是在 rc_begin：callback 是唯一「这一步真的成了」的
+  #   时刻。放在这里，flags、completed、index 都已经写完，只差不该发的那个派发。
+  hold <- as.character(c$pause_after %||% "")
+  hold_hit <- nzchar(hold) && identical(hold, as.character(b$step))
+  if (hold_hit) { c$pause_after <- NULL; c$paused_at <- exec_ts() }
   if (c$index >= length(c$todo)) { c$status <- "done"; rc_write(c); return(list(status = "done")) }
-  c$index <- c$index + 1L; c$status <- "starting"; rc_write(c)
+  c$index <- c$index + 1L
+  if (hold_hit) {
+    c$status <- "paused"
+    c$paused_after <- as.character(b$step)
+    rc_write(c)
+    return(list(status = "paused", paused_after = as.character(b$step),
+                next_step = as.character(c$todo[[c$index]] %||% "")))
+  }
+  c$status <- "starting"; rc_write(c)
   rc_dispatch(c)
+}
+
+# ---- 暂停与恢复：仅供管理调用 ----------------------------------------
+#   为什么单独开门而不是复用 rc_begin：rc_begin 的语义是「把链跑起来」，
+#   它对 blocked 的处理是直接恢复派发。想暂停又要能恢复，就不能让
+#   「再点一次全跑」和「恢复」共用一个入口 —— 那等于没有暂停。
+rc_hold_after <- function(sid, step) {
+  c <- rc_read(sid)
+  if (is.null(c)) return(list(ok = FALSE, code = "chain_missing"))
+  if (!identical(c$status, "running"))
+    return(list(ok = FALSE, code = "chain_not_running", status = c$status))
+  cur <- as.character(c$todo[[c$index]] %||% "")
+  if (!identical(cur, as.character(step)))
+    return(list(ok = FALSE, code = "step_not_current",
+                current = cur, requested = as.character(step)))
+  c$pause_after <- as.character(step)
+  c$pause_set_at <- exec_ts()
+  rc_write(c)
+  list(ok = TRUE, chain_id = c$req_id, pause_after = as.character(step))
+}
+
+rc_resume <- function(sid) {
+  c <- rc_read(sid)
+  if (is.null(c)) return(list(ok = FALSE, code = "chain_missing"))
+  if (!identical(c$status, "paused"))
+    return(list(ok = FALSE, code = "chain_not_paused", status = c$status))
+  c$status <- "running"
+  c$resumed_at <- exec_ts()
+  rc_write(c)
+  ans <- rc_dispatch(c)
+  list(ok = TRUE, chain_id = c$req_id, step = as.character(c$todo[[c$index]] %||% ""),
+       http = ans$code, dispatched = identical(as.integer(ans$code), 200L))
 }
 
 if (!isTRUE(getOption("pa.chain.definitions_only", FALSE))) {

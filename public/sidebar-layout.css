@@ -1,0 +1,4 @@
+/* A tall sticky header obscures task controls in the chat sidebar. */
+@media (max-width: 640px) {
+  .topbar { position: static; }
+}

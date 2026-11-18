@@ -155,6 +155,17 @@ sr_pat_regex <- function(p) {
   paste0("^", gsub("\\*", ".*", gsub("([.()+|^$\\\\])", "\\\\\\1", pat)), "$")
 }
 
+# 目录型产物的判定：与 verdict.R 用同一条规则，避免两处各写一套。
+#   声明了 product_dirs 的阶段只认声明；
+#   没声明的阶段保留旧行为（末尾没有扩展名就按目录处理）。
+#   为什么必须共享：护照与判定各用一套时，会出现"判定已通过、护照仍判缺件"
+#   —— 实测就是 10.figs/1.cluster 这种名字被扩展名规则误判成文件。
+sr_is_product_dir <- function(p, rv = NULL) {
+  dirs <- as.character((rv %||% list())$product_dirs %||% character(0))
+  grepl("/$", p) || (p %in% dirs) ||
+    (!length(dirs) && !grepl("\\.[A-Za-z0-9]+$", p))
+}
+
 sr_products_of <- function(stage) {
   rv <- stage$review %||% list()
   as.character(rv$products %||% stage$artifacts %||% character(0))
@@ -166,9 +177,10 @@ sr_products_of <- function(stage) {
 sr_released <- function(stage, rels, samples = character(0)) {
   pats <- sr_products_of(stage)
   if (!length(pats) || !length(rels)) return(character(0))
+  rv0 <- (stage %||% list())$review %||% NULL
   out <- character(0)
   for (p in pats) {
-    is_dir <- grepl("/$", p) || !grepl("\\.[A-Za-z0-9]+$", p)
+    is_dir <- sr_is_product_dir(p, rv0)
     if (grepl("\\{samples\\}", p) && length(samples)) {
       for (one in samples) {
         want <- gsub("\\{[A-Za-z_][A-Za-z0-9_]*\\}", as.character(one), p, perl = TRUE)
@@ -178,10 +190,61 @@ sr_released <- function(stage, rels, samples = character(0)) {
     }
     rx <- sr_pat_regex(p)
     hit <- rels[vapply(rels, function(r) grepl(rx, r), TRUE)]
-    if (is_dir) hit <- c(hit, rels[vapply(rels, function(r) startsWith(r, paste0(p, "/")), TRUE)])
+    if (is_dir) {
+      pre <- paste0(sub("/+$", "", p), "/")
+      hit <- c(hit, rels[vapply(rels, function(r) startsWith(r, pre), TRUE)])
+    }
     out <- c(out, hit)
   }
   unique(out)
+}
+
+# 契约要求、但回写清单里没有的产物。
+#   为什么单独一个函数：原来这里写的是 setdiff(prods, released)，
+#   prods 里是字面量 "1.doublet/{samples}.rds"，released 是展开后的七个真实文件名，
+#   两者永远对不上 —— 于是每一条逐样本环节的护照都判 fail，
+#   下游拿不到 pass 护照就开不了下一步。
+#   现在：模板先按本次真实样本展开成具体路径，逐个核对，缺哪份点名缺哪份。
+#   只看到任意一个 rds 不算齐，样本列表为空也不放行。
+sr_missing_products <- function(prods, released, samples = character(0), rv2 = NULL) {
+  prods <- as.character(prods %||% character(0))
+  released <- as.character(released %||% character(0))
+  smp <- unique(as.character(unlist(samples %||% character(0))))
+  smp <- smp[!is.na(smp) & nzchar(smp)]
+  miss <- character(0)
+  for (p in prods) {
+    # 目录型产物：清单里有文件落在它下面就算有。
+    #   要放在扩展名判断之前 —— "10.figs/1.cluster" 这种名字会被
+    #   "有没有后缀" 的规则误判成文件，于是目录下有图也判缺。
+    if (any(startsWith(released, paste0(sub("/$", "", p), "/")))) next
+    if (grepl("\\{samples\\}", p)) {
+      if (!length(smp)) {
+        # 没有样本清单就核不了逐样本产物，宁可判缺也不默认齐全。
+        miss <- c(miss, p)
+        next
+      }
+      for (one in smp) {
+        # 不能用 fixed=TRUE：那样模式是字面反斜杠加花括号，永远匹配不上，
+        # 模板原样留下、被当成缺失项。这正是上一版判 fail 的直接原因。
+        want <- gsub("\\{samples\\}", as.character(one), p)
+        if (!(want %in% released)) miss <- c(miss, want)
+      }
+      next
+    }
+    is_dir <- sr_is_product_dir(p, rv2)
+    if (is_dir) {
+      pre <- sub("/$", "", p)
+      if (!any(startsWith(released, paste0(pre, "/")))) miss <- c(miss, p)
+      next
+    }
+    if (grepl("\\{[A-Za-z_][A-Za-z0-9_]*\\}", p)) {
+      rx <- sr_pat_regex(p)
+      if (!any(grepl(rx, released))) miss <- c(miss, p)
+      next
+    }
+    if (!(p %in% released)) miss <- c(miss, p)
+  }
+  unique(miss)
 }
 
 # ---- 护照读写 --------------------------------------------------------
@@ -574,7 +637,13 @@ sr_finish <- function(kind, stage_id, sid, checks, force = FALSE, note = "",
 # verdict   db_api_report_step 的返回（含 checks / verdict / review_id），可为 NULL
 # attempt_id 本次尝试号（可为空）
 sr_admit <- function(app_dir, stage_id, sid = "", wb = list(), verdict = NULL,
-                     attempt_id = NULL, permit_id = NULL, profile = "server") {
+                     attempt_id = NULL, permit_id = NULL, profile = "server",
+                     set_id = NULL, set_id_provenance = NULL) {
+  # set_id 优先取判定给出的那一个（与 DB 结论同源），没有才退回回写体。
+  #   为什么不直接读 wb$set_id：执行端从不自报这个字段，
+  #   于是护照会记 unknown，而 DB 判定同一次却是 pass —— 两处结论打架。
+  if (is.null(set_id)) set_id <- (verdict %||% list())$set_id
+  if (is.null(set_id_provenance)) set_id_provenance <- (verdict %||% list())$set_id_provenance
   id <- as.character(stage_id %||% "")
   checks <- list()
   add <- function(...) checks[[length(checks) + 1L]] <<- sr_chk(...)
@@ -684,8 +753,7 @@ sr_admit <- function(app_dir, stage_id, sid = "", wb = list(), verdict = NULL,
     add("P2", "released", "unknown", "这一环没有声明产物，放行清单为空",
         expected = "products[]", actual = "未声明")
   } else {
-    miss <- setdiff(prods, c(released, if (any(grepl("\\{samples\\}", prods))) released else character(0)))
-    miss <- setdiff(prods, released)
+    miss <- sr_missing_products(prods, released, smp, stage$review %||% NULL)
     if (length(miss)) {
       add("P2", "released", "fail",
           paste0("契约要求的产物没有全部放行，缺：", paste(miss, collapse = ", ")),
@@ -708,7 +776,7 @@ sr_admit <- function(app_dir, stage_id, sid = "", wb = list(), verdict = NULL,
     }
     if (exists("compliance_check", mode = "function"))
       compliance_check(app_dir, id,
-                       set_id = as.character(wb$set_id %||% wb$skill %||% NA),
+                       set_id = as.character(set_id %||% wb$set_id %||% wb$skill %||% NA),
                        script_path = as.character(wb$script_path %||% wb$script %||% NA),
                        script_md5 = as.character(wb$script_md5 %||% wb$script_digest %||% NA),
                        ledger_available = TRUE)

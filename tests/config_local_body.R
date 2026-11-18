@@ -11,6 +11,11 @@ runDir <- tempfile('config-body-',tmpdir='/tmp');dir.create(runDir)
 st <- list(runDirRemote=FALSE)
 body <- list();body_json <- function() body
 send_json <- function(con,status,body) list(status=status,body=body)
+cur_sid <- function() 'fixture-session'
+record_session_target <- function(...) list(ok=TRUE,sid='fixture-session')
+record_access <- function(...) list(ok=TRUE,ctx=list(run_dir=runDir,run_dir_remote=FALSE,place=list()),
+  cap=list(session_id='fixture-session',can_read=TRUE,can_write=TRUE,readonly=FALSE))
+record_cap_fields <- function(...) list()
 result <- handler('/api/config',list(method='POST'),NULL)
 stopifnot(result$status==400L,identical(result$body$error,'没有可保存的内容'))
 body <- list('pipeline.json'=list(species='fixture_explicit_species',tissue='fixture_explicit_tissue',nested=list(n=7)),

@@ -97,7 +97,13 @@ const S = {
   //   sessions：历史分析列表。
   //   为什么要落服务端而不是 localStorage：换一台电脑、换个浏览器打开，
   //   看到的东西必须一致；localStorage 只在这台浏览器上有。
-  sessionId: null, sessions: [], collapsed: {},
+  sessionId: null, sessions: [], collapsed: {}, readonly: false,
+  // ---- 管理员与两个隔离开关 -----------------------------------------
+  //   admin：/api/admin/policy 的返回（is_admin + 两个开关）
+  //   policy：最近一次读到的开关状态，页面用它说明"现在是什么状态"
+  //   为什么页面要缓存它：状态行和只读提示都要用；
+  //   每次都现取会让页面在请求间隙闪一下"不知道隔离开没开"。
+  admin: null, policy: null,
   // ---- 我是在哪个会话里被打开的 -------------------------------------
   //   应用挂公网子路径后，自己看不出宿主会话。而注入指令要落到对的那个会话，
   //   助手也得知道回写到哪儿 —— 所以启动时向本机后端问一次（后端去问网关）。
@@ -150,7 +156,7 @@ function resetRecordState() {
     flowOpen:{}, flowTimer:null, pollTimer:null, waitTimer:null, waitTries:0,
     waitReq:null, waitSince:0, staleEnvAt:'', execTasks:[], collapsed:{}, identified:false,
     needsRemote:false, references:null, variants:{}, variantsLoaded:null, lastQuery:{},
-    place:null, placeDraft:null, lastLogLen:0
+    place:null, placeDraft:null, lastLogLen:0, readonly:false
   });
   ['monitorTimes','logBox','logHint','delegatedHost','flowHost','stepsHost','artifactsHost'].forEach(id => {
     const el = document.getElementById(id); if (el) { el.textContent = ''; el.innerHTML = ''; }
@@ -188,13 +194,14 @@ async function api(path, opts) {
     throw new Error('正在切换分析记录');
   }
   const __recordScope = recordContext();
+  const recordBound = !(opts && opts.recordBound === false);
   let sid = S.sessionId;
   const explicit = new URL(path, 'http://local').searchParams.get('session');
   if (explicit) sid = explicit;
   else if (opts && opts.body) {
     try { sid = JSON.parse(opts.body).session_id || sid; } catch (e) { /* non-JSON body */ }
   }
-  if (sid && !/^\/api\/sessions\/(new|switch)(?:\?|$)/.test(path)) {
+  if (recordBound && sid && !/^\/api\/sessions\/(new|switch)(?:\?|$)/.test(path)) {
     const bound = new URL(path, 'http://local');
     if (!bound.searchParams.has('session')) bound.searchParams.set('session', sid);
     path = bound.pathname + bound.search;
@@ -272,9 +279,29 @@ const PARAM_LABEL = {
 };
 const plabel = k => PARAM_LABEL[k] || [k, ''];
 
+/* 产物清单的环节顺序与中文名。
+   ---------------------------------------------------------------------
+   为什么前端自己存一份：接口给的 step_title 里 11.report 的 zip 写作
+   「打包交付物」，而产物面板要按流程显示「12.打包产物」；出图与富集共用
+   10.figs，也得靠目录再分一次。这份表只管显示顺序与标题，不改任何数据。
+   顺序与 /api/flow 的 stages 一致，序号与步骤卡片上的编号对得上。 */
+const ART_STAGES = [
+  ['doublet', '逐样本去双与质控'], ['merge', '合并与批次校正'],
+  ['markers', '一次聚类 marker'], ['filter', '筛群与剔样本后重聚类'],
+  ['final', '终版比例统计'], ['fullmark', '全量 marker'],
+  ['diff', '组间差异'], ['annotate', '细胞类型注释'],
+  ['figs', '出图'], ['enrich', 'GO 富集'],
+  ['ppt', '生成交付 PPT'], ['pack', '打包产物']
+];
+
 const STEP_ICON = {
   env: '①', decide: '②', precheck: '③', pipeline1: '④',
-  pipeline2: '⑤', plots: '⑥', ppt: '⑦', pack: '⑧',
+  pipeline2: '⑤', plots: '⑥',
+  // ppt / pack 曾经也在这张表里写着 ⑦ ⑧。
+  //   那是服务器档只有 8 步时的编号。现在的流程有 12 步，
+  //   这两步排在第 11、12 位，用写死的字符就会和前面按序号算出来的
+  //   1..10 撞号：页面末尾出现 ⑦⑧，读起来像只有 8 步。
+  //   编号一律按实际顺序算（见渲染处 i + 1），表里只留流程之外的那几步。
 };
 
 /* =====================================================================
@@ -344,6 +371,10 @@ function bindEvents() {
   // 产物下载回到顶栏：她说那个按钮原来在上方，被删掉后页面里还有一句
   //   「在产物下载里看全部」，指不到地方。现在放在「新建分析」左边。
   const ba = $('#btnArtifacts'); if (ba) ba.addEventListener('click', () => { refreshArtifacts(); openDlg('dlgArtifacts'); });
+  // 权限管理：只有应用所属机器人的主人看得到这个按钮。
+  //   按钮本身不是权限边界 —— 真正拦人的是后端 /api/admin/policy 的 owner 判定；
+  //   这里隐藏只是不给普通用户一个点开就被拒的入口。
+  const badm = $('#btnAdmin'); if (badm) badm.addEventListener('click', openAdminDialog);
   // 顶部三个页签：当前分析 / 历史分析 / 脚本数据库。
   //   三页互斥显示，点中的那个亮起来；不再用弹窗，也不用"返回"按钮。
   $$('#tabs .tab').forEach(tb => {
@@ -354,7 +385,9 @@ function bindEvents() {
   //   逐个点太慢，而且人不知道哪些值得取 —— 这个按钮就是"把能看的都取回来"。
   const bfa = $('#btnFetchAllArt'); if (bfa) bfa.addEventListener('click', fetchAllArtifacts);
   // 生成交付 PPT：素材已在本机时直接生成，不等服务器。
-  const bpp = $('#btnBuildPpt'); if (bpp) bpp.addEventListener('click', buildPpt);
+  //   注意不要绑 btnBuildPpt —— 那个现在是产物面板的页签按钮，
+  //   点它是切面板，不是生成 PPT。生成走 btnBuildPptGen（只在本地模式出现）。
+  const bpp = $('#btnBuildPptGen'); if (bpp) bpp.addEventListener('click', buildPpt);
   // 打包交付物：图已取回本机、PPT 也已在本机生成时，打包不必再绕一趟服务器。
   //   流程定义里 pack 是「服务器上跑」的环节，服务器模式下要点到最后一环、
   //   还要等回写；而这件事本质是本地压个 zip，绕过去只多一次等待和一个失败点。
@@ -385,18 +418,39 @@ function bindEvents() {
    ===================================================================== */
 
 /* 读回「我在哪一份分析里」。这是刷新后能回到原处的唯一依据。 */
-async function loadSessionsState() {
+async function loadSessionsState(targetId = null, bindCurrent = true) {
   const __recordScope = recordContext();
   try {
 
   let d = null;
-  try { d = await recordAwait(getJSON('/api/sessions/state'), __recordScope); } catch (e) {
+  const statePath = targetId
+    ? '/api/sessions/state?id=' + encodeURIComponent(String(targetId))
+    : '/api/sessions/state';
+  const stateOpts = bindCurrent ? undefined : {recordBound: false};
+  try { d = await recordAwait(api(statePath, stateOpts), __recordScope); } catch (e) {
     if (!recordCurrent(__recordScope)) return;
  d = null; }
-  if (!d || !d.ok) return;
+  if (!d || !d.ok) {
+    // No current selection must not hide the list. A failed history read must
+    // be distinguished from a genuinely empty history, without borrowing state.
+    try {
+      const listing = await recordAwait(api('/api/sessions', {recordBound:false}), __recordScope);
+      if (!listing || !listing.ok || listing.identified === false)
+        throw new Error((listing && listing.error) || '历史记录暂时无法读取');
+      S.sessions = arr(listing.sessions);
+      S.sessionsError = '';
+    } catch (e) {
+      if (!recordCurrent(__recordScope)) return;
+      S.sessionsError = String(e.message || e);
+    }
+    renderIdentity();
+    return;
+  }
+  S.sessionsError = '';
   S.sessions = arr(d.sessions);
-  S.sessionId = d.current || (d.session && d.session.id) || null;
+  S.sessionId = targetId || d.current || (d.session && d.session.id) || null;
   const s = d.session || null;
+  S.readonly = !!(s && s.can_write === false);
   S.collapsed = (s && s.collapsed) || {};
 
   // 记录里存的识别结果 = 这一份当时识别出来的东西。
@@ -442,6 +496,14 @@ async function loadSessionsState() {
     startWaitWriteback();
   }
 
+  // 顶部状态行在这里重画一次。
+  //   为什么必须放在这里而不是只放在初始化里：状态行的名字取自 S.sessions
+  //   与 S.sessionId，而这两样正是本函数刚写完的。初始化时 loadIdentity 先跑、
+  //   loadSessionsState 后跑，于是状态行渲染时列表还是空的 ——
+  //   结果就是新建或切记录之后，标题一直停在「分析记录：未选择」。
+  //   本函数是新建、切换、刷新三条路的共同收口，放这里一次覆盖三条。
+  renderIdentity();
+
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
     throw e;
@@ -465,19 +527,50 @@ function renderSessionsBar() {
   } else {
     badge = '<span class="idbadge warn">还没识别</span>';
   }
-  host.innerHTML = '<span class="sesscur">当前分析：<b>' + esc(cur.name || cur.id) + '</b></span>'
+  host.innerHTML = '<span class="sesscur">' + (S.readonly ? '只读查看：' : '当前分析：') + '<b>' + esc(cur.name || cur.id) + '</b></span>'
     + badge
     + (cur.run_dir ? '<span class="sesspath">' + esc(cur.run_dir) + '</span>' : '')
     + '<span class="small">' + esc(String(cur.created_at || '').replace('T', ' '))
     + (cur.n_archives ? '　存档 ' + cur.n_archives + ' 份' : '') + '</span>'
     + '<span class="spacer"></span>'
-    + '<button class="btn" data-sess-list="1">切换</button>';
+    + (S.readonly
+      ? '<span class="small">' + (isolationOff('write')
+          ? '别人也能改（管理员已关修改隔离）'
+          : '只读：只能看，不能改。要协作请让管理员关掉修改隔离') + '</span>'
+      : '<button class="btn" data-sess-list="1">切换</button>');
 }
 
-/* 新建分析：设置照旧（同一台机器、一样的目录），结论清空。
-   为什么要「照旧」：换的通常是数据或判断，不是那台服务器在哪。 */
+/* 隔离开关的当前值。拿不到就按"开着"算 —— 从严那一侧，
+   免得因为一次读失败在页面上显示成"谁都能改"。 */
+function isolationOff(which) {
+  const p = S.policy;
+  if (!p) return false;
+  if (which === 'read') return p.record_isolation === false;
+  return p.write_isolation === false;
+}
+
+/* 新建分析：设置从「来源记录」继承，结果目录可以在这里改。
+   为什么不再照抄全局设置：全局设置只是这台机器上一次保存的样子，
+   它可能来自另一份记录 —— 包括不属于当前账号的记录，只要页面切过去看过。
+   照抄等于把那份记录的路径搬进新记录。所以这里显式带两个东西：
+   source_session_id（当前正在看的这份记录，服务端当场校验归属）
+   和 run_dir（这次要用的独立结果目录）。
+   取消对话框就不新建：以前 prompt 返回 null 会被当成空串，等于点了取消也建。 */
 async function newSession() {
   if (sessionChanging) return;
+
+  let name = null;
+  try { name = prompt('这次分析叫什么？', ''); } catch (e) { name = null; }
+  if (name === null) { toast('已取消，没有新建。', 'info'); return; }
+  name = String(name).trim();
+
+  const cur = S.place || {};
+  const curRd = (cur.server && cur.server.work_root) || (cur.local && cur.local.path) || '';
+  let rd = null;
+  try { rd = prompt('这次分析的结果目录（服务器上的独立目录）', curRd); } catch (e) { rd = null; }
+  if (rd === null) { toast('已取消，没有新建。', 'info'); return; }
+  rd = String(rd).trim();
+
   sessionChanging = true;
   recordGeneration += 1;
   recordTimers.forEach(clearInterval); recordTimers.clear();
@@ -485,12 +578,10 @@ async function newSession() {
   const __recordScope = recordContext();
   try {
 
-  let name = '';
-  try { name = (prompt('这次分析叫什么？', '') || '').trim(); } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
- name = ''; }
   try {
-    const r = await recordAwait(postJSON('/api/sessions/new', { name: name }), __recordScope);
+    const body = { name: name, run_dir: rd };
+    if (S.sessionId) body.source_session_id = S.sessionId;
+    const r = await recordAwait(postJSON('/api/sessions/new', body), __recordScope);
     if (!r || !r.ok) { sessionChanging = false; toast('新建失败：' + ((r && r.error) || '未知原因'), 'bad'); return; }
     // 先把界面上属于「上一次」的东西清掉，再去读新记录。
     //   不清的话，新记录的第一次渲染会短暂显示上一份的结论。
@@ -521,15 +612,19 @@ function renderSessions() {
   if (!host) return;
   const list = arr(S.sessions);
   if (note) note.textContent = list.length ? ('共 ' + list.length + ' 份') : '';
+  const warning = S.sessionsError
+    ? '<div class="small" role="alert">历史记录加载失败：' + esc(S.sessionsError)
+      + ' 请稍后刷新；这不表示分析记录已被删除。</div>' : '';
   if (!list.length) {
-    host.innerHTML = '<div class="small">还没有分析记录。</div>';
+    host.innerHTML = warning || '<div class="small">还没有分析记录。</div>';
     return;
   }
-  let h = '<table class="libtbl"><thead><tr>'
+  let h = warning + '<table class="libtbl"><thead><tr>'
     + '<th>分析</th><th>创建</th><th>跑在哪</th><th>识别结论</th><th>存档</th><th>运行摘要</th><th>操作</th>'
     + '</tr></thead><tbody>';
   list.forEach(s => {
     const cur = s.id === S.sessionId;
+    const readonly = s.readonly === true || s.can_write === false;
     const runSummary = window.runSummaries && window.runSummaries.get(String(s.id));
     const whereFull = s.mode === 'server'
       ? ('服务器 ' + (s.run_dir || '')) : (s.run_dir || '本机');
@@ -553,9 +648,10 @@ function renderSessions() {
       + '<td>' + vtxt + '</td>'
       + '<td class="nw">' + (s.n_archives || 0) + ' 份</td>'
       + '<td class="ac-history-summary" data-run-summary="' + esc(s.id) + '">' + esc(runSummary ? (runSummary.sentence || '状态待核实') : '状态尚未读取') + '</td>'
-      + '<td>' + (cur ? '<span class="small">正在看</span>'
-                      : '<button class="btn btn-sm" data-sess-switch="'
-                        + esc(s.id) + '">切换</button>') + '</td>'
+      + '<td>' + (cur ? '<span class="small">' + (readonly ? '只读查看' : '正在看') + '</span>'
+                      : readonly
+                        ? '<button class="btn btn-sm" data-sess-view="' + esc(s.id) + '">只读查看</button>'
+                        : '<button class="btn btn-sm" data-sess-switch="' + esc(s.id) + '">切换</button>') + '</td>'
       + '</tr>';
   });
   h += '</tbody></table>';
@@ -575,6 +671,7 @@ async function switchSession(id) {
     const r = await recordAwait(postJSON('/api/sessions/switch', { id: id }), __recordScope);
     if (!r || !r.ok) { sessionChanging = false; toast('切不过去：' + ((r && r.error) || '未知原因'), 'bad'); return; }
     resetRecordState();
+    S.readonly = false;
     S.sessionId = (r.session && r.session.id) || id;
     stopWaitWriteback();
     await recordAwait(loadPlace(), __recordScope);
@@ -593,6 +690,59 @@ async function switchSession(id) {
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
     throw e;
+  }
+}
+
+/* Shared records are opened through their explicit id. This never calls the
+   switch endpoint, so the server-side current record stays untouched. */
+async function openReadOnlySession(id) {
+  if (sessionChanging || !id) return;
+  sessionChanging = true;
+  recordGeneration += 1;
+  recordTimers.forEach(clearInterval); recordTimers.clear();
+  stopPolling(); stopWaitWriteback();
+  const __recordScope = recordContext();
+  try {
+    resetRecordState();
+    await recordAwait(loadSessionsState(String(id), false), __recordScope);
+    if (!S.readonly) throw new Error('这条记录不是只读共享记录');
+    await recordAwait(loadPlace(), __recordScope);
+    await recordAwait(loadRun(), __recordScope);
+    sessionChanging = false;
+    setStageVisible(S.identified);
+    renderAll();
+    renderSessionsBar();
+    renderSessions();
+    closeDlg('dlgSessions');
+    toast('已打开共享记录（只读，不改变当前记录）', 'info');
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    sessionChanging = false;
+    toast('打开共享记录失败：' + e.message, 'bad');
+  }
+}
+
+async function returnToCurrentRecord() {
+  if (sessionChanging) return;
+  sessionChanging = true;
+  recordGeneration += 1;
+  recordTimers.forEach(clearInterval); recordTimers.clear();
+  stopPolling(); stopWaitWriteback();
+  const __recordScope = recordContext();
+  try {
+    resetRecordState();
+    await recordAwait(loadSessionsState(null, false), __recordScope);
+    await recordAwait(loadPlace(), __recordScope);
+    if (S.runDir) await recordAwait(loadRun(), __recordScope);
+    sessionChanging = false;
+    setStageVisible(S.identified);
+    renderAll();
+    renderSessionsBar();
+    renderSessions();
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    sessionChanging = false;
+    toast('回到当前记录失败：' + e.message, 'bad');
   }
 }
 
@@ -663,9 +813,10 @@ function openRetryDlg(id, force) {
   $('#retryNote').textContent = sg && sg.status === 'done' ? '这一步已完成' : '';
 
   // 已完成的事实先摊开：不看这些就决定重跑什么，等于凭印象。
-  const bits = [];
-  if (sg && sg.ended_at) bits.push('完成于 ' + String(sg.ended_at).replace('T', ' '));
-  const dur = sg && sg.status !== 'handoff_unconfirmed' ? fmtDur(sg.started_at, sg.ended_at) : '';
+  const presentation = retryStatusPresentation(sg, rs);
+  const bits = [presentation.label];
+  if (sg && sg.ended_at) bits.push(presentation.time + ' ' + String(sg.ended_at).replace('T', ' '));
+  const dur = sg && sg.status !== 'handoff_unconfirmed' && !(sg.status === 'failed' && !sg.ended_at) ? fmtDur(sg.started_at, sg.ended_at) : '';
   if (dur) bits.push('用了 ' + dur);
   if (sg && sg.source_host) bits.push('跑在 ' + sg.source_host);
   if (rs && rs.exec_pc) bits.push('经 ' + rs.exec_pc);
@@ -673,7 +824,7 @@ function openRetryDlg(id, force) {
 
   let dh = '';
   if (bits.length) {
-    dh += '<div class="rz ok" style="margin:0"><span class="mk">✓</span><span>'
+    dh += '<div class="rz ' + presentation.cls + '" style="margin:0"><span class="mk">' + presentation.mark + '</span><span>'
       + esc(bits.join('　·　')) + '</span></div>';
   }
   const arts = sg ? arr(sg.artifacts) : [];
@@ -713,6 +864,13 @@ document.addEventListener('click', function (e) {
 document.addEventListener('click', function (e) {
   const c = e.target.closest('[data-dlgclose]');
   if (c) { closeDlg(c.getAttribute('data-dlgclose')); return; }
+  // 权限管理的两个开关按钮。统一在这里接，弹窗内容是动态渲染的，
+  //   在渲染时逐个绑监听会随重渲染丢掉。
+  const tg = e.target.closest('[data-admin-toggle]');
+  if (tg) {
+    toggleAdminSwitch(tg.getAttribute('data-admin-toggle'), tg.getAttribute('data-admin-target'));
+    return;
+  }
   // 点遮罩关闭（只在点到弹窗背景本身时，避免误关）
   if (e.target.classList && e.target.classList.contains('modal')) {
     closeDlg(e.target.id);
@@ -846,6 +1004,97 @@ async function loadRun() {
   }
 }
 
+/* 权限管理：读开关、改开关。
+   两个开关的含义写死在文案里，因为"关闭隔离"这件事必须让人看清楚
+   代价是什么，不然点一下就会把所有人的记录变成互相可见。
+   页面只负责显示和提交；判定全在后端（/api/admin/policy）。 */
+async function loadAdmin() {
+  const __recordScope = recordContext();
+  try {
+    const r = await api('/api/admin/policy', { recordBound: false });
+    if (!recordCurrent(__recordScope)) return;
+    S.admin = r || null;
+    S.policy = (r && r.policy) || null;
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    S.admin = { ok: false, error: String(e.message || e) };
+  }
+  const btn = $('#btnAdmin');
+  if (btn) btn.style.display = (S.admin && S.admin.is_admin) ? '' : 'none';
+  renderSessionsBar();
+  return S.admin;
+}
+
+function openAdminDialog() {
+  renderAdminBody();
+  openDlg('dlgAdmin');
+  loadAdmin().then(() => { renderAdminBody(); });
+}
+
+function adminSwitchRow(id, title, on, note) {
+  return '<div class="card card-pad" style="margin-bottom:10px">'
+    + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
+    + '<b>' + esc(title) + '</b>'
+    + '<span class="small">' + (on ? '已开启（各看各的）' : '已关闭（互相可见）') + '</span>'
+    + '<span class="spacer"></span>'
+    + '<button class="btn ' + (on ? 'primary' : '') + '" data-admin-toggle="' + esc(id) + '"'
+    + ' data-admin-target="' + (on ? 'false' : 'true') + '">'
+    + (on ? '关闭隔离' : '打开隔离') + '</button>'
+    + '</div>'
+    + '<p class="small" style="margin:8px 0 0">' + esc(note) + '</p>'
+    + '</div>';
+}
+
+function renderAdminBody() {
+  const host = $('#adminBody'), note = $('#adminNote');
+  if (!host) return;
+  const a = S.admin;
+  if (!a) { host.innerHTML = '<div class="small">正在读权限设置…</div>'; return; }
+  if (!a.ok && !a.is_admin) {
+    host.innerHTML = '<div class="small">读不到权限设置：' + esc(a.error || '未知原因') + '</div>';
+    return;
+  }
+  if (!a.is_admin) {
+    if (note) note.textContent = '';
+    host.innerHTML = '<div class="small">这个入口只对应用所属机器人的主人开放。'
+      + '当前身份不是管理员，无法修改隔离设置。</div>';
+    return;
+  }
+  const p = a.policy || S.policy || { record_isolation: true, write_isolation: true };
+  if (note) note.textContent = p.updated_at ? ('上次修改 ' + String(p.updated_at).replace('T', ' ')) : '还没改过';
+  let h = '';
+  h += adminSwitchRow('record_isolation', '记录隔离（用户记录互相可见）',
+    p.record_isolation !== false,
+    '开启时每个人只能看到自己的分析记录和别人显式共享的。关闭后，任何已登录用户都能看到全部记录。');
+  h += adminSwitchRow('write_isolation', '修改权限隔离（别人能不能改）',
+    p.write_isolation !== false,
+    '开启时别人只能看、不能改；也包括不能让助手改应用代码（脚本库里的脚本）。关闭后任何已登录用户都能改别人的记录、也能让助手改代码。');
+  h += '<p class="small">开关存到本应用配置里，刷新即生效。每次修改都留审计记录。</p>';
+  host.innerHTML = h;
+}
+
+async function toggleAdminSwitch(id, target) {
+  const want = target === true || target === 'true';
+  const label = id === 'record_isolation' ? '记录隔离' : '修改权限隔离';
+  if (!want && !confirm('确定关闭「' + label + '」？\n关闭后，任何已登录用户都能' +
+      (id === 'record_isolation' ? '看到全部记录' : '修改别人的记录和应用代码') + '。')) return;
+  try {
+    const r = await api('/api/admin/policy', {
+      recordBound: false,
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ [id]: want })
+    });
+    if (!r || !r.ok) { toast('没改成：' + ((r && r.error) || '未知原因'), 'bad'); return; }
+    S.admin = Object.assign({}, S.admin, { policy: r.policy });
+    S.policy = r.policy;
+    renderAdminBody();
+    renderSessionsBar();
+    toast(label + (want ? '已开启' : '已关闭') + '。', 'good');
+  } catch (e) {
+    toast('没改成：' + e.message, 'bad');
+  }
+}
+
 function renderAll() {
   const record = recordContext();
   renderHead();
@@ -872,6 +1121,9 @@ function renderAll() {
   // 处理过程要单独取一次：它是「跑到哪个环节、花了多久」，
   //   和上面那些渲染各管一件事，不塞进其中任何一个里。
   loadFlow();
+  // 权限管理：既决定「权限管理」按钮出不出现，也决定状态行怎么说只读。
+  //   不只在打开弹窗时读 —— 只读提示要跟着每次渲染走。
+  loadAdmin();
   // 脚本数据库是页面里的一节，不是弹窗 —— 打开页面就要有内容，
   //   不能等人点了按钮才第一次去读。
   renderLib();
@@ -1512,6 +1764,38 @@ function decCard(it, idx) {
   return h;
 }
 
+/* 决策对话框：把某一步的待答卡摆出来，人自己选、自己点确定。
+   为什么需要它（2026-11-13 实测）：页面上的「需要你决定的事」整块已删，
+   renderGates 只剩空壳并提前 return，于是 pending 只有计数、
+   没有任何可点的地方 —— 阶段卡按钮写着"先定 1 件"却带 disabled，
+   人在浏览器里点不动，Playwright 点它也只会超时。流程死在这一步。
+   这里不自动采用建议值：选项要人点，确定才写回，
+   写回仍走既有的 POST /api/decisions/answer。 */
+function openDecisionDlg(stepId) {
+  const list = decPendingFor(stepId);
+  if (!list.length) {
+    toast('这一步没有待答的问题了。', 'good');
+    renderRun();
+    return;
+  }
+  let body = '';
+  list.forEach(function (it, i) {
+    body += decCard(it, i + 1);
+  });
+  body += '<div class="mut" style="margin-top:10px">'
+    + '这里只把问题摆出来。选哪一项由你点，确定之后才写回记录。</div>';
+  const foot = '<button class="btn" data-sheet-close="1">先不答</button>';
+  sheet('这一步需要你先定 ' + list.length + ' 件', body, foot, { wide: true });
+  // 不预选任何一项。
+  //   这张卡带 suggested，decCard 会把建议值预勾上；在本对话框里那样做，
+  //   人一路点"确定"就等于替自己采纳了建议 —— 而这里的口径是
+  //   "选哪一项由人点"。所以打开时把预勾全部清掉，人必须自己点一下。
+  try {
+    const top = SHEET_STACK.length ? SHEET_STACK[SHEET_STACK.length - 1].el : null;
+    if (top) top.querySelectorAll('input[type=radio]:checked').forEach(function (el) { el.checked = false; });
+  } catch (e) {}
+}
+
 function decDoneCard(it) {
   const opts = arr(it.options).filter(o => String(o.value) === String(it.answer));
   let lab = opts.length ? String(opts[0].label || opts[0].value) : String(it.answer === null ? '—' : it.answer);
@@ -1583,7 +1867,15 @@ async function answerDecision(id, useSuggested) {
     if (!r || !r.ok) { toast('没存上：' + ((r && r.error) || '未知原因'), 'bad'); return; }
     toast('已记下。这一步可以跑了。', 'good');
     await recordAwait(loadDecisions(), __recordScope);
+    // 从决策对话框里答完，要把它关掉再重画。
+    //   不关的话，人答完了对话框还挂着，看起来像没生效；
+    //   而且下一张卡如果还有别的待答项，会叠在旧内容上。
+    if (SHEET_STACK.length) closeSheet();
     renderRun();
+    // 这一步的待答问题都答完了：把对话框收掉、让按钮恢复成"可以跑"。
+    if (!decPendingFor((decItems().find(x => String(x.id) === String(id)) || {}).step || '').length) {
+      renderGates();
+    }
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
 
@@ -1993,6 +2285,28 @@ function closeSheet(box) {
    原来它是一个 <details> 折叠块，卡片上还要先铺一段"已产出 8 项 + 8 个
    文件名"。gina 的要求是：详情本身做成按钮，产物放进详情里。
    于是卡片只剩状态和动作，核对用的材料全部进这一层。 */
+/* 详情面板开着时，取回完成后就地重画一次。
+   为什么需要：详情里的格子是按当次状态生成的静态 HTML，取回成功只重画了
+   「产物下载」面板，详情里那些格子会一直停在“正在取回…”，
+   看起来像取回失败。只重画最上面那一层，且只在它确实是详情时动手。 */
+function refreshOpenStepDetail() {
+  const top = SHEET_STACK.length ? SHEET_STACK[SHEET_STACK.length - 1] : null;
+  if (!top || !top.el) return false;
+  const head = top.el.querySelector('.sheet-h b');
+  const title = head ? String(head.textContent || '') : '';
+  if (title.indexOf('任务完成详情') !== 0) return false;
+  const stepId = S.detailCtx && S.detailCtx.stepId;
+  if (!stepId) return false;
+  const body = top.el.querySelector('.sheet-b');
+  const keep = body ? body.scrollTop : 0;
+  closeSheet(top.el);
+  openStepDetail(stepId);
+  const next = SHEET_STACK.length ? SHEET_STACK[SHEET_STACK.length - 1] : null;
+  const nb = next && next.el ? next.el.querySelector('.sheet-b') : null;
+  if (nb && keep) nb.scrollTop = keep;
+  return true;
+}
+
 function openStepDetail(stepId) {
   const sg = stageOf(stepId);
   const rs = remoteStep(stepId);
@@ -2005,7 +2319,7 @@ function openStepDetail(stepId) {
   const code = (rs && rs.code !== null && rs.code !== undefined) ? rs.code
     : (sg && sg.code !== null && sg.code !== undefined ? sg.code : null);
   const arts = sg ? arr(sg.artifacts) : [];
-  const log = String((sg && sg.log) || (rs && rs.log) || '');
+  const log = String((sg && sg.exec_error) || (sg && sg.log) || (rs && rs.log) || '');
   const args = arr(sg && sg.args);
   const deps = arr(sg && sg.deps);
 
@@ -2057,7 +2371,7 @@ function openStepDetail(stepId) {
   if (sg && sg.ended_at) {
     const d = fmtDur(sg.started_at, sg.ended_at);
     rows.push(['结束', String(sg.ended_at).replace('T', ' ') + (d ? '（用了 ' + d + '）' : '')]);
-  } else if (sg && sg.started_at) {
+  } else if (sg && sg.started_at && !['failed','rejected','done'].includes(sg.status)) {
     rows.push(['至今', '还没结束，已过 ' + fmtDur(sg.started_at, '')]);
   }
   if (sg && sg.imported_at) rows.push(['回写于', String(sg.imported_at).replace('T', ' ')]);
@@ -2070,7 +2384,7 @@ function openStepDetail(stepId) {
     (sg.review.checks || []).forEach(c => {
       if (c && c.ok === false) bad.push((c.name || '') + (c.detail ? '：' + c.detail : ''));
     });
-    rows.push(['质检', '应用自检' + vtxt
+    rows.push([sg.started_at && sg.review.imported_at && sg.review.imported_at < sg.started_at ? '历史质检（上次）' : '质检', '应用自检' + vtxt
       + (sg.review.imported_at ? '　' + String(sg.review.imported_at).replace('T', ' ') : '')
       + (bad.length ? '　' + bad.join('；') : '')]);
   }
@@ -2172,8 +2486,11 @@ function openStepDetail(stepId) {
             + '<span class="thumb-n">' + esc(nm) + '</span>'
             + '<span class="thumb-f">' + esc(exts) + '</span></button>';
         } else {
+          const ai = arr(S.artifacts).find(x => String(x.rel || '') === String(pick.rel));
+          const rk = ai ? (Number(ai.fetch_rank) || 0) : 0;
+          const waitLabel = rk > 0 ? ('排队第 ' + rk + ' 位') : '还没取回';
           h += '<button class="thumb empty" data-artget="' + esc(pick.rel) + '" title="点一下把它取回来">'
-            + '<span class="thumb-wait">还没取回</span>'
+            + '<span class="thumb-wait">' + esc(waitLabel) + '</span>'
             + '<span class="thumb-n">' + esc(nm) + '</span>'
             + '<span class="thumb-f">' + esc(exts) + '</span></button>';
         }
@@ -2189,9 +2506,12 @@ function openStepDetail(stepId) {
       tbls.forEach(rel => {
         const has = !!mirroredSet[rel];
         const nm = rel.split('/').pop();
+        const tdl = apiUrl('api/artifact/download') + '?session=' + encodeURIComponent(S.sessionId || '')
+          + '&rel=' + encodeURIComponent(rel);
         h += '<div class="dtrow"><span class="dtrow-n">' + esc(nm) + '</span>'
           + (has
             ? '<button class="btn btn-sm" data-tableview="' + esc(rel) + '">预览</button>'
+              + '<a class="btn btn-sm" href="' + tdl + '">下载</a>'
             : '<button class="btn btn-sm" data-artget="' + esc(rel) + '">取回</button>')
           + '</div>';
       });
@@ -2202,8 +2522,13 @@ function openStepDetail(stepId) {
       h += '<div class="dtgrp">其它文件 ' + others.length + ' 份</div><div class="dtlist">';
       others.slice(0, 20).forEach(rel => {
         const has = !!mirroredSet[rel];
+        // 已取回不能只写一行字：它就在本机了，这里却没有下载入口，
+        //   人得再去产物面板翻一遍。能下载就直接给下载。
+        const dl = apiUrl('api/artifact/download') + '?session=' + encodeURIComponent(S.sessionId || '')
+          + '&rel=' + encodeURIComponent(rel);
         h += '<div class="dtrow"><span class="dtrow-n">' + esc(rel) + '</span>'
-          + (has ? '<span class="small">已取回</span>'
+          + (has
+            ? '<a class="btn btn-sm" href="' + dl + '">下载</a>'
             : '<button class="btn btn-sm" data-artget="' + esc(rel) + '">取回</button>')
           + '</div>';
       });
@@ -2280,8 +2605,8 @@ async function chooseVariantInDetail(stage, id) {
         '环节 ' + stage + ' 已经定了一套：' + label,
         it && it.outdir ? ('产物目录：' + it.outdir) : '',
         '',
-        '请以这一套为准继续往下做；其它几套保留不删，只作对比。'].filter(Boolean).join('\n');
-      try { await recordAwait(injectToSession(txt, function () {}), __recordScope); } catch (e) {
+        '这里只同步已选参数，请只读确认；不要因此提交或重跑任何作业。其它候选保留不删。'].filter(Boolean).join('\n');
+      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}), __recordScope); } catch (e) {
     if (!recordCurrent(__recordScope)) return;
  /* 通道不通不影响选定 */ }
       toast('已选定：' + label, 'good');
@@ -2543,6 +2868,53 @@ function stageFoldHTML(sg, rs, stepId) {
   return '<button class="btn btn-sm stmore" data-stepdetail="' + esc(stepId) + '">' + esc(label) + '</button>';
 }
 
+function stageAcceptance(stage, remote) {
+  if (!stage || stage.conflict || (remote && remote.conflict)) return false;
+  if (['queued', 'running', 'failed', 'stopped'].includes(String(stage.exec_status || ''))) return false;
+  const review = stage.review;
+  return stage.status === 'done' && !!review && review.ok === true && review.verdict === 'pass';
+}
+function stageCoveredAcceptance(stage, flow) {
+  if (!stage || stage.covered !== true || !stage.cover_by || stage.conflict) return false;
+  if (['queued', 'running', 'failed', 'stopped'].includes(String(stage.exec_status || ''))) return false;
+  const remote = remoteStep(stage.id);
+  if (remote && remote.conflict) return false;
+  const upstream = arr(flow && flow.stages).find(x => x.id === stage.cover_by);
+  return stageAcceptance(upstream, upstream && remoteStep(upstream.id));
+}
+function coveredStageCount(flow) {
+  return arr(flow && flow.stages).filter(stage => stageCoveredAcceptance(stage, flow)).length;
+}
+function acceptedStageCount(flow) {
+  return arr(flow && flow.stages).filter(stage =>
+    stageAcceptance(stage, remoteStep(stage.id)) || stageCoveredAcceptance(stage, flow)).length;
+}
+function retryStatusPresentation(stage, remote) {
+  if (stage && ['queued', 'running'].includes(String(stage.exec_status || stage.status)))
+    return {label: '本次任务正在执行', cls: 'warn', mark: '…', time: '上次结束于'};
+  if (stageAcceptance(stage, remote))
+    return {label: '已验收', cls: 'ok', mark: '✓', time: '完成于'};
+  if ((stage && stage.conflict) || (remote && remote.conflict))
+    return {label: '执行与结果记录有冲突', cls: 'warn', mark: '!', time: '结束于'};
+  if ((stage && (stage.status === 'failed' || stage.exec_status === 'failed')) || (remote && remote.status === 'failed'))
+    return {label: '上次执行失败', cls: 'fail', mark: '×', time: '结束于'};
+  if (stage && stage.review && stage.review.ok === false)
+    return {label: '结果验收未通过', cls: 'warn', mark: '!', time: '结束于'};
+  if ((stage && stage.status === 'done') || (remote && remote.status === 'done'))
+    return {label: '已收到结果，等待验收', cls: 'warn', mark: '…', time: '结束于'};
+  if ((stage && (stage.status === 'stopped' || stage.exec_status === 'stopped')) || (remote && remote.status === 'stopped'))
+    return {label: '上次任务已停止', cls: 'warn', mark: '!', time: '结束于'};
+  return {label: '尚无已验收结果', cls: 'warn', mark: '!', time: '结束于'};
+}
+
+function stageAction(sg) {
+  const coverId = String(sg && sg.cover_by || '');
+  const active = !!(sg && ['queued','running'].includes(sg.exec_status || sg.status));
+  return {coverId, active, selectable: !coverId && !active,
+    detailId: coverId || (active ? sg.id : '')};
+}
+function selectableStep(id) { return stageAction(stageOf(id)).selectable; }
+
 function renderRun() {
   // 待答的决策按"这一步"数：整页按钮该不该禁用、提示几件，都用它。
   const pA = pendingDecisions().length;
@@ -2580,7 +2952,39 @@ function renderRun() {
       const sm = FLOW_ST_CN[sg.status] || [sg.status || '', ''];
       if (!stateTxt) stateTxt = sm[0];
     }
-    if (remote) {
+    // ---- 优先级：执行队列事实 > 回写记录 > 聊天投递 --------------------
+    //   实测踩到的坑：作业 60739 已经在 master01 上跑，
+    //   /api/flow 也返回 doublet running + exec_id，
+    //   可页面先按 rs.status='delegated' 写成"已交给助手"，
+    //   再被 rs.display_status='handoff_unconfirmed' 覆盖成"交接未确认"，
+    //   最后又被 dl.ok=true 覆盖成"已送进会话"。
+    //   三条旧判据一路盖掉最新的事实，人看到的是三手前的结论。
+    //   现在改成：只要有 exec_id/exec_status，就以它为准，下面几条一律不再改。
+    const exStatus = sg && sg.exec_status ? String(sg.exec_status) : '';
+    const exId = sg && sg.exec_id ? String(sg.exec_id) : '';
+    const exJob = sg && sg.exec_job ? String(sg.exec_job) : '';
+    if (exId || exStatus) {
+      if (exStatus === 'running') {
+        stateTxt = '执行端正在跑' + (exJob ? '（作业 ' + exJob + '）' : '') + '，等它回写';
+        cls = 'running';
+      } else if (exStatus === 'queued') {
+        // queued 只能说"已入队"。集群是否已提交由执行端 claim 之后才知道，
+        //   这里写成"已提交作业"就是在替执行端宣布它还没做的事。
+        stateTxt = '已入队，等执行端取走提交' + (exId ? '（' + exId + '）' : '');
+        cls = 'running';
+      } else if (exStatus === 'done') {
+        stateTxt = '执行端已完成，等回写确认';
+        cls = 'running';
+      } else if (exStatus === 'failed') {
+        stateTxt = sg.exec_error ? (/目标端版本与包内不一致/.test(sg.exec_error) ? '报告脚本版本不一致，尚未提交计算；请先同步版本，再重试' : '执行失败，点击查看失败原因') : '执行端报失败，尚待回写说明';
+        cls = 'failed';
+      }
+      if (rs && rs.status === 'done') {
+        stateTxt = '已在服务器上跑成'
+          + (rs.imported_at ? '（' + String(rs.imported_at).replace('T', ' ') + '）' : '');
+        cls = 'done';
+      }
+    } else if (remote) {
       if (rs && rs.status === 'running') stateTxt = '助手在服务器上跑';
       else if (rs && rs.status === 'delegated') stateTxt = rs.display_status === 'handoff_unconfirmed' ? '交接未确认，尚无执行回写' : '已交给助手，等它动手';
       else if (rs && rs.status === 'done') stateTxt = '已在服务器上跑成'
@@ -2589,12 +2993,15 @@ function renderRun() {
         + (rs.code === null || rs.code === undefined ? '' : '（退出码 ' + rs.code + '）');
       // relayed：会话通道断了，但指令已落进本机队列，助手会取走执行。
       //   这两种必须分开写：一个是"没交出去"，一个是"换条路交出去了"。
-      if (dl && dl.ok === false) stateTxt = dl.relayed
-        ? '已放进助手队列，会取走执行'
-        : '没送进会话';
-      if (dl && dl.ok === true) stateTxt = '已送进会话，助手会接着做';
+      const executionRecorded = rs && ['running', 'done', 'failed', 'stopped'].includes(rs.status);
+      if (!executionRecorded && dl && dl.ok === false) stateTxt = dl.relayed
+        ? '已放进助手队列，会取走执行' : '没送进会话';
+      if (!executionRecorded && dl && dl.ok === true) stateTxt = '已送进会话，助手会接着做';
     }
-    if ((sg && sg.status === 'handoff_unconfirmed') || (rs && rs.display_status === 'handoff_unconfirmed')) {
+    // 「交接未确认」只在完全没有任何执行记录时才成立。
+    //   有 exec_id 就说明作业已经派出去了，这句话与事实相反。
+    if (!exId && !exStatus &&
+        ((sg && sg.status === 'handoff_unconfirmed') || (rs && rs.display_status === 'handoff_unconfirmed'))) {
       if (!(dl && dl.ok === true)) { stateTxt = '交接未确认，尚无执行回写'; cls = 'warnc'; }
     }
 
@@ -2611,10 +3018,32 @@ function renderRun() {
     // 已被上游覆盖的步骤：显示"已完成"，并说明东西在哪。
     //   这两步（全量 marker / 组间差异）要的产出，终版已经算出来了。
     //   原来它们显示"还没跑"、点了报"脚本不存在"，看起来像流程断了一截。
-    const cov = !!(sg && sg.covered);
+    const cov = stageCoveredAcceptance(sg, S.flow);
     if (cov) {
       stateTxt = '已完成（由「' + coverTitle(sg.cover_by) + '」一并算出，不重算）';
       cls = 'done';
+    }
+
+    // 回写完成和验收通过分别显示；新一次作业在运行时不沿用旧的通过结论。
+    const accepted = stageAcceptance(sg, rs);
+    const activeExecution = ['queued', 'running'].includes(exStatus);
+    const resultAwaitingReview = !conflict && !activeExecution && !cov && !accepted &&
+      ((rs && rs.status === 'done') || (rs && rs.code === 0 && sg && sg.review && sg.review.ok === false));
+    if (conflict) {
+      stateTxt = '执行与结果记录有冲突，请查看详情'; cls = 'warnc';
+    } else if (!activeExecution && cov) {
+      stateTxt = '已验收（产物由「' + coverTitle(sg.cover_by) + '」提供）';
+      cls = 'done';
+    } else if (!activeExecution && accepted) {
+      stateTxt = '已验收'
+        + (sg.review.imported_at ? '（' + String(sg.review.imported_at).replace('T', ' ') + '）' : '');
+      cls = 'done';
+    } else if (resultAwaitingReview) {
+      stateTxt = sg && sg.review && sg.review.ok === false
+        ? '计算已结束，结果验收未通过；查看详情处理' : '已收到结果，等待验收';
+      cls = 'warnc';
+    } else if (!rs && !exId && (!sg || sg.status === 'todo')) {
+      stateTxt = '尚无运行记录';
     }
 
     // 已完成过就换个说法：不是"再开一次"，而是"带着新要求再来一次"。
@@ -2624,8 +3053,21 @@ function renderRun() {
     //   让人猜区别；失败态明确写"按原样重跑"，因为失败后要的是同一件事再来一次。
     const finished = (sg && sg.status === 'done') || (rs && rs.status === 'done');
     const failed = (sg && sg.status === 'failed') || (rs && rs.status === 'failed');
+    // 已被上游覆盖的步骤（全量 marker / 组间差异）：产出随终版一并生成。
+    //   它们确实有产出，但不该有"独立跑一次"这个动作 —— flow_execution
+    //   会明确拒绝 covered 步骤，按钮写成能跑就是骗人。
+    //   给的是"看上游那一步的进度"，因为真正决定这两步结果的是终版。
+    const action = stageAction(sg);
+    const coverId = action.coverId;
+    if (coverId && !cov && !conflict) {
+      stateTxt = '随「' + coverTitle(coverId) + '」一并生成，等待结果验收';
+      cls = '';
+    }
     let btnLabel;
-    if (blockedNow) btnLabel = '先定 ' + blockers.length + ' 件';
+    if (coverId) btnLabel = '查看「' + coverTitle(coverId) + '」进度';
+    else if (action.active) btnLabel = '查看运行进度';
+    else if (resultAwaitingReview) btnLabel = '查看验收详情';
+    else if (blockedNow) btnLabel = '先定 ' + blockers.length + ' 件';
     else if (finished) btnLabel = '带新要求重跑';
     else if (failed) btnLabel = '按原样重跑这一环';
     else if (remote) btnLabel = '交给助手去跑';
@@ -2636,16 +3078,24 @@ function renderRun() {
       : (finished ? '这一步已有结果，点开可以写清这次要它怎么做'
         : (failed ? '这一步失败过，点开可以写清要它怎么修再跑' : ''));
 
-    const btnAttr = (finished || failed)
-      ? ' data-req="' + esc(s.id) + '"'
-      : ' data-run="' + esc(s.id) + '"';
+    // 被待答问题挡住时，按钮改成"打开决策对话框"。
+    //   为什么必须改这一处：页面上的「需要你决定的事」整块已经删掉
+    //   （她要的是该问的时候弹窗问），renderGates 只剩空壳、提前 return，
+    //   于是 pending 只有计数、没有任何可点的地方 —— 按钮写着"先定 N 件"
+    //   却带着 disabled，人点不动，流程当场死在这一步。实测就是这么卡的。
+    const btnAttr = action.detailId ? ' data-stepdetail="' + esc(action.detailId) + '"'
+      : resultAwaitingReview ? ' data-stepdetail="' + esc(s.id) + '"' : blockedNow
+      ? ' data-decopen="' + esc(s.id) + '"'
+      : ((finished || failed)
+        ? ' data-req="' + esc(s.id) + '"'
+        : ' data-run="' + esc(s.id) + '"');
 
     // 卡片只留四行：标题、一行状态、环节格、按钮组。
     //   原来这里还有：一段步骤说明（"簇大小、簇 top15 marker、供筛群判断用"）、
     //   一行状态、一行环节、一行"已产出 N 项 + 一串文件名"、一个折叠的详情。
     //   gina 的原话是"很多解释性文字都是这样从上往下的罗列，我感觉不好" ——
     //   这些内容各自都有更合适的位置：说明进详情，产物进详情，符号不再解释。
-    const dur = sg && sg.status !== 'handoff_unconfirmed' ? fmtDur(sg.started_at, sg.ended_at) : '';
+    const dur = sg && sg.status !== 'handoff_unconfirmed' && !(sg.status === 'failed' && !sg.ended_at) ? fmtDur(sg.started_at, sg.ended_at) : '';
     const live = !!dur && sg && !sg.ended_at;
     const arts = sg ? arr(sg.artifacts) : [];
     const meta = [stateTxt];
@@ -2654,11 +3104,14 @@ function renderRun() {
 
     // 按钮组：四个动作同一套样式，只有主行动带 primary。
     //   上一次是"带新要求重跑"用 btn、另外两个用 btn-sm，并排时高度和边框都不一样。
-    const btnDisabled = blockedNow || (S.running && !remote && !finished) ? ' disabled' : '';
+    // 被决策挡住时按钮必须可点：它就是打开决策卡的那个入口。
+    const btnDisabled = (!blockedNow && (S.running && !remote && !finished)) ? ' disabled' : '';
     let btns = '<button class="btn stbtn' + (finished || failed ? '' : ' primary') + '"' + btnAttr
       + btnDisabled + '>' + esc(btnLabel) + '</button>';
     btns += '<button class="btn stbtn" data-steppoke="' + esc(s.id) + '"'
-      + (remote ? '' : ' disabled') + '>再报一次</button>';
+      + ((remote && !coverId) ? '' : ' disabled')
+      + ' title="' + (coverId ? '这一步没有自己的执行记录，随上游一并生成' : '请执行端再报一次回写') + '"'
+      + '>再报一次</button>';
     btns += '<button class="btn stbtn stmore" data-stepdetail="' + esc(s.id) + '">任务完成详情</button>';
 
     return '<div class="stcard ' + cls + '">'
@@ -2666,7 +3119,7 @@ function renderRun() {
       // 勾选框：用来"选几个环节按顺序一起跑"。
       //   以前只能一环一环点，四个环节点四次、每次等一轮。
       //   勾在这里不改原有单点行为：不勾就是原来的按钮。
-      + (S.pickMode ? '<input type="checkbox" class="stpick" data-mpick="' + esc(s.id) + '"'
+      + ((S.pickMode && action.selectable) ? '<input type="checkbox" class="stpick" data-mpick="' + esc(s.id) + '"'
         + (S.picked && S.picked.indexOf(s.id) >= 0 ? ' checked' : '')
         + ' title="勾选后可让它和其它环节按顺序一起跑">' : '')
       + '<span class="stnum">' + (STEP_ICON[s.id] || (i + 1)) + '</span>' + esc(s.title)
@@ -2690,7 +3143,38 @@ function renderRun() {
     const observed = Object.values(S.remoteSteps || {});
     const counts = {};observed.forEach(x => {const name = ST_CN[x.status] || '状态未知';counts[name] = (counts[name] || 0) + 1;});
     const dl = currentDelegated();
-    if (observed.length) { rsHost.className = 'runstate'; rsHost.textContent = '总体状态未知（阶段回写不等于全分析完成） · ' + Object.entries(counts).map(([name,n]) => name + ' ' + n + ' 阶段').join('；'); }
+    // 执行队列里有没有正在跑/在排的：这一层比"回写状态"更新，
+    //   它是执行端自己的记录，不是助手转述的。有就先用它说一句实话，
+    //   免得整行还停在"已交接，待执行确认"这种三手前的结论。
+    const exRows = [];
+    (S.flow && arr(S.flow.stages) || []).forEach(x => {
+      if (!x || !x.exec_id) return;
+      exRows.push(x);
+    });
+    const exRun = exRows.filter(x => String(x.exec_status) === 'running');
+    const exQue = exRows.filter(x => String(x.exec_status) === 'queued');
+    if (exRun.length) {
+      const a = exRun[0];
+      rsHost.className = 'runstate running';
+      rsHost.textContent = '执行端正在跑：' + (a.title || a.id)
+        + (a.exec_job ? '（作业 ' + a.exec_job + '）' : '')
+        + '；其余阶段以回写为准';
+    } else if (exQue.length) {
+      const a = exQue[0];
+      rsHost.className = 'runstate running';
+      rsHost.textContent = '已入队：' + (a.title || a.id) + '，等执行端取走提交';
+    } else if (S.flow && S.flow.progress) {
+      const total = Number(S.flow.progress.total || 0);
+      const accepted = acceptedStageCount(S.flow);
+      const failed = arr(S.flow.stages).filter(x => x.status === 'failed');
+      rsHost.className = 'runstate';
+      rsHost.textContent = '已完成 ' + accepted + ' / ' + total + ' 个阶段'
+        + (coveredStageCount(S.flow) ? '，其中 ' + coveredStageCount(S.flow) + ' 项由上游产物验收覆盖' : '')
+        + (failed.length ? '；' + failed.length + ' 个阶段需处理，详见对应卡片' : '；后续状态见各步骤');
+    } else if (observed.length) {
+      rsHost.className = 'runstate'; rsHost.textContent = '验收进度尚未读取 · '
+        + Object.entries(counts).map(([name,n]) => name + ' ' + n + ' 阶段').join('；');
+    }
     else if (dl && dl.ok === false) { rsHost.className = 'runstate failed'; rsHost.textContent = ''; }
     else if (dl && dl.ok === true) { rsHost.className = 'runstate running'; rsHost.textContent = '已交给助手：' + dl.title; }
     else { rsHost.className = 'runstate'; rsHost.textContent = '服务器模式 · 以接收回写为准'; }
@@ -2736,6 +3220,10 @@ const FLOW_ST_CN = {
   todo: ['无回写，状态未知', ''], running: ['回写为运行中', 'run'], done: ['回写为完成', 'ok'],
   failed: ['回写为失败', 'bad'], unknown: ['未回写，状态未知', 'warn'], delegated: ['已交出', 'run'],
   stopped: ['回写为停止', 'warn'], handoff_unconfirmed: ['交接未确认，尚无执行回写', 'warn'],
+  // 申报 done 但判定器拒过。必须与 done 分开显示：
+  //   合成一句"完成"会让人以为这步过了，还会顺手点下一步。
+  //   颜色按警告处理，不按成功。
+  rejected: ['完成申报未通过，待核', 'warn'],
 };
 const REVIEW_CN = {
   yes: ['在服务器上跑', 'ok'], no: ['不在目标服务器上', 'bad'], unknown: ['没有机器信息', 'warn'],
@@ -2803,15 +3291,15 @@ function renderFlow() {
   //   其实那两步的产出已经由终版一并算出来了。
   const pg = f.progress;
   if (pg && pg.total) {
-    const pending = arr(f.stages).filter(x => x.status !== 'done' && !x.covered);
+    const pending = arr(f.stages).filter(x => !stageAcceptance(x, remoteStep(x.id)) && !stageCoveredAcceptance(x, f));
     const active = pending.filter(x => x.status === 'running').map(x => x.title || x.id);
     const waiting = pending.filter(x => x.status !== 'running').map(x => x.title || x.id);
     const pendingText = [active.length ? ('回写为运行中：' + active.join('、')) : '',
       waiting.length ? ('无完成回写或状态待确认：' + waiting.join('、')) : ''].filter(Boolean).join('；');
     h += '<div class="progline">'
-      + '<b>' + pg.passed + ' / ' + pg.total + '</b> 有结果'
+      + '<b>已完成 ' + acceptedStageCount(f) + ' / ' + pg.total + '</b>'
       + '　<span class="dt">回写为完成 ' + pg.done + ' 步'
-      + (pg.covered ? '，已由上游覆盖 ' + pg.covered + ' 步' : '')
+      + (coveredStageCount(f) ? '，其中 ' + coveredStageCount(f) + ' 项由上游产物验收覆盖' : '')
       + '</span>'
       + (pendingText ? '<details class="progmiss"><summary>查看无完成回写的阶段（' + pending.length + '）</summary>' + esc(pendingText) + '</details>' : '')
       + '</div>';
@@ -2927,7 +3415,12 @@ function flowStall(f) {
     if (sg.status === 'failed') return;           // ② 已有失败结论
     const subs = arr(sg.subs);
     if (subs.some(sb => sb.status === 'failed')) return;  // 子项已判失败
-    const cands = [sg.started_at, sg.imported_at || '', sg.updated_at || ''];
+    const cands = [sg.started_at, sg.imported_at || '', sg.updated_at || '',
+                   // 执行端心跳也算"有动静"。
+                   //   一个样本要跑十几分钟，期间本来就不会有 step/import 回写；
+                   //   只看回写时间就会把正常在跑报成"1 小时 31 分钟未更新"。
+                   //   实测就是这条误报。心跳在更新，就说明它活着。
+                   sg.exec_last_seen || ''];
     subs.forEach(sb => { cands.push(sb.started_at, sb.ended_at); });
     let latest = 0;
     cands.forEach(x => {
@@ -3048,17 +3541,25 @@ async function pokeFlow(stageId) {
   const __recordScope = recordContext();
   try {
 
+  await recordAwait(refreshExecTasks(), __recordScope);
+  const binding = stepNotificationBinding(stageId);
   const brief = '/api/brief?step=' + encodeURIComponent(stageId)
     + (S.sessionId ? '&session=' + encodeURIComponent(S.sessionId) : '')
-    + (S.stepReq ? '&req=' + encodeURIComponent(S.stepReq) : '');
+    + (binding.reqId ? '&req=' + encodeURIComponent(binding.reqId) : '');
   const txt = '【来自 个性化分析助手】\n'
-    + '要办的事：「' + (stepTitleCN(stageId) || stageId) + '」现在跑到哪了，请立刻回写一次。\n'
+    + '要办的事：「' + (stepTitleCN(stageId) || stageId) + '」现在跑到哪了，请只读观察后说明。\n'
     + '1. 到服务器上看这一阶段的实际进程与最后写出的文件，不要凭记忆回答。\n'
-    + '2. 回写进度：POST /api/step/import，body 带 step=' + stageId
-    + '、sub（当前环节）、status（running/done/failed）、started_at、log。\n'
-    + '3. 如果已经停了或失败了，把原因原样写回，不要重跑、不要换参数。\n'
+    + '2. 只读汇报进度；查进度用 GET /api/flow?session=<分析记录号>（只读、校验归属），'
+    + '或直接看页面上的状态。\n'
+    + '3. 不要手工 POST /api/step/import。这一环的作业由执行端回写，'
+    + '你手工写会和它争同一份记录，写出来的状态谁对谁错没人能判。\n'
+    + '4. 如果已经停了或失败了，把原因原样说明，不要重跑、不要换参数、不要 qsub。\n'
     + '完整流程说明在 ' + brief + ' （GET 取 text 字段）。';
-  const r = await recordAwait(injectToSession(txt, function () {}), __recordScope);
+  // purpose 必须是 observe：这是一条"看一眼、说一句"的通知。
+  //   以前传默认 execute，prepare 会按执行任务去重建正文、申请回写凭据、
+  //   抢占输出目录 —— 只为问一句进度，却把执行条件全备齐了。
+  //   而且它要求助手手工回写，正好和执行端争同一份记录。
+  const r = await recordAwait(injectToSession(txt, function () {}, 'observe', binding), __recordScope);
   // 卡片上也留一句：toast 会消失，而人点完按钮还站在这一张卡上。
   const box = document.getElementById('stq-' + stageId);
   if (box) {
@@ -3210,9 +3711,9 @@ function filterPanelHTML(items, chosen) {
     + '<input id="filterDims" class="vinput" value="' + esc(dimsVal) + '" placeholder="例如 1:20">'
     + '<span class="vhint">取多少维做近邻图。官方脚本给的是 1:20。</span></div>'
     + '<div class="vrow"><label>resolution</label><div class="rchips">' + chips + '</div></div>'
-    + '<div class="vhint">可多选。选几个就按几个各跑一遍，结果并排列在下面。</div>'
+    + '<div class="vhint">本次运行一套参数，确认后提交计算。</div>'
     + '<div class="btnrow" style="margin-top:7px">'
-    + '<button class="btn btn-sm primary" data-filter-run="1">按这些参数各跑一遍</button>'
+    + '<button class="btn btn-sm primary" data-filter-go="1">按这套参数运行</button>'
     + '<span class="small" id="filterMsg"></span></div>'
     + '</div>';
 
@@ -3294,9 +3795,9 @@ function openFilterParams() {
     + '</div>'
     + '<div class="vhint" style="margin-bottom:8px">取多少维做近邻图。官方脚本给的是 1:20。</div>'
     + '<div class="vrow"><label>resolution</label><div class="rchips">' + chips + '</div></div>'
-    + '<div class="vhint">可多选。选几个就按几个各跑一遍，结果并排列在「任务完成详情」里。</div>'
+    + '<div class="vhint">本次运行一套参数，结果可在「任务完成详情」查看。</div>'
     + '<div class="btnrow" style="margin-top:10px">'
-    + '<button class="btn primary" data-filter-go="1">按这些参数各跑一遍</button>'
+    + '<button class="btn primary" data-filter-go="1">按这套参数运行</button>'
     + '<span class="small" id="filterMsg"></span></div>'
     + '</div>';
   sheet('筛群参数 · 筛群与剔样本后重聚类', h);
@@ -3309,24 +3810,32 @@ function openFilterParams() {
    参数作为"这次的要求"随提交带过去，助手照它跑几组。 */
 async function confirmFilterParams() {
   const __recordScope = recordContext();
+  if (S.filterSubmitting) return;
+  S.filterSubmitting = true;
+  const submitButton = document.querySelector('[data-filter-go]');
+  if (submitButton) submitButton.disabled = true;
   try {
 
   const dimsIn = $('#filterDims');
   if (dimsIn) S.filterDims = dimsIn.value;
   const res = arr(S.filterRes);
   const msg = $('#filterMsg');
-  if (!res.length) { if (msg) msg.textContent = '先选至少一个 resolution。'; return; }
+  if (res.length !== 1) { if (msg) msg.textContent = '请选择一套 resolution。'; return; }
   if (msg) msg.textContent = '正在登记…';
 
   const note = await recordAwait(registerFilterVariants(), __recordScope);
-  const sh = document.getElementById('stSheet');
-  if (sh && sh.parentNode) sh.parentNode.removeChild(sh);
-  toast('已按 ' + res.length + ' 组参数提交。', 'good');
-  runStep('filter', note);
+  if (SHEET_STACK.length) closeSheet();
+  await recordAwait(runStep('filter', note), __recordScope);
 
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
-    throw e;
+    const message = e && e.message ? e.message : '参数保存或提交失败，请查看步骤状态后重试。';
+    const msg = $('#filterMsg');
+    if (msg) msg.textContent = message;
+    toast(message, 'bad');
+  } finally {
+    S.filterSubmitting = false;
+    if (submitButton) submitButton.disabled = false;
   }
 }
 
@@ -3336,60 +3845,45 @@ async function confirmFilterParams() {
    为什么要登记：几组结果要能在「任务完成详情」里并排看到、并挑一套往下用，
    所以每组必须先有自己的身份（id / 参数 / 输出目录）。 */
 async function registerFilterVariants() {
-  const __recordScope = recordContext();
-  try {
-
+  const scope = recordContext();
   const dimsIn = $('#filterDims');
-  const dims = (dimsIn ? dimsIn.value : (S.filterDims || '')).trim() || '1:20';
+  const dims = String(dimsIn ? dimsIn.value : S.filterDims || '').trim();
   const res = arr(S.filterRes);
-  const slug = dims.replace(/[^0-9]/g, '-');
-  const lines = [];
-
-  // 同一组参数只留一条记录。
-  //   为什么：dims 与 resolution 相同就是同一套跑法，再跑一次是"重跑这套"，
-  //   不是"又一套新结果"。不去重的话，详情里会出现两行一模一样的参数，
-  //   人反而分不清哪行是当前的。
+  if (!dims || res.length !== 1) throw new Error('请填写 dims，并选择一套 resolution。');
+  const r = String(res[0]);
   const had = arr((S.variants && S.variants.filter || {}).items);
-  for (const r of res) {
-    const label = 'dims ' + dims + ' · resolution ' + r;
-    const outdir = '7.after_drop/_dims' + slug + '_res' + r;
-    const same = had.find(x => x && x.params
-      && String(x.params.dims) === String(dims)
-      && String(x.params.resolution) === String(r));
-    try {
-      await recordAwait(postJSON('/api/variants', {
-        action: 'save', stage: 'filter',
-        item: { id: same ? same.id : '', params: { dims: dims, resolution: r },
-                label: label, status: 'pending', outdir: outdir }
-      }), __recordScope);
-    } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
- /* 单条失败不挡住其余 */ }
-    lines.push('   · ' + label + ' → 输出放 ' + outdir);
-  }
-
-  await recordAwait(loadVariants(true), __recordScope);
-  renderVarPanels();
-
-  return ['按 ' + res.length + ' 组参数各跑一遍，产出并排对比，之后再人工选一套往下用：',
-    lines.join('\n'),
-    '',
-    '要求：',
-    '1. 每组只用 dims 与 resolution 区分，其余设置完全相同；上游对象取同一次聚类的产物，不要各取一份。',
-    '2. 每组产物写进各自目录（见上），不要互相覆盖；已有的别的组的结果不要删。',
-    '3. 每组跑完把 status 写回：done 表示这一组已有结果，failed 表示没跑通并附原因。',
-    '4. 全部跑完后说一句：各组簇数分别是多少、哪一组更接近预期。'].join('\n');
-
-  } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
-    throw e;
-  }
+  const same = had.find(x => x && x.params && String(x.params.dims) === dims
+    && String(x.params.resolution) === r);
+  const saved = await recordAwait(postJSON('/api/variants', {
+    action: 'save', stage: 'filter',
+    item: { id: same ? same.id : '', params: {dims: dims, resolution: r},
+      label: 'dims ' + dims + ' · resolution ' + r, status: 'pending', outdir: '7.after_drop' }
+  }), scope);
+  if (!saved || !saved.ok) throw new Error('参数未保存，尚未提交计算。');
+  const choices = arr(saved.items).filter(x => x && x.params
+    && String(x.params.dims) === dims && String(x.params.resolution) === r);
+  if (choices.length !== 1 || !choices[0].id) throw new Error('参数记录不唯一，尚未提交计算。');
+  const selected = await recordAwait(postJSON('/api/variants', {
+    action: 'choose', stage: 'filter', id: choices[0].id
+  }), scope);
+  if (!selected || !selected.ok || selected.chosen !== choices[0].id)
+    throw new Error('参数未选用，尚未提交计算。');
+  await recordAwait(loadVariants(true), scope);
+  return '本次使用一套重聚类参数：dims=' + dims + '，resolution=' + r
+    + '；剔除范围按本次已保存的筛群决定，输出目录为7.after_drop。';
 }
 
 function renderDelegated() {
   const host = $('#delegatedHost'); if (!host) return;
   const dl = currentDelegated();
   if (!dl) { host.innerHTML = ''; return; }
+  if (dl.mode === 'observe' && dl.execId) {
+    const notice = dl.ok === true ? '观察通知已送达 Rachel。'
+      : dl.ok === false ? '观察通知未送达 Rachel；任务执行结果请看上方步骤状态，无需重复提交。'
+      : '正在通知 Rachel 查看任务；执行状态请看上方步骤。';
+    host.innerHTML = '<div class="rz warn"><span class="mk">i</span><span>' + esc(notice) + '</span></div>';
+    return;
+  }
   // relayed 是"会话通道没连上，但指令已经进了本机队列"，我取走执行就等于交出去了。
   //   以前把它和真失败画成同一个红色，人看到"没送进"只能以为坏了、反复重点。
   const relayed = !!(dl && dl.relayed);
@@ -3475,12 +3969,13 @@ function updateRunSelBtn() {
   if (btn) btn.style.display = on ? '' : 'none';
   if (pa) pa.style.display = on ? '' : 'none';
   if (!btn) return;
-  const picked = Array.isArray(S.picked) ? S.picked : [];
+  S.picked = arr(S.picked).filter(selectableStep);
+  const picked = S.picked;
   const n = picked.length;
   btn.disabled = n === 0 || S.running || !S.runDir;
   btn.textContent = n ? ('按顺序跑勾选的 ' + n + ' 环') : '按顺序跑勾选的';
   if (pa) {
-    const runnable = (S.steps || []).filter(s => ['env', 'decide', 'precheck'].indexOf(s.id) < 0);
+    const runnable = (S.steps || []).filter(s => ['env', 'decide', 'precheck'].indexOf(s.id) < 0 && selectableStep(s.id));
     const allOn = runnable.length > 0 && runnable.every(s => picked.indexOf(s.id) >= 0);
     pa.textContent = allOn ? '取消全选' : ('全选 ' + runnable.length + ' 环');
   }
@@ -3505,7 +4000,7 @@ function togglePickMode() {
    环境体检与预检不算 —— 它们属于「保存并识别」那一趟。 */
 function togglePickAll() {
   const PRE = ['env', 'decide', 'precheck'];
-  const runnable = (S.steps || []).filter(s => PRE.indexOf(s.id) < 0).map(s => s.id);
+  const runnable = (S.steps || []).filter(s => PRE.indexOf(s.id) < 0 && selectableStep(s.id)).map(s => s.id);
   const cur = Array.isArray(S.picked) ? S.picked : [];
   const allOn = runnable.length > 0 && runnable.every(id => cur.indexOf(id) >= 0);
   S.picked = allOn ? [] : runnable.slice();
@@ -3522,7 +4017,8 @@ async function runPickedSteps() {
   const __recordScope = recordContext();
   try {
 
-  const picked = (Array.isArray(S.picked) ? S.picked : []).slice();
+  const picked = arr(S.picked).filter(selectableStep);
+  S.picked = picked.slice();
   if (!picked.length) return;
   // 按应用给的流程顺序排，不按勾选先后 —— 勾的先后不代表该跑的先后。
   const order = (S.flow && Array.isArray(S.flow.order)) ? S.flow.order : [];
@@ -3534,6 +4030,7 @@ async function runPickedSteps() {
   updateRunSelBtn();
   for (let k = 0; k < seq.length; k++) {
     const id = seq[k];
+    if (!selectableStep(id)) continue;
     S.batch = { seq: seq, i: k, note: '正在发第 ' + (k + 1) + ' / ' + seq.length + ' 环：' + stepCN(id) };
     updateRunSelBtn();
     try {
@@ -3552,7 +4049,10 @@ async function runPickedSteps() {
       }
       if (r.delegated) {
         const sendTxt = r.session_text || r.instruction || '';
-        await recordAwait(injectToSession(sendTxt, function () {}), __recordScope);
+        // 已入队时服务端回 mode=observe，进会话的那条只是"看着"。
+        //   把 purpose 一起带过去，队列与回执里都留得下这个标记。
+        await recordAwait(injectToSession(sendTxt, function () {},
+          r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''}), __recordScope);
       }
     } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -3619,12 +4119,15 @@ async function runStep(id, reqNote, force, extra = {}) {
     //   用户点了只会看到一条报错。发出去之后状态才从"空闲"变成"已交给助手"。
     if (r && r.delegated) {
       S.delegated = { sessionId: S.sessionId, step: id, title: r.title || id, at: Date.now(), ok: null, why: '',
-                      text: r.instruction || '' };
+                      text: r.instruction || '', mode: r.mode || 'execute',
+                      execId: r.exec_id || '', execJob: r.exec_job || '' };
       renderRun();
       // 进会话的只用短的那一段：长指令会超过通道载荷上限，被平台判无效。
       //   短的那段带着 /api/brief 的地址，助手按地址取全文，一条不落地照做。
+      //   已入队时那段是"只观察"的，purpose 一起带过去，队列里也留得下标记。
       const sendTxt = r.session_text || r.instruction || '';
-      const res = await recordAwait(injectToSession(sendTxt, function () {}), __recordScope);
+      const purpose = r.mode === 'observe' ? 'observe' : 'execute';
+      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}), __recordScope);
       // 这一步的作业在服务端就已经排进执行队列了（r.delegated 本身就是"已入队"）。
       //   注入会话只是顺带通知助手，不是被执行的前提。
       //   以前把注入结果当成败判据：会话通道一断，页面就报"没送进"，人以为活没派出去，
@@ -3632,7 +4135,13 @@ async function runStep(id, reqNote, force, extra = {}) {
       S.delegated.ok = !!res.ok;
       S.delegated.execQueued = !!r.exec_queued;
       S.delegated.why = res.ok ? '' : (res.why || res.code || '');
-      if (res.ok) {
+      // 文案必须说清"谁在跑"：作业已入队时，跑的是执行端，不是助手。
+      //   以前无论哪种情况都说"已交给助手"，于是人在会话里看到助手又要跑一遍，
+      //   以为这是正常的第二步 —— 实际那是重复提交。
+      if (S.delegated.execQueued && r.mode === 'observe') {
+        toast('作业已排进执行队列（' + (r.exec_id || '已登记') + '），执行端会提交跑；'
+          + '会话那边只让它观察进度。' + (res.ok ? '' : '会话通知没发出去，不影响这条作业。'), 'good');
+      } else if (res.ok) {
         toast('已交给助手：' + S.delegated.title + '。跑完会写回。', 'good');
       } else if (S.delegated.execQueued) {
         toast('已排进执行队列，执行端会自动取走跑。会话通知没发出去，不影响这条作业。', 'good');
@@ -4006,10 +4515,16 @@ async function requestArtifact(rel, btn) {
   try {
 
   const old = btn ? btn.textContent : '';
+  const item = arr(S.artifacts).find(a => String(a.rel || '') === String(rel));
+  if (item && ['pending', 'running'].includes(item.fetch_state)) {
+    toast('已在取回队列中，可点击刷新查看进度。', 'good'); return;
+  }
   if (btn) { btn.disabled = true; btn.textContent = '登记中…'; }
   try {
     const r = await recordAwait(postJSON('/api/artifact/request', {
-      rel: rel, session_id: S.sessionId || '', bytes: null,
+      rel: rel, session_id: S.sessionId || '',
+      bytes: item && Number.isFinite(Number(item.size)) ? Number(item.size) : null,
+      confirm: true,
     }), __recordScope);
     if (!r || !r.ok) {
       toast('登记失败：' + ((r && r.error) || ''), 'bad');
@@ -4018,7 +4533,8 @@ async function requestArtifact(rel, btn) {
     }
     if (r.ready) { toast('已经取回了。', 'good'); await recordAwait(refreshArtifacts(), __recordScope); return; }
     toast('已登记，等执行端取回（一般一两分钟内）。', 'good');
-    if (btn) btn.textContent = '等取回…';
+    if (item) { item.fetch_state = 'pending'; item.fetch_error = ''; }
+    if (btn) btn.textContent = '正在取回…';
     // 轮询一次：取回后这行会自己变成「打开 / 查看」。
     let n = 0;
     const timer = recordInterval(async () => {
@@ -4027,8 +4543,15 @@ async function requestArtifact(rel, btn) {
 
       n += 1;
       await recordAwait(refreshArtifacts(), __recordScope);
+      // 取回完成后就地重画详情：否则详情里的格子会一直停在“正在取回…”。
+      const cur0 = arr(S.artifacts).find(a => String(a.rel || '') === String(rel));
+      if (cur0 && cur0.mirrored) refreshOpenStepDetail();
       const still = document.querySelector('[data-artget="' + rel.replace(/"/g, '\\"') + '"]');
-      if (!still || n >= 20) { clearInterval(timer); if (still && btn) { btn.disabled = false; btn.textContent = old; } }
+      const current = arr(S.artifacts).find(a => String(a.rel || '') === String(rel));
+      if (!still || (current && current.mirrored) ||
+          (current && current.fetch_state === 'error') || n >= 40) {
+        clearInterval(timer);
+      }
     
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -4135,9 +4658,11 @@ async function fetchAllArtifacts() {
   const note = $('#artActionNote');
   const btn = $('#btnFetchAllArt');
   if (!S.artifacts || !S.artifacts.length) { toast('还没有产物清单，先刷新。', 'bad'); return; }
-  const todo = S.artifacts.filter(a => a.viewable && !a.mirrored);
+  const todo = S.artifacts.filter(a => a.viewable && !a.mirrored
+    && !['pending', 'running'].includes(a.fetch_state)
+    && !/\.(?:pptx|zip|rds|tar|gz|xz)$/i.test(a.rel || ''));
   if (!todo.length) {
-    toast('能看的都已经取回了。', 'good');
+    toast('没有待取回的小图表；PPT 和结果包请单独点击取回。', 'good');
     if (note) note.textContent = '没有待取回的项。';
     return;
   }
@@ -4175,6 +4700,7 @@ async function fetchAllArtifacts() {
    缺什么不硬失败，但必须把「带了什么、没带什么」如实写在结果里：
    静默打一个只有图的包，人会以为交付物齐了。 */
 async function buildPack() {
+  if (S.runDirRemote) { closeDlg('dlgArtifacts'); openStepDetail('pack'); return; }
   const __recordScope = recordContext();
   try {
 
@@ -4219,6 +4745,9 @@ async function buildPack() {
 }
 
 async function buildPpt() {
+  // 服务器模式下这个按钮叫「查看各环节产物」：它要办的事是把清单摊开，
+  //   而不是跳到 PPT 单步的详情里 —— 后者只回答一步，问的是"各环节"。
+  if (S.runDirRemote) { revealStageList(); return; }
   const __recordScope = recordContext();
   try {
 
@@ -4263,6 +4792,52 @@ async function buildPpt() {
   }
 }
 
+
+/* 等待中的文案：把“排第几位”写出来。
+   为什么不再只写“正在取回…”：队列里可能积压几十项，只写这三个字，
+   人看不出是在第 1 位还是第 59 位，只能反复点、反复切页面。 */
+function fetchWaitLabel(a) {
+  const rank = Number(a && a.fetch_rank) || 0;
+  return rank > 0 ? ('正在取回 · 第 ' + rank + ' 位') : '正在取回…';
+}
+
+function artifactActions(a) {
+  const rel = String(a.rel || '');
+  const query = '?session=' + encodeURIComponent(S.sessionId || '') + '&rel=' + encodeURIComponent(rel);
+  const download = '<a class="btn btn-sm" href="' + apiUrl('api/artifact/download')
+    + query + '">下载</a>';
+  if (a.mirrored) {
+    if (a.view_kind === '表格') return '<button class="btn btn-sm" data-artprev="'
+      + esc(rel) + '">查看</button>' + download;
+    if (/\.(?:png|jpe?g|svg|pdf|html|txt|md)$/i.test(rel))
+      return '<a class="btn btn-sm" target="_blank" rel="noopener" href="'
+        + apiUrl('api/artifact/file') + query + '">打开</a>' + download;
+    return download;
+  }
+  if (['pending', 'running'].includes(a.fetch_state))
+    return '<button class="btn btn-sm" disabled data-artget="' + esc(rel) + '">' + fetchWaitLabel(a) + '</button>';
+  const canFetch = a.fetchable === true || a.viewable === true;
+  if (canFetch) {
+    const delivery = /\.(?:pptx|zip|rds|tar|gz|xz)$/i.test(rel) || a.too_big;
+    const label = a.fetch_state === 'error' ? '重试取回' : (delivery ? '取回供下载' : '取回并查看');
+    return '<button class="btn btn-sm" data-artget="' + esc(rel) + '">' + label + '</button>'
+      + (a.fetch_state === 'error' ? '<span class="artsize" title="' + esc(a.fetch_error || '')
+        + '">取回失败：' + esc(a.fetch_error || '请重试或查看运行日志') + '</span>' : '');
+  }
+  return '<span class="artsize">' + (a.too_big ? '超过取回上限，需从服务器取' : '需从服务器取') + '</span>';
+}
+
+/* 把产物面板里的环节清单摊开并滚到可见处。
+   为什么单独一个函数：清单按环节折叠着，168 个图的目录收起来时
+   点「查看各环节产物」看不到任何东西，等于按钮没反应。 */
+function revealStageList() {
+  const host = $('#artHost');
+  if (!host) return;
+  host.querySelectorAll('details.artdir').forEach(el => { el.open = true; });
+  const first = host.querySelector('.artsum') || host;
+  if (first && first.scrollIntoView) first.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
 async function refreshArtifacts() {
   const __recordScope = recordContext();
   try {
@@ -4277,6 +4852,14 @@ async function refreshArtifacts() {
     //   所以"空"有两种完全不同的意思，必须分开说 ——
     //   混成一句「还没有产物」，人就会以为真的白跑了。
     const remote = !!r.remote;
+    // 页签「查看各环节产物」的文案是固定的，这里不再按模式改写它 ——
+    //   以前服务器模式下它写的是「查看 PPT 步骤」，改名后又被这里覆盖回去，
+    //   于是页签上永远是旧文案。
+    const pptGen = $('#btnBuildPptGen');
+    const packButton = $('#btnBuildPack');
+    // 生成 PPT / 打包这两件事只有本机素材才做得了；服务器模式隐藏，不摆死按钮。
+    if (pptGen) pptGen.style.display = remote ? 'none' : '';
+    if (packButton) packButton.style.display = remote ? 'none' : '';
     const listed = r.listed !== false;
 
     if (note) {
@@ -4296,20 +4879,43 @@ async function refreshArtifacts() {
       return;
     }
 
-    // 按目录分组：几十个文件平铺成一列，找一张图要滚很久。
+    // 按环节分组，不再按目录名字母序。
+    //   以前 keys.sort() 得到的是 1.doublet、10.figs、11.report、3.merge…
+    //   既有排序错觉，标题又只有文件夹名，认不出这是流程的第几步。
+    //   现在按流程 1..12 排，标题写环节中文名，序号与卡片上的编号一致。
+    const stageOfArt = a => {
+      const rel = String(a.rel || '');
+      // 出图与富集共用 10.figs，只能靠子目录分开，否则第 9、10 环混成一份。
+      if (rel.indexOf('10.figs/4.diff_enrich/') === 0) return 'enrich';
+      if (rel.indexOf('10.figs/') === 0) return 'figs';
+      // 同一份 11.report 里 zip 是打包产物，pptx 与 manifest 属于 PPT 那一步。
+      if (/\.zip$/i.test(rel)) return 'pack';
+      if (rel.indexOf('11.report/') === 0) return 'ppt';
+      return String(a.step || '');
+    };
     const groups = {};
     S.artifacts.forEach(a => {
-      const dir = String(a.rel || '').indexOf('/') >= 0 ? String(a.rel).split('/')[0] : '（根目录）';
-      (groups[dir] = groups[dir] || []).push(a);
+      const k = stageOfArt(a);
+      (groups[k] = groups[k] || []).push(a);
     });
-    const keys = Object.keys(groups).sort();
-    let h = '<div class="artsum">' + S.artifacts.length + ' 个产物，' + keys.length + ' 个目录'
+    const keys = ART_STAGES.map(x => x[0]).filter(k => (groups[k] || []).length);
+    // 认不出属于哪一环的不硬塞，单独列在最后并写明没归上。
+    const unknown = Object.keys(groups).filter(k => keys.indexOf(k) < 0 && groups[k].length);
+    let h = '<div class="artsum">' + S.artifacts.length + ' 个产物，' + keys.length + ' 个环节'
       + (remote ? '　<b>在服务器上，不在本机</b>' : '') + '</div>';
     h += '<div class="artlist">';
-    keys.forEach(dir => {
-      const list = groups[dir];
+    const drawArtGroup = (key, title) => {
+      const list = groups[key] || [];
+      // 文件夹名仍然留着：取回、排错时对路径比对人话有用。
+      const dirs = Array.from(new Set(list.map(a => {
+        const rel = String(a.rel || '');
+        return rel.indexOf('/') >= 0 ? rel.split('/')[0] : '（根目录）';
+      })));
+      const idx = ART_STAGES.findIndex(x => x[0] === key);
       h += '<details class="artdir"><summary>'
-        + '<span class="artdirn">' + esc(dir) + '</span>'
+        + '<span class="artno">' + (idx >= 0 ? (idx + 1) : '·') + '</span>'
+        + '<span class="artdirn">' + esc(title) + '</span>'
+        + '<span class="artdirf">' + esc(dirs.join('、')) + '</span>'
         + '<span class="cnt">' + list.length + ' 个</span></summary>';
       h += list.map(a => {
         const rel = String(a.rel || '');
@@ -4317,22 +4923,7 @@ async function refreshArtifacts() {
         // 能看的就直接点开：图与 PDF 浏览器内联打开，表格开预览层。
         //   还没取回的，点一下登记「我要看这个」，执行端下一轮取回来。
         //   太大或类型不支持（rds 之类）就明说，不摆点了没反应的按钮。
-        let act = '';
-        if (a.mirrored) {
-          if (a.view_kind === '表格') {
-            act = '<button class="btn btn-sm" data-artprev="' + esc(rel) + '">查看</button>';
-          } else {
-            act = '<a class="btn btn-sm" target="_blank" rel="noopener" href="'
-              + apiUrl('api/artifact/file') + '?session=' + encodeURIComponent(S.sessionId || '')
-              + '&rel=' + encodeURIComponent(rel) + '">打开</a>';
-          }
-        } else if (a.viewable) {
-          act = '<button class="btn btn-sm" data-artget="' + esc(rel) + '">取回并查看</button>';
-        } else if (a.too_big) {
-          act = '<span class="artsize">太大，需从服务器取</span>';
-        } else {
-          act = '<span class="artsize">需从服务器取</span>';
-        }
+        const act = artifactActions(a);
         return '<div class="artrow"><span class="artkind ' + esc(a.kind) + '">' + esc(a.kind) + '</span>'
           + '<span class="artname" title="' + esc(rel) + '">' + esc(nm) + '</span>'
           + '<span class="artsize">' + fmtSize(a.size) + '</span>'
@@ -4340,9 +4931,25 @@ async function refreshArtifacts() {
           + '</div>';
       }).join('');
       h += '</details>';
+    };
+    keys.forEach(k => drawArtGroup(k, (ART_STAGES.find(x => x[0] === k) || [])[1] || k));
+    unknown.forEach(k => {
+      const first = String(((groups[k] || [])[0] || {}).rel || '');
+      drawArtGroup(k, '未归到环节（' + (first.indexOf('/') >= 0 ? first.split('/')[0] : '根目录') + '）');
     });
     h += '</div>';
+    // Refresh must not collapse the folder the user is browsing.
+    const openDirs = new Set(Array.from(host.querySelectorAll('details.artdir[open]'))
+      .map(el => el.querySelector('.artdirn')?.textContent));
+    const scrollPositions = [];
+    for (let el = host; el; el = el.parentElement) {
+      if (el.scrollHeight > el.clientHeight) scrollPositions.push([el, el.scrollTop]);
+    }
     host.innerHTML = h;
+    host.querySelectorAll('details.artdir').forEach(el => {
+      el.open = openDirs.has(el.querySelector('.artdirn')?.textContent);
+    });
+    scrollPositions.forEach(([el, top]) => { el.scrollTop = top; });
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
 
@@ -4444,6 +5051,10 @@ document.addEventListener('click', e => {
     } else { toast('跑过一次聚类才出现。', 'bad'); }
     return;
   }
+  // 被待答问题挡住的那一步：按钮打开决策对话框。
+  //   这是 pending 唯一的人手入口，不能省。
+  const dco = t.closest('[data-decopen]');
+  if (dco) { openDecisionDlg(dco.getAttribute('data-decopen')); return; }
   const rn = t.closest('[data-run]');
   if (rn) {
     const rid = rn.getAttribute('data-run');
@@ -4513,15 +5124,14 @@ document.addEventListener('click', e => {
   if (resBtn) {
     const v = resBtn.getAttribute('data-res');
     S.filterRes = arr(S.filterRes);
-    const i = S.filterRes.indexOf(v);
-    if (i >= 0) S.filterRes.splice(i, 1); else S.filterRes.push(v);
-    S.filterRes.sort();
+    S.filterRes = [v];
     const dimsIn = $('#filterDims');
     if (dimsIn) S.filterDims = dimsIn.value;
     // 直接改被点那个钮的选中态。
     //   为什么不重绘整块面板：参数卡是弹层，不是卡片里那块区域；
     //   重绘卡片里的空占位不会让弹层里的按钮变样，点了就像没反应。
-    resBtn.classList.toggle('on', S.filterRes.indexOf(v) >= 0);
+    document.querySelectorAll('[data-res]').forEach(x =>
+      x.classList.toggle('on', x.getAttribute('data-res') === v));
     const msg = $('#filterMsg');
     if (msg) msg.textContent = '';
     return;
@@ -4572,8 +5182,8 @@ async function chooseVariant(stage, id) {
         '环节 ' + stage + ' 已经定了一套：' + label,
         it && it.outdir ? ('产物目录：' + it.outdir) : '',
         '',
-        '请以这一套为准继续往下做；其它几套保留不删，只作对比。'].filter(Boolean).join('\n');
-      try { await recordAwait(injectToSession(txt, function () {}), __recordScope); } catch (e) {
+        '这里只同步已选参数，请只读确认；不要因此提交或重跑任何作业。其它候选保留不删。'].filter(Boolean).join('\n');
+      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}), __recordScope); } catch (e) {
     if (!recordCurrent(__recordScope)) return;
  /* 通道不通不影响选定本身 */ }
       toast('已选定：' + label, 'good');
@@ -4622,7 +5232,7 @@ document.addEventListener('change', e => {
   if (t.matches('[data-mpick]')) {
     const id = t.getAttribute('data-mpick');
     if (!Array.isArray(S.picked)) S.picked = [];
-    if (t.checked) { if (S.picked.indexOf(id) < 0) S.picked.push(id); }
+    if (t.checked && selectableStep(id)) { if (S.picked.indexOf(id) < 0) S.picked.push(id); }
     else { S.picked = S.picked.filter(x => x !== id); }
     updateRunSelBtn();
     return;
@@ -5925,6 +6535,34 @@ function identifyWaitingHTML() {
     + '<b>' + esc(tx) + '</b>'
     + (lv === 'ok' ? ' <span class="dt">在执行机上跑。</span>' : '')
     + '</span></div>';
+
+  // 通道到底通不通，直接说出来，不让人对着"正在交…"干等。
+  //   为什么要这一段：从左侧全局「应用」列表打开时，页面确实在 iframe 里，
+  //   SDK 脚本也在，但平台没有建 instance —— 于是握手永远不会来，
+  //   "正在把这次识别交给助手…"会一直挂着，看起来像卡死，其实是入口不对。
+  //   实测两种入口表现完全不同：
+  //     聊天右侧面板打开 -> has_instance=true，父页发 connect 事件，通道可用
+  //     全局应用列表打开 -> has_instance=false，父页一条消息都没有
+  //   这属于平台侧行为，本机不放宽 origin、不伪造握手。
+  //   能做的只有一件：把"你应该从哪儿打开"直接写在脸上。
+  let ch = null;
+  try { ch = window.AppShell && window.AppShell.channels ? window.AppShell.channels() : null; } catch (e) { ch = null; }
+  const noChannel = ch && !ch.compose;
+  const stuckBusy = S.autoInjectBusy && (Date.now() - (S.autoInjectAt || 0)) > 45000;
+  if (noChannel && !(ai && ai.ok)) {
+    h += '<div class="rz warn" style="margin-top:8px"><span class="mk">!</span><span>'
+      + '<b>当前页面没有接上会话通道。</b> '
+      + '<span class="dt">平台没有在这个页面里建立会话连接，'
+      + (ch.inFrame ? '页面在框里但宿主没发握手' : '页面是独立打开的')
+      + '。请关掉这一页，到 Rachel 聊天里点右上角「打开产物」→ 应用 → 打开应用，'
+      + '在那个面板里点「保存并识别」。从左侧全局应用列表打开不会连上。</span>'
+      + '</span></div>';
+  } else if (stuckBusy) {
+    h += '<div class="rz warn" style="margin-top:8px"><span class="mk">!</span><span>'
+      + '<b>这次还没交出去。</b> <span class="dt">已等 45 秒未收到宿主回执。'
+      + '可点下面「再交给助手一次」，或先确认是不是从聊天右侧面板打开的。</span>'
+      + '</span></div>';
+  }
 
   if (ai && !ai.ok && !ai.relayed) {
     // 通道不通不是"识别失败"，设置已经存下了。把原文摆出来让人自己发。
@@ -7302,19 +7940,34 @@ function composeSend(inst, text, finish) {
    判据和外壳不一致（任务通道 isConnected() 恒为真那次，就把本来能用的
    注入通道整个绕过去了）；而且送失败之后只剩"请自己复制"。
    调用点不用改：签名与返回结构保持原样。 */
-async function injectToSession(text, onState, purpose) {
+function stepNotificationBinding(step) {
+  const sg = arr(S.flow && S.flow.stages).find(x => x.id === step);
+  const ex = sg && sg.exec_id ? arr(S.execTasks).find(x => x.id === sg.exec_id && x.step === step && x.session_id === S.sessionId) : null;
+  if (sg && sg.exec_id) return {step: step, reqId: ex && ex.req_id || ''};
+  const rs = (S.remoteSteps || {})[step];
+  return {step: step, reqId: rs && rs.req_id || ''};
+}
+
+async function injectToSession(text, onState, purpose, binding) {
   const record = recordContext();
   if (sessionChanging) return Promise.resolve({ok:false,code:"record_changing"});
   text = String(text || '');
-  // AppShell owns the single prepare/validate gate for initial sends and retries.
+  // A step notification carries its own request; environment recognition is separate.
+  const explicit = binding !== undefined;
+  const reqId = explicit ? String(binding && binding.reqId || '') : (S.commitReq || '');
+  if (explicit && purpose !== 'query' && !reqId) {
+    return {ok:false, code:'notification_request_missing', stage:'prepare', queued:false,
+      why:'尚未取得这一步的任务编号，未发送观察通知；计算状态请看步骤卡片。'};
+  }
   const meta = {
     analysisId: S.sessionId || '', purpose: purpose || 'execute',
-    session: S.topicId || '', reqId: S.commitReq || '',
-    step: (S.delegated && S.delegated.step) || '',
+    session: S.topicId || '', reqId: reqId,
+    step: explicit ? String(binding && binding.step || '') : ((S.delegated && S.delegated.step) || ''),
     mode: (S.placeDraft && S.placeDraft.mode) || 'server',
     intent: 'assistant.connect.v1',
     isCurrent: () => !sessionChanging && recordCurrent(record) &&
-      meta.analysisId === (S.sessionId || '') && meta.reqId === (S.commitReq || '')
+      meta.analysisId === (S.sessionId || '') && meta.session === (S.topicId || '') &&
+      (explicit || meta.reqId === (S.commitReq || ''))
   };
   const shell = window.AppShell;
   if (!shell || typeof shell.inject !== 'function') {
@@ -7644,6 +8297,9 @@ document.addEventListener('click', async function (ev) {
   if (t.closest('[data-sess-list]')) { switchTab('hist'); return; }
   const ssw = t.closest('[data-sess-switch]');
   if (ssw) { const sid = ssw.getAttribute('data-sess-switch'); switchSession(sid).then(() => { if (String(S.sessionId) === String(sid)) switchTab('cur'); }); return; }
+  const svw = t.closest('[data-sess-view]');
+  if (svw) { openReadOnlySession(svw.getAttribute('data-sess-view')); return; }
+  if (t.closest('[data-sess-current]')) { returnToCurrentRecord(); return; }
   /* ---- 存档 / 退回 ---- */
   if (t.closest('[data-arc-snap]')) { archiveNow(); return; }
   const ars = t.closest('[data-arc-restore]');

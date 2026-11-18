@@ -44,7 +44,12 @@ instruction_source <- function(app_dir,b,items,owner,authorized) {
     purpose <- it$purpose %||% 'execute'
   }
   if (instruction_truncated(text)) return(incomplete('原完整正文（无可信精确源）'))
-  if (!identical(purpose,'query') && !nzchar(rq)) return(incomplete('请求绑定'))
+  # 只读语义只有一种：query 与 observe 同待遇（2026-11-13）。
+  #   observe 是"作业已入队，这条只是通知"，不是新任务。
+  #   它不需要请求绑定来证明"这是新的一次执行"，因为没有执行发生。
+  #   仍要保留 session 归属校验：读进度必须是对这份分析有权限的人。
+  read_only <- isTRUE(purpose %in% c('query','observe'))
+  if (!read_only && !nzchar(rq)) return(incomplete('请求绑定'))
   b$session_id <- sid; b$req_id <- rq; b$text <- text; b$purpose <- purpose
   b$instruction_id <- if(nzchar(id)) id else NULL
   list(ok=TRUE,body=b)

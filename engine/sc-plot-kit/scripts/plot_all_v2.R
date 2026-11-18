@@ -53,6 +53,12 @@ if (length(.lib_candidates) > 0) .libPaths(c(.lib_candidates, .libPaths()))
   hit[1]
 })
 source(.guard_load, local = FALSE)
+# 跳过记录的小库：必须在生产入口里真 source，不能靠测试预先加载。
+.diff_skip_lib <- file.path(.self_dir, "lib", "diff_skip.R")
+if (!file.exists(.diff_skip_lib))
+  stop("\n  拒绝运行：找不到 lib/diff_skip.R（差异跳过记账依赖它）。\n",
+       "  期望位置：", .diff_skip_lib, "\n", call. = FALSE)
+source(.diff_skip_lib, local = FALSE)
 sc_guard_banner("plots", .self_dir)
 
 suppressMessages({
@@ -412,7 +418,12 @@ if ("ratio" %in% stages) {
   d <- file.path(outdir, "3.cell_ratio"); dir.create(d, showWarnings = FALSE)
   md <- obj@meta.data
   ct <- if (ccol %in% colnames(md)) ccol else "seurat_clusters"
-  md$.ct <- md[[ct]]
+  # 未定型细胞必须留在分母里。
+  #   table() 默认丢 NA，注释后没判出类型的细胞会被静默排除，
+  #   于是每个类型的比例都被抬高，而总数看起来还是"干净"的 ——
+  #   这是最容易被当成正常结果的一类错。
+  md$.ct <- as.character(md[[ct]])
+  md$.ct[is.na(md$.ct) | !nzchar(md$.ct)] <- "unassigned"
 
   # 表：按组、按样本
   tbl <- function(gv) {
@@ -422,6 +433,8 @@ if ("ratio" %in% stages) {
     t$rate <- round(100 * t$cell_number / tot$cell_number[match(t$lvl, tot$lvl)], 2)
     t
   }
+  # 比例表落盘时把未定型一并写出，便于核对分母。
+  cat("   比例分母含 unassigned:", sum(md$.ct == "unassigned"), " 个细胞\n")
   tg <- tbl(gcol); write.table(tg, file.path(d, "cell_number_group.xls"),
                                quote = FALSE, sep = "\t", row.names = FALSE)
   ts <- tbl(scol); write.table(ts, file.path(d, "cell_number_sample.xls"),
@@ -482,17 +495,37 @@ if ("diff" %in% stages && !is.null(compare) && ccol %in% colnames(obj@meta.data)
   md <- obj@meta.data
   cnt <- table(md[[ccol]], md[[gcol]])
   ok <- rownames(cnt)[cnt[, a] >= 3 & cnt[, b] >= 3]
+  # 跳过的类型要留记录，不能只在日志里一句"跳过"。
+  #   否则事后无法区分「本来就没有差异」与「跑了但失败被跳过」。
+  skipped <- diff_skip_init()
+  for (t0 in setdiff(rownames(cnt), ok)) {
+    skipped <- diff_skip_add(skipped, t0, "skipped_lt3",
+                             "某一组细胞数 < 3", cnt[t0, a], cnt[t0, b])
+  }
   cat("   纳入细胞类型:", length(ok), "\n")
   Idents(obj) <- ccol
+  # 先落一份（此时可能只有 skipped_lt3），循环里遇错会再写一次并停。
+  diff_skip_write(skipped, file.path(d, "diff_skipped.xls"))
   for (t in ok) {
     r <- try(FindMarkers(obj, ident.1 = a, ident.2 = b, group.by = gcol,
                          subset.ident = t, logfc.threshold = 0, verbose = FALSE), silent = TRUE)
     if (inherits(r, "try-error")) {
       cat("   !! 差异分析失败，跳过该细胞类型:", t, "|", as.character(r), "\n")
-      next
+      # 取真实原因，不要把整段堆栈写进表：as.character(try-error) 带堆栈与换行。
+      err_msg <- tryCatch(conditionMessage(attr(r, "condition")),
+                          error = function(e) as.character(r))
+      skipped <- diff_skip_add(skipped, t, "error",
+        paste0("FindMarkers 报错：", substr(err_msg, 1, 160)),
+        cnt[t, a], cnt[t, b])
+      diff_skip_write(skipped, file.path(d, "diff_skipped.xls"))
+      # 计算异常不能当整步成功：写清记录后停下来，交给人判断。
+      stop("差异分析异常：", t, " | ", substr(err_msg, 1, 160), call. = FALSE)
     }
     if (nrow(r) == 0) {
       cat("   !! 该细胞类型无差异基因，跳过:", t, "\n")
+      skipped <- diff_skip_add(skipped, t, "no_sig",
+        "该类型没有通过阈值的差异基因（执行成功，不是失败）",
+        cnt[t, a], cnt[t, b])
       next
     }
     r$gene <- rownames(r)
@@ -517,6 +550,10 @@ if ("diff" %in% stages && !is.null(compare) && ccol %in% colnames(obj@meta.data)
       theme_bw(base_size = 10)
     save_plot(p, file.path(rd, paste0(t, "_", compare, "_volcano")), 8, 7)
   }
+  # 循环结束后必须再写一次：no_sig 这类行是在循环里追加的，
+  #   只在循环前写那一份的话，它们永远落不了盘。
+  #   异常路径已在循环内「写表后 stop」，不会走到这里。
+  diff_skip_write(skipped, file.path(d, "diff_skipped.xls"))
 }
 
 # ============================== 6. enrich ==============================
@@ -532,17 +569,18 @@ if ("enrich" %in% stages) {
   d <- file.path(outdir, "4.diff_enrich", "enrich"); dir.create(d, showWarnings = FALSE, recursive = TRUE)
   ddir <- file.path(outdir, "4.diff_enrich", "diff")
   fs <- if (dir.exists(ddir)) list.files(ddir, pattern = "_diffgene\\.xls$", full.names = TRUE) else character(0)
-  if (is.null(ENRICH_DB)) {
-    cat("   没拿到可识别的物种（读到：",
-        if (nzchar(ENRICH_SPECIES)) ENRICH_SPECIES else "空",
-        "）。富集段跳过 —— 不用小鼠库代替未知物种。\n",
-        "   补法：命令里加 --species mouse（或 human / rat），",
-        "或在 --config 的 plots.species 里写。\n", sep = "")
-  } else if (!requireNamespace(ENRICH_DB$db, quietly = TRUE)) {
-    cat("   ", ENRICH_DB$db, " 不可用，跳过富集\n", sep = "")
-  } else if (length(fs) == 0) {
-    cat("   未找到差异基因表（需先跑 diff 段），跳过富集\n")
-  } else {
+  # 这三种情况都算「这一步没做成」，不能 cat 一句就 exit 0：
+  #   退出码为 0 会让下游把"没跑"当成"跑了但没显著"。
+  if (is.null(ENRICH_DB))
+    stop("富集缺物种/注释库：读到物种=",
+         if (nzchar(ENRICH_SPECIES)) ENRICH_SPECIES else "空",
+         "。补法：命令行加 --species mouse（或 human / rat），",
+         "或在 --config 的 plots.species 里写。", call. = FALSE)
+  if (!requireNamespace(ENRICH_DB$db, quietly = TRUE))
+    stop("富集注释库不可用：", ENRICH_DB$db, call. = FALSE)
+  if (length(fs) == 0)
+    stop("富集找不到差异基因表（需先跑 diff 段）：", ddir, call. = FALSE)
+  {
     suppressMessages(library(ENRICH_DB$db, character.only = TRUE))
     db <- get(ENRICH_DB$db)
     BG <- keys(db, keytype = "SYMBOL"); N <- length(BG)
@@ -550,10 +588,15 @@ if ("enrich" %in% stages) {
     # 背景：GO(BP) 每个 term 的基因数
     bgGo <- suppressMessages(select(db, keys = BG, columns = c("GO", "ONTOLOGY"), keytype = "SYMBOL"))
     bgGo <- bgGo[!is.na(bgGo$GO) & bgGo$ONTOLOGY == "BP", ]
+    # 必须按唯一 (SYMBOL, GO) 计：org.Mm.eg.db 里同一基因同一 term 会有多条
+    #   EVIDENCE 记录，直接 table() 会把这些重复算成"更多基因"，
+    #   于是 q 与 ms 都虚高，超几何检验的分母失真。
+    bgGo <- unique(bgGo[, c("SYMBOL", "GO")])
     bgGoN <- table(bgGo$GO)
     # 背景：KEGG 每个通路编号的基因数（物种由配置决定）
     bgKe <- suppressMessages(select(db, keys = BG, columns = "PATH", keytype = "SYMBOL"))
     bgKe <- bgKe[!is.na(bgKe$PATH), ]
+    bgKe <- unique(bgKe[, c("SYMBOL", "PATH")])
     bgKeN <- table(bgKe$PATH)
     # KEGG 通路英文全称（注意 keggList("mmu") 给的是基因/CDS 列表，
     # 取通路名必须用 keggList("pathway", "mmu")，且值尾部带 " - Mus musculus (house mouse)" 需去掉）
@@ -580,10 +623,23 @@ if ("enrich" %in% stages) {
 
     # 出横向柱状图（原报告样式）
     draw_bar <- function(res, fn) {
-      if (is.null(res) || nrow(res) == 0) return(invisible(NULL))
+      fn_xls <- paste0(fn, ".xls")
+      # 0 条也要落一份带表头的表：文件不存在与"确实没有显著条目"是两件事。
+      if (is.null(res) || nrow(res) == 0) {
+        empty <- data.frame(term = character(0), Count = integer(0),
+                            pvalue = numeric(0), p.adjust = numeric(0),
+                            GeneRatio = numeric(0), stringsAsFactors = FALSE)
+        write.table(empty, fn_xls, quote = FALSE, sep = "\t", row.names = FALSE)
+        return(list(rows_written = 0L, sig_total = 0L,
+                    result_md5 = tryCatch(unname(tools::md5sum(fn_xls)),
+                                          error = function(e) "")))
+      }
+      sig_total <- nrow(res)
       res <- res[order(res$p.adjust), , drop = FALSE]
       res <- res[1:min(30, nrow(res)), , drop = FALSE]
-      write.table(res, paste0(fn, ".xls"), quote = FALSE, sep = "\t", row.names = FALSE)
+      write.table(res, fn_xls, quote = FALSE, sep = "\t", row.names = FALSE)
+      # 落盘行数才是 hits；显著总数另记，别让截断影响状态表的自洽。
+      rows_written <- nrow(res)
       res$term <- factor(res$term, levels = rev(res$term))
       p <- ggplot(res, aes(x = Count, y = term, fill = p.adjust)) +
         geom_col() +
@@ -593,22 +649,34 @@ if ("enrich" %in% stages) {
         theme(panel.grid.major.y = element_line(colour = "grey90"),
               panel.grid.minor = element_blank())
       save_plot(p, fn, 10, 7)
-      cat("   ->", basename(fn), ":", nrow(res), "条\n")
+      cat("   ->", basename(fn), ":", rows_written, "条（显著共", sig_total, "条）\n")
+      list(rows_written = rows_written, sig_total = sig_total,
+           result_md5 = tryCatch(unname(tools::md5sum(fn_xls)), error = function(e) ""))
     }
 
     # 超几何富集（col 用 GO 或 PATH）
+    # 返回 list(res, status, reason, n_in, n_map, n_terms)：
+    #   以前无结果就 return(NULL)，下游无法区分"没映射上""阈值不够""算失败"。
     run_hyper <- function(genes, bgN, col, nameMap = NULL) {
       g <- intersect(unique(genes), BG)
-      if (length(g) < 5) return(NULL)
+      n_in <- length(unique(genes)); n_map <- length(g)
+      if (n_map < 5)
+        return(list(res = NULL, status = "lt5_mapped", n_in = n_in, n_map = n_map,
+                    n_terms = 0L, reason = "映射到注释库的基因少于 5 个"))
       m <- suppressMessages(select(db, keys = g, columns = col, keytype = "SYMBOL"))
       m <- m[!is.na(m[[col]]), ]
+      m <- unique(m[, c("SYMBOL", col)])
       m <- m[m[[col]] %in% names(bgN), ]
-      if (nrow(m) == 0) return(NULL)
+      if (nrow(m) == 0)
+        return(list(res = NULL, status = "no_mapping", n_in = n_in, n_map = n_map,
+                    n_terms = 0L, reason = "这些基因在背景里没有对应条目"))
       hit <- table(m[[col]]); terms <- names(hit); q <- as.integer(hit)
       ms <- as.integer(bgN[terms]); ms[is.na(ms)] <- 0
       keep <- ms >= 5 & ms <= 500
       terms <- terms[keep]; q <- q[keep]; ms <- ms[keep]
-      if (length(terms) == 0) return(NULL)
+      if (length(terms) == 0)
+        return(list(res = NULL, status = "no_term_in_range", n_in = n_in, n_map = n_map,
+                    n_terms = 0L, reason = "没有落在背景基因数区间内的条目"))
       pv <- phyper(q - 1, ms, N - ms, length(g), lower.tail = FALSE)
       pa <- p.adjust(pv, "BH")
       res <- data.frame(term = terms, Count = q, pvalue = pv, p.adjust = pa,
@@ -622,18 +690,64 @@ if ("enrich" %in% stages) {
         nm <- goName[terms]
         res$term <- ifelse(is.na(nm), res$term, as.character(nm))
       }
+      res_all <- res
       res <- res[res$p.adjust < 0.05, , drop = FALSE]
-      res
+      list(res = res, status = if (nrow(res)) "ok" else "no_sig",
+           n_in = n_in, n_map = n_map, n_terms = nrow(res_all),
+           reason = if (nrow(res)) "" else "有映射但无条目通过 p.adjust < 0.05")
     }
 
+    # 文本规范化：TSV 里出现换行会把一条记录拆成两行。
+    enr_one <- function(x) trimws(gsub("[\r\n\t]+", " ", as.character(x)))
+    status_rows <- list()
     for (f in fs) {
       ct <- sub("_diffgene\\.xls$", "", basename(f))
+      if (!file.exists(f)) stop("差异基因表不存在：", f, call. = FALSE)
       df <- read.delim(f, stringsAsFactors = FALSE)
+      need <- c("gene", "p_val_adj", "avg_log2FC")
+      miss <- setdiff(need, names(df))
+      if (length(miss))
+        stop("差异基因表缺列：", paste(miss, collapse = ", "),
+             "（", basename(f), "）", call. = FALSE)
+      dm5 <- tryCatch(unname(tools::md5sum(f)), error = function(e) "")
       sig <- df$gene[!is.na(df$p_val_adj) & df$p_val_adj < 0.05 & abs(df$avg_log2FC) > 0.5]
       sig <- sig[!grepl("^mt-|^MT-|^Mt-", sig)]
-      if (length(sig) < 10) { cat("  ", ct, "差异基因不足，跳过\n"); next }
-      draw_bar(run_hyper(sig, bgGoN, "GO"),  file.path(d, paste0(ct, "_GO_BP")))
-      draw_bar(run_hyper(sig, bgKeN, "PATH", keName), file.path(d, paste0(ct, "_KEGG")))
+      for (an in c("GO_BP", "KEGG")) {
+        res_rel <- file.path("4.diff_enrich", "enrich", paste0(ct, "_", an, ".xls"))
+        if (length(sig) < 10) {
+          w0 <- draw_bar(NULL, file.path(d, paste0(ct, "_", an)))
+          status_rows[[length(status_rows) + 1L]] <- data.frame(
+            cell_type = enr_one(ct), analysis = an, input_genes = length(sig),
+            mapped_genes = 0L, terms = 0L, sig_total = 0L,
+            rows_written = w0$rows_written, status = "lt10_sig",
+            diff_rel = enr_one(file.path("4.diff_enrich", "diff", basename(f))),
+            diff_md5 = dm5, result_rel = enr_one(res_rel),
+            result_md5 = w0$result_md5,
+            reason = "显著差异基因少于 10 个", stringsAsFactors = FALSE)
+          next
+        }
+        r <- tryCatch(
+          if (an == "GO_BP") run_hyper(sig, bgGoN, "GO")
+          else run_hyper(sig, bgKeN, "PATH", keName),
+          error = function(e) stop("富集计算异常（", ct, " / ", an, "）：",
+                                   conditionMessage(e), call. = FALSE))
+        w <- draw_bar(r$res, file.path(d, paste0(ct, "_", an)))
+        status_rows[[length(status_rows) + 1L]] <- data.frame(
+          cell_type = enr_one(ct), analysis = an, input_genes = r$n_in,
+          mapped_genes = r$n_map, terms = r$n_terms,
+          sig_total = w$sig_total, rows_written = w$rows_written,
+          status = r$status,
+          diff_rel = enr_one(file.path("4.diff_enrich", "diff", basename(f))),
+          diff_md5 = dm5, result_rel = enr_one(res_rel),
+          result_md5 = w$result_md5, reason = enr_one(r$reason),
+          stringsAsFactors = FALSE)
+      }
+    }
+    if (length(status_rows)) {
+      st <- do.call(rbind, status_rows)
+      write.table(st, file.path(d, "enrich_status.xls"), quote = FALSE, sep = "\t",
+                  row.names = FALSE)
+      cat("   状态表:", nrow(st), "行（", paste(unique(st$status), collapse = "/"), "）\n")
     }
   }
 }

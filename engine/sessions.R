@@ -57,12 +57,42 @@ sess_read_json <- function(path) {
            error = function(e) NULL)
 }
 
+# Serialize before touching disk, write beside the target, verify, then rename.
+# A failed write (including ENOSPC) must never truncate the last valid history.
 sess_write_json <- function(path, obj) {
+  raw <- charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE,
+                                          null = "null", digits = NA)))
   dir.create(dirname(path), showWarnings = FALSE, recursive = TRUE)
-  con <- file(path, open = "wb")
-  writeBin(charToRaw(enc2utf8(jsonlite::toJSON(obj, auto_unbox = TRUE, pretty = TRUE,
-                                              null = "null", digits = NA))), con)
-  close(con)
+  if (!dir.exists(dirname(path))) stop("json_directory_unavailable")
+  tmp <- tempfile(paste0(".", basename(path), ".write-"), tmpdir = dirname(path))
+  backup_tmp <- ""
+  stream <- NULL
+  on.exit({
+    if (!is.null(stream)) try(close(stream), silent = TRUE)
+    if (file.exists(tmp)) unlink(tmp)
+    if (nzchar(backup_tmp) && file.exists(backup_tmp)) unlink(backup_tmp)
+  }, add = TRUE)
+  stream <- file(tmp, open = "wb")
+  writeBin(raw, stream)
+  flush(stream)
+  close(stream); stream <- NULL
+  if (!identical(as.numeric(file.info(tmp)$size), as.numeric(length(raw))) ||
+      !identical(readBin(tmp, "raw", n = length(raw)), raw))
+    stop("json_write_incomplete: original file was preserved")
+  mode <- if (file.exists(path)) as.character(file.info(path)$mode) else "0600"
+  if (!isTRUE(Sys.chmod(tmp, mode))) stop("json_permissions_failed")
+  # Keep a complete prior generation of the two mutable history/view indexes.
+  if (basename(path) %in% c("sessions.json", "state.json") && file.exists(path) &&
+      !is.null(sess_read_json(path))) {
+    backup_tmp <- tempfile(".last-good-", tmpdir = dirname(path))
+    if (!isTRUE(file.copy(path, backup_tmp, overwrite = FALSE, copy.mode = TRUE)) ||
+        !identical(unname(tools::md5sum(path)), unname(tools::md5sum(backup_tmp))))
+      stop("json_backup_failed: original file was preserved")
+    if (!isTRUE(file.rename(backup_tmp, paste0(path, ".last-good"))))
+      stop("json_backup_commit_failed: original file was preserved")
+  }
+  if (!isTRUE(file.rename(tmp, path)))
+    stop("json_commit_failed: original file was preserved")
   invisible(path)
 }
 
@@ -76,7 +106,10 @@ sess_chr <- function(x, d = "") {
 # ---- list + current ---------------------------------------------------
 
 sess_read <- function(app_dir) {
-  obj <- sess_read_json(sess_file(app_dir))
+  index <- sess_file(app_dir)
+  obj <- sess_read_json(index)
+  if (file.exists(index) && (is.null(obj) || !is.list(obj)))
+    stop("历史记录索引暂时无法读取，未清空或覆盖已有记录；请联系维护人员恢复。")
   if (is.null(obj) || !is.list(obj)) obj <- list()
   if (is.null(obj$sessions) || !is.list(obj$sessions)) obj$sessions <- list()
   if (is.null(obj$current)) obj$current <- NULL

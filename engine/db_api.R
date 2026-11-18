@@ -11,6 +11,36 @@
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
+# db_api.R is also sourced by small contract tests without serve.R. Keep the
+# preflight accessors local-compatible; serve.R replaces these with the shared
+# implementations from record_access.R when it loads later.
+if (!exists("record_scalar", mode = "function"))
+  record_scalar <- function(x, default = "") {
+    if (is.null(x) || !length(x)) return(default)
+    v <- as.character(x)[1]
+    if (is.na(v)) default else v
+  }
+if (!exists("record_trim", mode = "function"))
+  record_trim <- function(x) trimws(record_scalar(x, ""))
+if (!exists("record_preflight_sid", mode = "function"))
+  record_preflight_sid <- function(preflight) {
+    if (is.null(preflight) || !isTRUE(preflight$ok) || is.null(preflight$target))
+      return("")
+    record_trim(preflight$target$sid)
+  }
+if (!exists("record_preflight_cap", mode = "function"))
+  record_preflight_cap <- function(preflight) {
+    if (is.null(preflight) || !isTRUE(preflight$ok) || is.null(preflight$access))
+      return(NULL)
+    preflight$access$cap
+  }
+if (!exists("record_cap_fields", mode = "function"))
+  record_cap_fields <- function(cap) {
+    if (is.null(cap) || !isTRUE(cap$ok)) return(list())
+    list(session_id = cap$session_id, can_read = isTRUE(cap$can_read),
+         can_write = isTRUE(cap$can_write), readonly = isTRUE(cap$readonly))
+  }
+
 DB_READY <- FALSE
 
 db_api_boot <- function(app_dir) {
@@ -72,6 +102,22 @@ db_api_owner <- function(app_dir, req) {
 
   token <- db_api_anon_token(app_dir, req)
   owner <- owner_from_identity(ident, token)
+  # 平台账号字段：判「这个人是不是机器人主人」要用它。
+  #   只从上面那条网关问询的结果里取，绝不从请求头取 —— 头是客户端输入。
+  #   取不到就留空，管理员判定会退回 owner_key / 配置里的用户名，
+  #   不会因为缺一个字段就把谁当成管理员。
+  owner$viewer_uid <- NA_character_
+  owner$viewer_username <- NA_character_
+  if (is.list(ident) && isTRUE(ident$authenticated) && is.list(ident$viewer)) {
+    v <- ident$viewer
+    uid <- v$uid %||% v$user_id %||% NULL
+    uname <- v$username %||% NULL
+    if (length(uid) == 1L && !is.list(uid) && !is.na(uid) && nzchar(trimws(as.character(uid))))
+      owner$viewer_uid <- trimws(as.character(uid))
+    if (length(uname) == 1L && !is.list(uname) && !is.na(uname) &&
+        nzchar(trimws(as.character(uname))))
+      owner$viewer_username <- trimws(as.character(uname))
+  }
   # ident comes only from the fixed HTTPS gateway above, never request identity headers.
   approval_file <- file.path(app_dir, "config", "legacy_ownership_approvals.json")
   if (is.list(ident) && isTRUE(ident$authenticated) && file.exists(approval_file)) {
@@ -111,7 +157,13 @@ owner_ctx_key <- function(owner) if (is.null(owner) || is.na(owner$key %||% NA))
 #  不放 engine/ 整体：那等于给了一个读全部源码的接口。
 DB_API_ASSET_ROOTS <- c("sc-ppt-kit/templates", "sc-ppt-kit/scripts",
                         "sc-plot-kit/scripts", "sc-pipeline/scripts",
-                        "library/C_supplement", "audit", "workflow")
+                        "library/C_supplement", "audit", "workflow",
+                        # 体检探针本身也要能取：执行端在别人内网，够不到应用磁盘。
+                        #   以前没有这条，执行端只能靠人把脚本拷过去，
+                        #   于是各机器上的副本慢慢就旧了 —— PC 上留着的两份
+                        #   都是 24 KB / 15 KB 的旧版，最新那份 28 KB 只在应用本机。
+                        #   只放这一个文件名，不放 engine/ 根：根放开了等于读全部源码。
+                        "workpc_check.py")
 
 db_api_engine_asset_path <- function(app_dir, rel) {
   r <- gsub("\\\\", "/", as.character(rel %||% ""))
@@ -125,12 +177,31 @@ db_api_engine_asset_path <- function(app_dir, rel) {
   file.path(app_dir, "engine", r)
 }
 
+db_api_fetch_session <- function(con, job) {
+  if (is.null(con) || is.null(job) || !nrow(job)) return("")
+  row <- job[1, , drop = FALSE]
+  pid <- record_scalar(row$version_id)
+  own <- record_scalar(row$owner_key)
+  if (!nzchar(pid) || !nzchar(own)) return("")
+  rows <- tryCatch(db_rows(con,
+    "SELECT session_id FROM sessions WHERE version_id = ? AND owner_key = ?",
+    list(pid, own)), error = function(e) NULL)
+  if (is.null(rows) || nrow(rows) != 1L) return("")
+  record_trim(rows$session_id[[1L]])
+}
+
 # ---- 路由 ------------------------------------------------------------
 
 # 返回 NULL 表示「这条不是我处理的」，调用方继续往下走。
-db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) {
+db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner,
+                          preflight = NULL) {
   if (!DB_READY || is.null(con)) return(NULL)
   now <- db_now()
+  pre_sid <- record_preflight_sid(preflight)
+  pre_cap <- record_preflight_cap(preflight)
+  pre_owner <- if (is.null(pre_cap)) NA_character_ else record_scalar(pre_cap$owner_key)
+  pre_mode <- if (is.null(pre_cap)) "" else record_trim(pre_cap$mode)
+  pre_vid <- if (is.null(pre_cap)) "" else record_trim(pre_cap$version_id)
 
   # ---- 我现在的身份与工作区 ------------------------------------------
   if (p == "/api/me") {
@@ -193,7 +264,7 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   #   页面拿它决定按钮能不能点，以及点了之后提示什么。
   if (p == "/api/orch/next") {
     if (is.na(owner$key)) return(list(code = 403, body = list(ok = FALSE, error = "身份未识别")))
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     vinfo <- tryCatch(db_api_version_of(con, sid), error = function(e) NULL)
     vid <- as.character(vinfo$version_id %||% "")
     if (!nzchar(vid))
@@ -204,7 +275,9 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
     gp <- tryCatch({
       if (exists("dec_pending", mode = "function")) length(dec_pending(sid)) else 0L
     }, error = function(e) 0L)
-    r <- tryCatch(orch_next(con, app_dir, vid, "server", gates_pending = gp),
+    r <- tryCatch(orch_next(con, app_dir, vid,
+                            if (nzchar(pre_mode)) pre_mode else "server",
+                            gates_pending = gp),
                   error = function(e) list(ready = FALSE, blocked_by = "error",
                                            why = conditionMessage(e), fix = "看服务日志"))
     return(list(code = 200, body = c(list(ok = TRUE, version_id = vid,
@@ -213,7 +286,7 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
 
   # ---- 收敛判定（G4）------------------------------------------------
   if (p == "/api/convergence") {
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     vinfo <- tryCatch(db_api_version_of(con, sid), error = function(e) NULL)
     vid <- as.character(vinfo$version_id %||% "")
     if (!nzchar(vid)) return(list(code = 400, body = list(ok = FALSE, error = "没有对应的版本")))
@@ -225,7 +298,7 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   # ---- 判断留痕（G1）------------------------------------------------
   #   反查：从任一产物/环节，回看影响过它的每次判断。
   if (p == "/api/decisions/trace") {
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     vinfo <- tryCatch(db_api_version_of(con, sid), error = function(e) NULL)
     vid <- as.character(vinfo$version_id %||% "")
     if (!nzchar(vid)) return(list(code = 400, body = list(ok = FALSE, error = "没有对应的版本")))
@@ -259,12 +332,13 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   #     那就又变成第二份判据了。
   if (p == "/api/dataset/profile") {
     if (is.na(owner$key)) return(list(code = 403, body = list(ok = FALSE, error = "身份未识别")))
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     sess <- dp_record(app_dir, sid, con = con)
     place <- sess$place
     env <- sess$identify$result
     ref <- tryCatch({
-      if (exists("ref_current", mode = "function")) ref_current(app_dir) else NULL
+      rid <- record_trim((sess %||% list())$reference_id)
+      if (nzchar(rid) && exists("ref_get", mode = "function")) ref_get(rid) else NULL
     }, error = function(e) NULL)
     profile_input <- sess %||% list()
     profile_input$result <- env
@@ -322,7 +396,8 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
           prof$samples_source <- "human"
         }
       }
-      save <- tryCatch(dp_save(app_dir, prof, NULL, owner_key = owner$key),
+      save_owner <- if (!is.na(pre_owner)) pre_owner else owner$key
+      save <- tryCatch(dp_save(app_dir, prof, NULL, owner_key = save_owner),
                        error = function(e) list(error = conditionMessage(e)))
       # 保存后重算 missing：人补过了就不该还挂着
       prof$missing <- Filter(function(m) {
@@ -334,9 +409,10 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
       db_event(con, "dataset_profile_filled", owner_key = owner$key,
                payload = list(species = prof$species, samples = prof$sample_count,
                               missing = length(prof$missing)))
-      return(list(code = 200, body = list(ok = TRUE, profile = prof, saved = save)))
+      return(list(code = 200, body = list(ok = TRUE, session_id = sid,
+                                          profile = prof, saved = save)))
     }
-    return(list(code = 200, body = list(ok = TRUE, profile = prof)))
+    return(list(code = 200, body = list(ok = TRUE, session_id = sid, profile = prof)))
   }
 
   # ---- 依赖链自检（F4 / G3）-----------------------------------------
@@ -351,17 +427,17 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
 
   # ---- 环境能不能跑（F7）--------------------------------------------
   if (p == "/api/runnable") {
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     env <- dp_record_env(app_dir, sid, con = con)
     r <- tryCatch({
       e <- new.env(parent = globalenv())
       sys.source(file.path(app_dir, "engine", "flow_spec.R"), envir = e)
       for (k in ls(e)) if (is.list(e[[k]]) || is.function(e[[k]])) assign(k, e[[k]], envir = globalenv())
       source(file.path(app_dir, "engine", "runnable.R"))
-      runnable_summary(env, "server")
+      runnable_summary(env, if (nzchar(pre_mode)) pre_mode else "server")
     }, error = function(err) list(verdict = "unknown", message = conditionMessage(err),
                                   blocking = list(), unknown = list(), notes = list()))
-    return(list(code = 200, body = c(list(ok = TRUE), r)))
+    return(list(code = 200, body = c(list(ok = TRUE, session_id = sid), r)))
   }
 
   # ---- 判定面板：页面一次拿全（前端只调这一条）---------------------
@@ -374,18 +450,20 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
       ok = FALSE, identified = FALSE, code = "identity_unavailable",
       error = "身份未识别，不显示判定信息",
       hint = "点「重试识别」，或从平台会话里重新打开这个应用")))
-    sid <- as.character(qget(q, "session") %||% "")
+    sid <- pre_sid
     vinfo <- tryCatch(db_api_version_of(con, sid), error = function(e) NULL)
     vid <- as.character(vinfo$version_id %||% "")
     mode <- as.character(db_meta_get(con, "review_mode") %||% "warn")
+    review_owner <- if (!is.na(pre_owner)) pre_owner else owner$key
 
     tickets <- db_rows(con,
       # attempt_id 必须带出来：页面的「放行」按钮要用它调 /api/review/release。
       #   不带的话按钮只能拿 ticket_id 去猜是哪一次尝试，猜错了就放行了另一次。
       "SELECT ticket_id, attempt_id, run_id, version_id, step_id, attempt_no, max_auto,
               state, issued_at, due_at, nudges, failed_checks, command_hint, must_do
-         FROM rework_tickets WHERE owner_key = ? ORDER BY issued_at DESC LIMIT 20",
-      list(owner$key))
+         FROM rework_tickets WHERE owner_key = ? AND version_id = ?
+         ORDER BY issued_at DESC LIMIT 20",
+      list(review_owner, vid))
     tk <- if (nrow(tickets)) lapply(seq_len(nrow(tickets)), function(i) {
       r <- as.list(tickets[i, ])
       r$failed_checks <- db_unjson(r$failed_checks, list())
@@ -404,7 +482,8 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
     }
     recent <- db_rows(con,
       "SELECT review_id, step_id, verdict, at, checks_json FROM reviews
-        WHERE owner_key = ? ORDER BY at DESC LIMIT 20", list(owner$key))
+        WHERE owner_key = ? AND version_id = ? ORDER BY at DESC LIMIT 20",
+      list(review_owner, vid))
     reviews <- if (nrow(recent)) lapply(seq_len(nrow(recent)), function(i) {
       r <- as.list(recent[i, ])
       ch <- db_unjson(r$checks_json, list())
@@ -420,7 +499,7 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
 
     return(list(code = 200, body = list(
       ok = TRUE, identified = TRUE,
-      owner_key = owner$key, session_id = sid, version_id = vid %||% NULL,
+      owner_key = review_owner, session_id = sid, version_id = vid %||% NULL,
       mode = mode,
       mode_meaning = switch(mode,
         off = "只记录，不提示",
@@ -483,19 +562,20 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   if (p == "/api/session/share" && identical(req$method, "POST")) {
     if (is.na(owner$key)) return(list(code = 403, body = list(ok = FALSE, error = "身份未识别")))
     b <- body_json()
-    sid <- as.character(b$session_id %||% "")
+    sid <- pre_sid
     want <- as.character(b$visibility %||% "private")
     if (!want %in% c("private", "shared"))
       return(list(code = 400, body = list(ok = FALSE, error = "visibility 只能是 private / shared")))
     r <- db_rows(con, "SELECT * FROM sessions WHERE session_id = ?", list(sid))
     if (!nrow(r)) return(list(code = 404, body = list(ok = FALSE, error = "没有这条分析记录")))
-    if (!identical(as.character(r$owner_key[1]), owner$key))
+    record_owner <- if (!is.na(pre_owner)) pre_owner else as.character(r$owner_key[1])
+    if (!identical(as.character(r$owner_key[1]), owner$key) || !identical(record_owner, owner$key))
       return(list(code = 403, body = list(ok = FALSE, code = "not_owner",
         error = "只有记录的所有者能改共享状态")))
     db_tx(con, function() {
       DBI::dbExecute(con, "UPDATE sessions SET visibility=?, updated_at=? WHERE session_id=?",
                      list(want, db_now(), sid))
-      db_event(con, "share", owner_key = owner$key, payload = list(
+      db_event(con, "share", owner_key = record_owner, payload = list(
         session_id = sid, visibility = want, at = db_now(),
         by = as.character(b$who %||% owner$key)))
     })
@@ -538,6 +618,7 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   #   大文件 -> 先确认。响应带 Range，断线能续传。
   if (p == "/api/artifact/fetch") {
     if (is.na(owner$key)) return(list(code = 403, body = list(ok = FALSE, error = "身份未识别")))
+    sid <- pre_sid
     rel <- as.character(qget(q, "rel") %||% "")
     mode <- as.character(qget(q, "mode") %||% "download")
     if (!nzchar(rel))
@@ -548,30 +629,37 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
       return(list(code = 403, body = list(ok = FALSE, code = "secret_requires_grant",
         error = "这一类产物含样本标识，需要单独授权后才能取回")))
 
-    lp <- db_api_local_path(app_dir, owner$key, rel)
+    lp <- if (exists("mirror_path", mode = "function")) mirror_path(sid, rel) else ""
     if (nzchar(lp) && file.exists(lp)) {
       return(list(code = 200, body = list(ok = TRUE, ready = TRUE, path = lp,
                                           bytes = file.info(lp)$size, kind = kind,
+                                          session_id = sid,
                                           md5 = unname(tools::md5sum(lp)))))
+    }
+    if (is.null(pre_cap) || !isTRUE(pre_cap$can_write)) {
+      return(list(code = 403, body = list(ok = FALSE, code = "fetch_requires_owner",
+        session_id = sid,
+        error = "shared 记录只能读取已经取回的产物；创建取回任务需要记录所有者。")))
     }
 
     req_id <- db_new_id("fx")
+    job_owner <- if (!is.na(pre_owner)) pre_owner else owner$key
+    job_vid <- if (nzchar(pre_vid)) pre_vid else as.character(qget(q, "version_id") %||% NA)
     big <- identical(kind, "large") || identical(kind, "ondemand")
     need_confirm <- big && !isTRUE(as.logical(qget(q, "confirm") %||% FALSE))
     DBI::dbExecute(con,
       "INSERT INTO fetch_jobs(request_id,owner_key,version_id,rel,state,created_at,updated_at)
        VALUES(?,?,?,?,?,?,?)",
-      list(req_id, owner$key, as.character(qget(q, "version_id") %||% NA),
+      list(req_id, job_owner, job_vid,
            rel, if (need_confirm) "pending" else "pending", db_now(), db_now()))
     DBI::dbExecute(con,
       "INSERT INTO poll_jobs(job_id,kind,owner_key,version_id,ticket_id,state,
          next_check_at,created_at,updated_at)
        VALUES(?,?,?,?,?,?,?,?,?)",
-      list(paste0("job-", req_id), "fetch", owner$key,
-           as.character(qget(q, "version_id") %||% NA), req_id,
+      list(paste0("job-", req_id), "fetch", job_owner, job_vid, req_id,
            "pending", db_now(), db_now(), db_now()))
     return(list(code = 202, body = list(
-      ok = TRUE, ready = FALSE, request_id = req_id, kind = kind,
+      ok = TRUE, ready = FALSE, request_id = req_id, kind = kind, session_id = sid,
       need_confirm = need_confirm,
       error = if (need_confirm)
         paste0("这个产物属于 ", kind, " 类，体积可能很大。确认取回请带 confirm=1。") else NULL,
@@ -635,9 +723,19 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
   # ---- 取回进度（C3）------------------------------------------------
   if (p == "/api/artifact/fetch/status") {
     rid <- as.character(qget(q, "request_id") %||% "")
-    r <- db_rows(con, "SELECT * FROM fetch_jobs WHERE request_id = ?", list(rid))
+    sid <- pre_sid
+    job_owner <- if (!is.na(pre_owner)) pre_owner else owner$key
+    sql <- "SELECT * FROM fetch_jobs WHERE request_id = ? AND owner_key = ?"
+    args <- list(rid, job_owner)
+    if (nzchar(pre_vid)) {
+      sql <- paste0(sql, " AND version_id = ?")
+      args <- c(args, list(pre_vid))
+    }
+    r <- db_rows(con, sql, args)
     if (!nrow(r)) return(list(code = 404, body = list(ok = FALSE, error = "没有这个取回任务")))
-    return(list(code = 200, body = list(ok = TRUE, job = as.list(r[1, ]))))
+    return(list(code = 200, body = c(list(ok = TRUE, session_id = sid,
+                                          job = as.list(r[1, ])),
+                                     record_cap_fields(pre_cap))))
   }
 
   # ---- 分片取回（C2：大文件专用）-------------------------------------
@@ -649,11 +747,26 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
       chunk <- 4L * 1024L * 1024L
       r <- db_rows(con, "SELECT * FROM fetch_jobs WHERE request_id = ?", list(rid))
       if (!nrow(r)) return(list(code = 404, body = list(ok = FALSE, error = "没有这个取回任务")))
+      if (!is.na(owner$key) && !identical(as.character(r$owner_key[1]), owner$key))
+        return(list(code = 403, body = list(ok = FALSE, code = "fetch_owner_mismatch",
+          error = "这个取回任务不属于请求者。未返回任何分片信息。")))
+      sid <- db_api_fetch_session(con, r)
+      if (!nzchar(sid))
+        return(list(code = 409, body = list(ok = FALSE, code = "fetch_session_ambiguous",
+          error = "无法把这个取回任务唯一绑定到一条分析记录；未返回分片信息。")))
+      sid_req <- as.character(qget(q, "session") %||% qget(q, "session_id") %||% "")
+      rel_req <- as.character(qget(q, "rel") %||% "")
+      if ((nzchar(sid_req) && !identical(sid_req, sid)) ||
+          (nzchar(rel_req) && !identical(rel_req, as.character(r$rel[1]))))
+        return(list(code = 409, body = list(ok = FALSE, code = "fetch_binding_mismatch",
+          request_id = rid, session_id = sid, rel = as.character(r$rel[1]),
+          error = "request_id 与 session/rel 不属于同一个已登记取回任务；未返回分片信息。")))
       total <- suppressWarnings(as.numeric(r$expected_bytes[1]))
       if (is.na(total)) return(list(code = 400, body = list(ok = FALSE,
         error = "不知道总大小，无法切片；请先给 expected_bytes")))
       n <- ceiling(total / chunk)
-      return(list(code = 200, body = list(ok = TRUE, chunk_size = chunk, total_bytes = total,
+      return(list(code = 200, body = list(ok = TRUE, request_id = rid, session_id = sid,
+        chunk_size = chunk, total_bytes = total,
         chunks = lapply(seq_len(n) - 1L, function(i) list(
           chunk_index = i, offset = i * chunk,
           len = min(chunk, total - i * chunk))))))
@@ -664,10 +777,27 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
     r <- db_rows(con, "SELECT * FROM fetch_jobs WHERE request_id = ?", list(rid))
     if (!nrow(r) || is.na(idx))
       return(list(code = 400, body = list(ok = FALSE, error = "缺 request_id 或 chunk_index")))
+    if (!is.na(owner$key) && !identical(as.character(r$owner_key[1]), owner$key))
+      return(list(code = 403, body = list(ok = FALSE, code = "fetch_owner_mismatch",
+        error = "这个取回任务不属于请求者。未写入任何分片。")))
+    sid <- db_api_fetch_session(con, r)
+    if (!nzchar(sid))
+      return(list(code = 409, body = list(ok = FALSE, code = "fetch_session_ambiguous",
+        error = "无法把这个取回任务唯一绑定到一条分析记录；未写入任何分片。")))
+    sid_req <- as.character(b$session_id %||% b$session %||% "")
+    rel_req <- as.character(b$rel %||% "")
+    if ((nzchar(sid_req) && !identical(sid_req, sid)) ||
+        (nzchar(rel_req) && !identical(rel_req, as.character(r$rel[1]))))
+      return(list(code = 409, body = list(ok = FALSE, code = "fetch_binding_mismatch",
+        request_id = rid, session_id = sid, rel = as.character(r$rel[1]),
+        error = "request_id 与 session/rel 不属于同一个已登记取回任务；未写入任何分片。")))
     part <- tryCatch(jsonlite::base64_dec(as.character(b$b64 %||% "")), error = function(e) NULL)
     if (is.null(part) || !length(part))
       return(list(code = 400, body = list(ok = FALSE, error = "分片内容为空或不是 base64")))
-    lp <- db_api_local_path(app_dir, owner$key, as.character(r$rel[1]))
+    lp <- if (exists("mirror_path", mode = "function"))
+      mirror_path(sid, as.character(r$rel[1])) else ""
+    if (!nzchar(lp))
+      return(list(code = 400, body = list(ok = FALSE, error = "取回路径不合法")))
     dir.create(dirname(lp), showWarnings = FALSE, recursive = TRUE)
     # 按偏移写入而不是追加：重传同一片不会把文件写长一截。
     fc <- file(lp, open = "r+b")
@@ -692,7 +822,8 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
       DBI::dbExecute(con, "UPDATE fetch_jobs SET state='verified', local_path=?, updated_at=?
                            WHERE request_id=?", list(lp, db_now(), rid))
     }
-    return(list(code = 200, body = list(ok = TRUE, chunk_index = idx, received = got,
+    return(list(code = 200, body = list(ok = TRUE, request_id = rid, session_id = sid,
+                                        chunk_index = idx, received = got,
                                         complete = done)))
   }
 
@@ -701,22 +832,29 @@ db_api_handle <- function(con, app_dir, p, req, q, body_json, send_json, owner) 
     b <- body_json()
     rels <- as.character(unlist(b$rels %||% character(0)))
     if (!length(rels)) return(list(code = 400, body = list(ok = FALSE, error = "没勾选任何产物")))
-    paths <- vapply(rels, function(r) db_api_local_path(app_dir, owner$key, r), "")
+    if (!nzchar(pre_sid) || is.null(pre_cap) || !isTRUE(pre_cap$can_write))
+      return(list(code = 403, body = list(ok = FALSE, code = "not_owner",
+        error = "只有记录所有者可以打包这条记录的产物。")))
+    paths <- vapply(rels, function(r)
+      if (exists("mirror_path", mode = "function")) mirror_path(pre_sid, r) else "", "")
     missing <- rels[!nzchar(paths) | !file.exists(paths)]
     if (length(missing))
       return(list(code = 409, body = list(ok = FALSE, code = "not_fetched",
+        session_id = pre_sid,
         error = "有产物还没取回到本地，先取回再打包", missing = missing)))
     out <- file.path(tempdir(), paste0("bundle-", db_new_id("b"), ".zip"))
     # 清单与文件一一对应：解压后能回答「这份是谁的、哪一轮、哪个环节」。
     man <- lapply(seq_along(rels), function(i) list(
       rel = rels[i], bytes = file.info(paths[i])$size,
       md5 = unname(tools::md5sum(paths[i])),
-      version_id = as.character(b$version_id %||% NA)))
+      session_id = pre_sid, owner_key = pre_owner,
+      version_id = if (nzchar(pre_vid)) pre_vid else as.character(b$version_id %||% NA)))
     manf <- file.path(dirname(out), paste0(tools::file_path_sans_ext(basename(out)), "_manifest.json"))
     writeLines(jsonlite::toJSON(man, auto_unbox = TRUE, pretty = TRUE), manf, useBytes = TRUE)
     utils::zip(out, files = c(paths, manf), flags = "-j -q")
-    return(list(code = 200, body = list(ok = TRUE, zip = out, items = length(rels),
-                                        manifest = manf)))
+    return(list(code = 200, body = c(list(ok = TRUE, session_id = pre_sid,
+                                          zip = out, items = length(rels), manifest = manf),
+                                     record_cap_fields(pre_cap))))
   }
 
   NULL
@@ -744,8 +882,23 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
   sess_row <- db_rows(con, "SELECT * FROM sessions WHERE session_id = ?", list(sid))
   if (nrow(sess_row)) {
     sr <- as.list(sess_row[1, ])
-    pid <- as.character(sr$project_id %||% db_ensure_project(con, owner_key, sr$name %||% sid))
-    vid <- as.character(sr$version_id %||% db_ensure_version(con, pid, owner_key))
+    # 只有「非 NA、非空」的已有 ID 才能复用，其余一律走兜底建号。
+    #   原写法是 sr$project_id %||% db_ensure_project(...)：%||% 只认 is.null
+    #   与长度 0，而 DBI 把 SQL NULL 读成 NA_character_（长度 1），兜底永远不触发。
+    #   于是 NA 被原样带进 step_attempts.version_id，NOT NULL 约束直接失败，
+    #   整份回写被判 db_report_error —— 2026-11-12 37li 那次就是这么丢的。
+    #   已有的真实 ID 仍然照用，owner_key 隔离语义不变（两条兜底都在 owner_key 下建号）。
+    sess_id_of <- function(x) {
+      v <- suppressWarnings(as.character(x))
+      if (!length(v) || is.na(v[1])) return(NA_character_)
+      v <- trimws(v[1])
+      if (!nzchar(v)) return(NA_character_)
+      v
+    }
+    pid <- sess_id_of(sr$project_id)
+    if (is.na(pid)) pid <- as.character(db_ensure_project(con, owner_key, sr$name %||% sid))
+    vid <- sess_id_of(sr$version_id)
+    if (is.na(vid)) vid <- as.character(db_ensure_version(con, pid, owner_key))
     rid <- db_ensure_run(con, vid, owner_key, work_root = as.character(sr$run_dir %||% runDir))
   } else {
     # 没有这条分析记录时，顺手把记录建出来。
@@ -898,6 +1051,9 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
 
   list(accepted = accepted,
        verdict = vr$verdict,
+       # 判定里解出来的 set_id 与来源：护照要用同一份事实，不能自己再猜一次。
+       set_id = vr$set_id,
+       set_id_provenance = vr$set_id_provenance,
        attempt_id = aid,
        ticket_id = if (is.na(vr$ticket_id %||% NA)) NULL else vr$ticket_id,
        status = if (accepted) "verified" else "rejected",

@@ -16,17 +16,20 @@ check(list(annotation=list(merge_adjacent=TRUE)), 'annotation.merge_adjacent')
 check(list(scope=list(annotation_gate=FALSE)),character())
 writeLines('{broken',file.path(d,'profile.json'))
 r <- intent_execution_gate(root,sid);stopifnot(!r$ok,r$code=='intent_profile_unreadable')
-# Use the actual run route prefix; no launch/delegation hook may be reached.
-src <- readLines('serve.R',warn=FALSE)
-a <- grep('^  if \\(p == "/api/run"',src)[1]
-b <- grep('    # ---- 对账不一致',src)[1]
-e <- new.env(parent=globalenv());e$APP_DIR<-root;e$HAS_SESSIONS<-TRUE;e$runDir<-'/tmp/fixture';e$p<-'/api/run';e$req<-list(method='POST');e$con<-NULL
-e$cur_sid<-function()sid;e$body_json<-function()list(step='all',force=TRUE)
-e$send_json<-function(con,status,body)list(status=status,body=body)
-f<-eval(parse(text=c('function(){',src[a:(b-1)],'}','}')),envir=e)
+# Use the shared run_enqueue implementation; no launch/delegation hook may be reached.
+e<-new.env(parent=globalenv());e$APP_DIR<-root;e$HAS_SESSIONS<-TRUE
+e$read_state<-function()list(runDir='/tmp/fixture',runDirRemote=FALSE)
+e$record_session_target<-function(q,b,...)list(ok=TRUE,sid=as.character(b$session_id %||% sid))
+e$record_access<-function(...)list(ok=TRUE,ctx=list(run_dir='/tmp/fixture',run_dir_remote=FALSE,mode='local',place=list()))
+e$DB_CON<-NULL;e$DB_READY<-FALSE;e$HAS_FLOW<-FALSE;e$HAS_CONTRACT<-FALSE;e$HAS_NOTEBOOK<-FALSE
+e$launch_step<-function(...)stop('downstream launch must not be reached')
+sys.source('engine/run_enqueue.R',envir=e)
 writeLines('{"intent":{"scope":{"run_until":"08"}}}',file.path(d,'profile.json'))
-r<-f();stopifnot(r$status==409L,r$body$code=='intent_constraints_unimplemented')
+r<-e$run_enqueue(body=list(step='all',session_id=sid,force=TRUE),owner_ctx=list(key='fixture'),current_sid=sid,via='/api/run')
+stopifnot(r$pa_status==409L,r$pa_body$code=='intent_constraints_unimplemented')
 cat('PASS saved restrictions cannot silently execute, force cannot bypass, corrupted profile fails closed\n')
-e$body_json<-function()list(step='all',session_id='other',force=TRUE)
-r<-f();stopifnot(r$status==409L,r$body$code=='session_selection_changed')
-cat('PASS different execution SID rejected before profile gate or enqueue\n')
+other<-'s-other';od<-file.path(root,'state','sessions',other);dir.create(od,recursive=TRUE)
+writeLines('{broken',file.path(od,'profile.json'))
+r<-e$run_enqueue(body=list(step='all',session_id=other,force=TRUE),owner_ctx=list(key='fixture'),current_sid=sid,via='/api/run')
+stopifnot(r$pa_status==409L,r$pa_body$code=='intent_profile_unreadable')
+cat('PASS explicit target SID, not current, drives the intent gate\n')

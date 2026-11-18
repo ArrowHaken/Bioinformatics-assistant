@@ -818,6 +818,12 @@ db_run_log_append <- function(con, owner_key, sid, observation, identity = obser
 
 db_run_log_read <- function(con, owner_key, sid, limit = NULL) {
   if (!db_run_log_authorized(con, owner_key, sid)) stop("run_log_not_owner")
+  db_run_log_read_record(con, owner_key, sid, limit)
+}
+
+# Caller must have resolved record capability first. Shared viewers need to read
+# the record owner's append-only log without being treated as that owner for writes.
+db_run_log_read_record <- function(con, owner_key, sid, limit = NULL) {
   sql <- "SELECT * FROM run_log_observations WHERE owner_key=? AND session_id=? ORDER BY observation_id"
   # The monitor displays a bounded tail; downloads read the complete persisted record.
   if (!is.null(limit)) sql <- paste0("SELECT * FROM (SELECT * FROM run_log_observations WHERE owner_key=? AND session_id=? ORDER BY observation_id DESC LIMIT ",

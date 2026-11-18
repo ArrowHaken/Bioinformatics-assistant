@@ -120,7 +120,53 @@ dec_clusters <- function(sid = "") {
 
 # These tables have different cluster numbering and must never substitute.
 dec_after_drop <- function(sid = "") {
-  dec_evidence("after_drop_stats", "filter", sid)
+  ad <- dec_evidence("after_drop_stats", "filter", sid)
+  if (is.null(ad)) return(NULL)
+  ad$samples <- dec_samples_norm(ad$samples %||% NULL,
+                                 map = ad$sample_group %||% NULL)
+  ad
+}
+
+# 把「样本」统一成记录列表：list(list(sample=, group=, n=), ...)
+#   为什么必须归一化：执行端历史上给的是命名映射 {"18m-G489": 11630}，
+#   而下游按 s0$sample / s0$group / s0$n 取字段。直接对命名映射取 $sample
+#   会抛「$ operator is invalid for atomic vectors」，整条决策流当场断掉 ——
+#   页面看不到「要不要剔样本」，人也就没法做这个决定。
+#   两种形状都接受，出口只有一种。
+#   分组只认明确来源（map 或记录自带）；没有就留 NA，不按样本名猜组。
+dec_samples_norm <- function(x, map = NULL) {
+  if (is.null(x) || !length(x)) return(list())
+  out <- list()
+  if (is.list(x) && is.null(names(x))) {
+    # 已是记录列表
+    for (it in x) {
+      if (!is.list(it)) next
+      nm <- as.character(it$sample %||% it$name %||% "")
+      if (!nzchar(nm)) next
+      n <- suppressWarnings(as.numeric(it$n %||% it$n_cells %||% NA))
+      g <- as.character(it$group %||% "")
+      if (!nzchar(g) && is.list(map)) g <- as.character(map[[nm]] %||% "")
+      out[[length(out) + 1L]] <- list(sample = nm,
+                                      group = if (nzchar(g)) g else NA_character_,
+                                      n = n)
+    }
+    return(out)
+  }
+  # 命名映射 / 命名向量：名字是样本，值是细胞数
+  nms <- names(x)
+  if (is.null(nms)) return(list())
+  for (i in seq_along(x)) {
+    nm <- as.character(nms[i])
+    if (!nzchar(nm)) next
+    v <- x[[i]]
+    n <- suppressWarnings(as.numeric(if (is.list(v)) (v$n %||% v$n_cells %||% NA) else v))
+    g <- ""
+    if (is.list(map)) g <- as.character(map[[nm]] %||% "")
+    out[[length(out) + 1L]] <- list(sample = nm,
+                                    group = if (nzchar(g)) g else NA_character_,
+                                    n = n)
+  }
+  out
 }
 
 # 从一份簇表里挑出"该建议剔除"的簇：空簇、极小簇、单组严重偏斜。
@@ -138,11 +184,21 @@ dec_mp_pct <- function(c0) {
   NA_real_
 }
 
+# 簇细胞数：以 n_cells 为准，n 只在 n_cells 缺失时兜底。
+#   为什么：执行端回写的逐簇依据里字段叫 n_cells，
+#   老代码只读 n，于是每一簇都被算成 0 —— 页面会把所有簇显示成
+#   「0 个细胞」并推荐一份错名单。两处（判据与展示文案）必须用同一个取值。
+dec_cells <- function(c0) {
+  v <- suppressWarnings(as.numeric(c0$n_cells %||% NA))
+  if (is.na(v)) v <- suppressWarnings(as.numeric(c0$n %||% NA))
+  v
+}
+
 dec_judge <- function(clusters) {
   empty <- character(0); tiny <- character(0); skew <- character(0)
   for (c0 in (clusters %||% list())) {
     id <- as.character(c0$cluster %||% "")
-    n <- suppressWarnings(as.numeric(c0$n %||% NA))
+    n <- dec_cells(c0)
     if (!nzchar(id) || is.na(n)) next
     if (n == 0) { empty <- c(empty, id); next }
     if (n < 300) { tiny <- c(tiny, id); next }
@@ -205,14 +261,14 @@ dec_specs <- function(stepId, sid = "") {
     ev <- NULL
     if (!is.null(clu29)) {
       rows <- lapply(Filter(function(c0) {
-        n <- suppressWarnings(as.numeric(c0$n %||% NA))
+        n <- dec_cells(c0)
         if (is.na(n)) return(FALSE)
         if (n == 0) return(TRUE)
         if (n < 300) return(TRUE)
         mp <- dec_mp_pct(c0)
         !is.na(mp) && (mp > 95 || mp < 10)
       }, clu29), function(c0) {
-        n <- suppressWarnings(as.numeric(c0$n %||% 0))
+        n <- dec_cells(c0); if (is.na(n)) n <- 0
         mp <- dec_mp_pct(c0)
         # 标记必须写真实原因。之前一律写"极小簇"，于是 1524 个细胞的 14 号
         #   也被标成"极小簇（1524 细胞）"—— 数字自己反驳自己，
@@ -235,9 +291,24 @@ dec_specs <- function(stepId, sid = "") {
       key = "cluster_filter",
       title = "这一步要剔掉哪些簇",
       question = "筛群后要重聚类，剔哪些簇会直接改变后面所有结果，所以停在这里问你。",
-      why = paste0("依据是这份对象自己的簇号（下表，0-28）。",
-                   "0 个细胞的簇必须删；不到 300 个细胞的簇虽然跑得出来，",
-                   "但一组只剩几十个细胞，算出的差异基因基本是噪音。"),
+      # 依据文案必须跟着真实数据走。
+      #   改前写死「0-28」和「不到 300 个细胞…基本是噪音」：
+      #     ① 下一轮簇数不同，编号区间就不是 0-28，写死等于给错范围；
+      #     ② 「基本是噪音」是替人下了科学结论。小簇或单组偏斜也可能
+      #        反映真实的生物学差异（稀有细胞类型、处理组特异扩增）。
+      #   这里只做两件事：按本次真实簇表回显范围与判据触发情况，
+      #   并明确这是供人工复核的提示，系统不自动剔除、也不断言必然噪音。
+      why = paste0(
+        "依据是这份对象自己的簇号（下表，共 ",
+        if (!is.null(clu29)) length(clu29) else 0, " 个簇",
+        if (!is.null(clu29) && length(clu29)) paste0("，编号 ",
+          paste(range(suppressWarnings(as.numeric(vapply(clu29, function(x)
+            as.character(x$cluster %||% ""), ""))), na.rm = TRUE), collapse = "-")) else "",
+        "）。下面标出的只是供人工复核的提示：",
+        "0 个细胞的簇没有信息量；细胞很少的簇或单组严重偏斜的簇，",
+        "统计功效低、差异结果不稳定，但也可能是稀有细胞类型或真实的组间差异。",
+        "是否剔除、剔哪些，由你按生物学背景判断；系统不会自动剔除，",
+        "也不认为这些簇必然是噪音。"),
       options = opts,
       suggested = if (length(strong)) paste(strong, collapse = ",") else "keep_all",
       evidence = ev)
@@ -270,20 +341,32 @@ dec_specs <- function(stepId, sid = "") {
         nm <- as.character(s0$sample %||% "")
         if (!nzchar(nm)) next
         grp <- as.character(s0$group %||% "")
-        opts <- c(opts, list(list(
-          value = nm,
-          label = paste0("删掉 ", nm, "（", grp, " 组，",
-                         as.character(s0$n %||% ""), " 个细胞）"))))
+        grp_known <- nzchar(grp) && !is.na(grp)
+        nn <- suppressWarnings(as.numeric(s0$n %||% NA))
+        # 分组没有明确来源时不写「X 组」，只报细胞数：
+        #   按样本名猜组会把未知当已知，人看到的是编出来的分组。
+        label <- if (grp_known)
+          paste0("删掉 ", nm, "（", grp, " 组，", as.character(nn), " 个细胞）")
+        else
+          paste0("删掉 ", nm, "（", if (is.na(nn)) "细胞数未知" else paste0(as.character(nn), " 个细胞"), "）")
+        opts <- c(opts, list(list(value = nm, label = label)))
       }
       # 建议值按"保持两组样本数接近"来给：他现在就是 3 对 4，
       #   而 Mock 组第三个样本是哪一个不由脚本挑，所以只把差额说出来。
       n_mock <- length(Filter(function(x) identical(as.character(x$group %||% ""), "Mock"), smp))
       n_mp <- length(Filter(function(x) identical(as.character(x$group %||% ""), "Microplastics"), smp))
+      n_grp_known <- n_mock + n_mp
+      # 分组没确认时不能报「Mock 3 个 / MP 4 个」：那是编的。
+      q_txt <- if (n_grp_known == length(smp))
+        paste0("现在 Mock ", n_mock, " 个、Microplastics ", n_mp,
+               " 个样本。要剔掉哪一个吗？")
+      else
+        paste0("现在共 ", length(smp), " 个样本。要剔掉哪一个吗？",
+               "（本次记录里没有已确认的样本分组，所以不列组别）")
       out[[length(out) + 1]] <- list(
         key = "dropsample",
         title = "终版之前要不要剔掉整个样本",
-        question = paste0("现在 Mock ", n_mock, " 个、Microplastics ", n_mp,
-                          " 个样本。要剔掉哪一个吗？"),
+        question = q_txt,
         why = "剔样本会同时改样本量、分组平衡和所有下游数字，而且剔掉之后补不回来。上一轮是脚本里写死剔 18m-G761，没有经过确认，所以这次先问你。",
         options = opts,
         suggested = "none",

@@ -1037,6 +1037,41 @@ input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px
   transition:transform .12s ease;display:inline-block;width:12px}
 .artdir[open] > summary::before{transform:rotate(90deg)}
 .artdirn{font-weight:var(--fw-5)}
+/* 环节序号：和步骤卡片上的编号一致，认得出这是流程第几步 */
+.artno{flex:0 0 22px;height:22px;border-radius:50%;background:#f2f4f2;color:var(--ink2);
+  font-size:var(--fs-6);display:flex;align-items:center;justify-content:center;
+  font-variant-numeric:tabular-nums}
+/* 目录名降一级：它只是路径，标题才是人要看的那句话 */
+.artdirf{font-size:var(--fs-6);color:var(--ink3);font-family:var(--font-mono);opacity:.85}
+/* 高级块现在站在原来「查看打包步骤」按钮的位置，左边距与按钮行对齐 */
+.artadvrow{padding:0 18px 4px}
+.artadvrow .ac-notebook-advanced{padding:8px 0}
+.artadvrow .ac-notebook-advanced>summary{cursor:pointer;font-size:var(--fs-5);color:var(--ink2)}
+/* ---------- 产物下载弹窗：固定尺寸 ----------
+   为什么单独钉死：这个弹窗里放着三个页签，内容量差得很远 ——
+   产物清单可能有几百行，执行快照只有两个按钮。
+   跟着内容撑开时，切一次页签窗子就跳一次大小，而且清单长了整窗顶到屏幕外。
+   现在宽高都固定，内容在自己的区域里滚动，窗子始终是同一个大小。 */
+#dlgArtifacts .modal-box{width:min(880px,100%);height:min(720px,88vh);max-height:88vh}
+/* 面板区吃掉剩余高度，内部滚动；三个页签都不改变窗子尺寸 */
+#dlgArtifacts .artpanels{flex:1 1 auto;min-height:0;overflow:auto;display:flex;flex-direction:column}
+#dlgArtifacts .artpanel{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:auto}
+#dlgArtifacts .artpanel[hidden]{display:none!important}
+/* 产物清单在清单区里滚，不把按钮滚出视野 */
+#dlgArtifacts .archost{flex:1 1 auto;min-height:0;overflow:auto}
+
+/* 三个同级入口：点开时高亮，让人知道面板属于哪个按钮 */
+#artToolbar .artpt.on{border-color:var(--brand);background:var(--brand-soft);color:var(--brand)}
+/* 面板本体：贴着工具条展开，和产物清单分开，不抢清单的纵向空间 */
+.artpanels{flex:1 1 auto;min-height:0;overflow:auto}
+/* 三个页签互斥：hidden 必须真的不占位 */
+.artpanel[hidden]{display:none!important}
+.artpanel{border-bottom:1px solid var(--line);background:#fbfcfb;padding:10px 18px 0}
+/* 产物清单在自己的面板里滚动，不把整页顶长 */
+.archost{padding-bottom:6px}
+.artpanel-p{margin:0 0 4px;font-size:var(--fs-5);color:var(--ink2);line-height:1.7}
+.artpanel-n{margin:6px 0 8px;font-size:var(--fs-6);color:var(--ink3);line-height:1.65}
+.artpanel .ac-toolbar{margin:8px 0 4px}
 .artdir .cnt{font-size:var(--fs-6);color:var(--ink3)}
 
 /* ===== 环节卡片内的处理过程（原「处理过程」并到每个步骤下面） =====
@@ -1232,7 +1267,12 @@ input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px
    现在说明与产物都进「任务完成详情」浮层，卡片上只剩判断与动作。 */
 .stcard{gap:9px}
 .stcard h4{font-size:var(--fs-3);font-weight:var(--fw-3)}
-.stmeta{font-size:var(--fs-6);color:var(--ink3);min-height:0}
+/* 卡片是纵向 flex，三列布局下同一行等高（align-items:stretch）。
+   min-height:0 让这一行小字可以被压到远小于自身文字高度，
+   字照样按原高度画出来，于是溢出到下面的按钮底下被盖住。
+   这里把它的尺寸钉死在内容高度上，不再参与压缩。 */
+.stcard > .stmeta,
+.stcard > .stsubs{flex:0 0 auto}
 
 /* 环节格：只有两种可见状态。
    完成 = 绿勾且不可点；失败 = 红叉且可点（点开看原因）。
