@@ -41,15 +41,38 @@ sa_md5 <- function(p) {
 sa_archive_root <- function(engine_dir) file.path(engine_dir, "library", "archive")
 sa_index_file   <- function(engine_dir) file.path(sa_archive_root(engine_dir), "index.json")
 
-sa_index_read <- function(engine_dir) {
-  f <- sa_index_file(engine_dir)
-  if (!file.exists(f)) return(list(built_at = "", records = list()))
+# 运行时记录与随代码分发的底稿分开放（gina 2026-11-19）。
+#   为什么必须分开：官方底稿（R1-official）是产品自带的东西，跟着仓库走没问题；
+#   而每次分析登记进来的记录（SA-*）带的是某个人那一次处理的服务器路径、
+#   归属标识和脚本清单 —— 那是运行数据，不该出现在公开仓库里。
+#   以前两者写在同一个 index.json，一推送就把这条记录连同 owner_key 一起公开了。
+#   现在：engine/library/archive/index.json 只读，放官方底稿；
+#         运行时记录写 <app>/state/script_archive/index.json，state/ 已在忽略规则里。
+sa_runtime_dir  <- function(app_dir) file.path(app_dir, "state", "script_archive")
+sa_runtime_file <- function(app_dir) file.path(sa_runtime_dir(app_dir), "index.json")
+
+sa_read_index_file <- function(f) {
+  if (!file.exists(f)) return(list(records = list()))
   d <- tryCatch(jsonlite::fromJSON(paste(readLines(f, warn = FALSE, encoding = "UTF-8"),
                                          collapse = "\n"), simplifyVector = FALSE),
                 error = function(e) NULL)
-  if (is.null(d) || !is.list(d)) return(list(built_at = "", records = list()))
+  if (is.null(d) || !is.list(d)) return(list(records = list()))
   if (is.null(d$records) || !is.list(d$records)) d$records <- list()
   d
+}
+
+# 合并读取：官方底稿在前，运行时记录在后。同 id 以运行时为准。
+sa_index_read <- function(engine_dir, app_dir = NULL) {
+  off <- sa_read_index_file(sa_index_file(engine_dir))
+  run <- if (!is.null(app_dir) && nzchar(app_dir)) sa_read_index_file(sa_runtime_file(app_dir))
+         else list(records = list())
+  recs <- c(off$records %||% list(), run$records %||% list())
+  if (length(recs)) {
+    ids <- vapply(recs, function(x) as.character(x$id %||% ""), "")
+    keep <- !duplicated(ids, fromLast = TRUE)
+    recs <- recs[keep]
+  }
+  list(built_at = off$built_at %||% run$built_at %||% "", records = recs)
 }
 
 sa_write_text <- function(p, txt) {
@@ -65,12 +88,21 @@ sa_write_text <- function(p, txt) {
   invisible(TRUE)
 }
 
-sa_index_write <- function(engine_dir, d) {
-  d$built_at <- format(Sys.Date(), "%Y-%m-%d")
-  sa_write_text(sa_index_file(engine_dir),
-                jsonlite::toJSON(d, auto_unbox = TRUE, pretty = TRUE,
+# 只写运行时记录，且只写到 state 下。
+#   官方底稿（engine/library/archive/index.json）是只读的：它随代码分发，
+#   一旦被运行时记录回写，下一次推送就会把别人的处理历史带上去。
+sa_index_write <- function(app_dir, d) {
+  recs <- d$records %||% list()
+  # 运行时 = 自动登记的记录。官方底稿的 owner_key 为空且 auto 不为 TRUE。
+  keep <- Filter(function(r) {
+    id <- as.character(r$id %||% "")
+    startsWith(id, "SA-") || isTRUE(r$auto)
+  }, recs)
+  out <- list(built_at = format(Sys.Date(), "%Y-%m-%d"), records = keep)
+  sa_write_text(sa_runtime_file(app_dir),
+                jsonlite::toJSON(out, auto_unbox = TRUE, pretty = TRUE,
                                  null = "null", digits = NA))
-  invisible(d)
+  invisible(out)
 }
 
 sa_safe <- function(x, dflt = "") {
@@ -127,8 +159,8 @@ sa_content_for <- function(engine_dir, remote_path, want_md5) {
 #     · 记录隔离/修改隔离被显式关掉 -> 退回全员可见
 #   返回 list(ids=..., isolation_on=..., admin=...) 供调用方回显原因。
 sa_visible <- function(engine_dir, owner_key = "", is_admin = FALSE,
-                       isolation_on = TRUE) {
-  d <- sa_index_read(engine_dir)
+                       isolation_on = TRUE, app_dir = NULL) {
+  d <- sa_index_read(engine_dir, app_dir)
   recs <- d$records %||% list()
   key <- trimws(as.character(owner_key %||% ""))
   ids <- character(0)
@@ -188,7 +220,7 @@ sa_register <- function(app_dir, engine_dir, sid, session_name = "", run_dir = "
   want <- as.character(script_md5 %||% "")
   want <- if (!length(want) || is.na(want[1])) "" else tolower(trimws(want[1]))
   if (identical(want, "na")) want <- ""
-  d <- sa_index_read(engine_dir)
+  d <- sa_index_read(engine_dir, app_dir)
   got <- sa_record_for(d, sid, session_name, run_dir, owner_key)
   rec <- got$rec
   # 老记录没有归属字段：补上调用方给的归属，避免它们永远无主而谁都看不到。
@@ -285,7 +317,7 @@ sa_register <- function(app_dir, engine_dir, sid, session_name = "", run_dir = "
   if (isTRUE(got$is_new)) d$records[[length(d$records) + 1L]] <- rec
   else d$records[[got$idx]] <- rec
 
-  sa_index_write(engine_dir, d)
+  sa_index_write(app_dir, d)
   list(ok = TRUE, record = rec$id, file = rec$files[[fi]]$name,
        rel = rec$files[[fi]]$rel, counted = new_count,
        content = if (isTRUE(rec$files[[fi]]$content_missing)) "missing" else "local")
@@ -337,5 +369,5 @@ sa_backfill <- function(con, app_dir, engine_dir, limit = 2000L) {
     if (isTRUE(res$ok)) n_ok <- n_ok + 1L else { n_skip <- n_skip + 1L; n_fail <- n_fail + 1L }
   }
   list(ok = TRUE, registered = n_ok, skipped = n_skip, failed = n_fail,
-       records = length(sa_index_read(engine_dir)$records))
+       records = length(sa_index_read(engine_dir, app_dir)$records))
 }

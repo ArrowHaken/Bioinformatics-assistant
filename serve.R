@@ -8535,9 +8535,13 @@ serve_request <- function(con, req) {
   #   取用规则，回答不了"这个环节历史上用过哪些脚本、成功几次"。
   #   存档是另一件事，独立一份 archive/index.json，不跟取用规则混。
   if (p == "/api/script-archive") {
-    f <- file.path(ENGINE_DIR, "library", "archive", "index.json")
-    if (!file.exists(f)) return(send_json(con, 200, list(ok = FALSE, error = "没有脚本存档")))
-    d <- tryCatch(read_json_file(f), error = function(e) NULL)
+    # 合并读取：官方底稿（随代码分发）+ 运行时记录（在 state 下）。
+    #   为什么不再直接读 engine 里那份 index.json：运行时记录写在那里，
+    #   一推送就会把某个人某次处理的服务器路径和归属带上公开仓库。
+    d <- if (exists("sa_index_read", mode = "function"))
+      tryCatch(sa_index_read(ENGINE_DIR, APP_DIR), error = function(e) NULL)
+    else tryCatch(read_json_file(file.path(ENGINE_DIR, "library", "archive", "index.json")),
+                  error = function(e) NULL)
     if (is.null(d)) return(send_json(con, 200, list(ok = FALSE, error = "存档索引读不出来")))
     # ---- 逐文件核对实体在不在（gina 2026-11-19）------------------------
     #   她的问题：「这两个记录都读不到脚本，前端为什么还会有这个内容」。
@@ -8640,8 +8644,10 @@ serve_request <- function(con, req) {
         return(send_json(con, 403, list(ok = FALSE, code = "not_visible",
           error = "这条脚本记录不属于当前身份")))
     }
-    d_arc <- tryCatch(read_json_file(file.path(ENGINE_DIR, "library", "archive", "index.json")),
-                      error = function(e) NULL)
+    d_arc <- if (exists("sa_index_read", mode = "function"))
+      tryCatch(sa_index_read(ENGINE_DIR, APP_DIR), error = function(e) NULL)
+    else tryCatch(read_json_file(file.path(ENGINE_DIR, "library", "archive", "index.json")),
+                  error = function(e) NULL)
     rec_arc <- NULL
     for (x in ((d_arc %||% list())$records %||% list()))
       if (identical(as.character(x$id %||% ""), rid)) { rec_arc <- x; break }

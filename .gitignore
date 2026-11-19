@@ -41,3 +41,6 @@ outputs/
 *.bam
 *.fastq*
 # Only source backups under history/source-backups are intentional.
+
+# 脚本库运行时记录（含某次处理的服务器路径与归属），不进仓库
+engine/library/archive/SA-*/
