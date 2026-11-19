@@ -4803,6 +4803,17 @@ serve_request <- function(con, req) {
     norm_ts <- function(x) {
       s <- trimws(as.character(x %||% ""))
       if (!nzchar(s)) return("")
+      # 纯数字一律按 epoch 秒解读（2026-11-18 修）。
+      #   执行端上报产物时间给的是 mtime_epoch（Unix 秒），原来只做字符串截断，
+      #   于是 "1795008558" 被整串拿去和 "2026-11-18T21:01:06" 比大小：
+      #   首字符 '1' < '2'，刚跑完的产物被判成"早于本题次开始"，merge 因此被拒。
+      #   先换算成同一格式的本地时间串再比；跨机时钟不必一致，但格式必须一致。
+      if (grepl("^[0-9]+$", s)) {
+        ep <- suppressWarnings(as.numeric(s))
+        if (!is.na(ep) && ep > 0)
+          return(format(as.POSIXct(ep, origin = "1970-01-01", tz = "Asia/Shanghai"),
+                        "%Y-%m-%dT%H:%M:%S"))
+      }
       s <- gsub(" ", "T", s, fixed = TRUE)
       if (nchar(s) > 19L) s <- substr(s, 1L, 19L)
       s
@@ -5102,7 +5113,12 @@ serve_request <- function(con, req) {
       #   结果是判据修好之后同一个 exec 也交不进判定，只能整步重跑。
       #   这里只放行「同一条 req 的再次申报」，继续走判定；
       #   首次拒绝凭据原样保留，另存一份 recheck 记录说明被哪一次取代。
-      rejudge <- identical(sess_chr(prior_attempt$status), "done") &&
+      # 上一轮失败、这一轮重跑成功，也必须能重判（2026-11-19 实测）：
+      #   04_filter 首次因入口守卫失败，重跑成功后回写被当成「补录」，
+      #   补录要求已有已验收清单作基线 —— 失败那一轮从没验收过，于是 no_baseline，
+      #   结果是「作业真的算完了却永远写不回去」，只能整条链重来。
+      #   失败/停止不是已验收终态，重跑成功属于重新申报，走正常判定路径。
+      rejudge <- sess_chr(prior_attempt$status) %in% c("done", "failed", "stopped") &&
         !isTRUE(accepted_before) && identical(as.character(stv), "done")
       if (rejudge) {
         tryCatch({

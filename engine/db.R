@@ -198,7 +198,11 @@ db_init <- function(con) {
     "CREATE INDEX IF NOT EXISTS idx_events_attempt ON events(attempt_id, event_seq)",
     "CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, at)",
 
-    # 判定结论（E2）。一个快照一份，不可变。
+    # 判定结论（E2）。每份结论不可变，但同一个快照可以有多份结论。
+    #   为什么不能加 UNIQUE(snapshot_id)（2026-11-18 实测）：
+    #   重判同一环节时用的是同一个 snapshot_id，一加唯一约束，第二次判定
+    #   直接 UNIQUE constraint failed，整份回写被判 verdict_failed，
+    #   链路卡死在该环，重跑多少次都一样。不可变性靠「只插不改」保证。
     "CREATE TABLE IF NOT EXISTS reviews (
        review_id TEXT PRIMARY KEY,
        snapshot_id TEXT NOT NULL,
@@ -211,8 +215,7 @@ db_init <- function(con) {
        at TEXT NOT NULL,
        by_who TEXT NOT NULL,
        checks_json TEXT,
-       payload TEXT,
-       UNIQUE(snapshot_id))",
+       payload TEXT)",
 
     # 返工单（J1）
     "CREATE TABLE IF NOT EXISTS rework_tickets (
@@ -686,9 +689,21 @@ db_latest_attempt <- function(con, version_id, step_id) {
   if (!nrow(r)) NULL else as.list(r[1, ])
 }
 
-db_attempt_by_req <- function(con, req_id) {
+db_attempt_by_req <- function(con, req_id, step_id = NULL) {
   if (is.null(req_id) || !nzchar(req_id)) return(NULL)
-  r <- db_rows(con, "SELECT * FROM step_attempts WHERE req_id = ? LIMIT 1", list(req_id))
+  # 必须按环节限定（2026-11-18 修）：
+  #   整条链共用一个请求号，一次链跑里 doublet / merge / markers … 的 req_id 全一样。
+  #   原来只按 req_id 取第一条，第二环回写拿到的就是第一环那条已验收的 attempt ——
+  #   它的 version_id 与本次不同，于是被判 stale_write「这份回写属于别的版本」，
+  #   每往下一环就必然撞一次，整条链从第二环起永远过不去。
+  #   链条自己也是按 (chain_id, step) 记账的，这里按同一口径限定。
+  stp <- as.character(step_id %||% "")
+  if (nzchar(stp)) {
+    r <- db_rows(con, paste0("SELECT * FROM step_attempts WHERE req_id = ? AND step_id = ? ",
+                             "ORDER BY attempt_no DESC LIMIT 1"), list(req_id, stp))
+  } else {
+    r <- db_rows(con, "SELECT * FROM step_attempts WHERE req_id = ? LIMIT 1", list(req_id))
+  }
   if (!nrow(r)) NULL else as.list(r[1, ])
 }
 

@@ -1798,6 +1798,69 @@ verdict_l4_one <- function(rule, tab, rel, facts) {
       expected = rule, actual = paste0("png ", length(png), " 张"),
       evidence = "回写 artifacts[] 与 png_probe{}"))
   }
+  if (identical(rule, "markers_not_empty")) {
+    # marker 表里到底有没有记录，以及每个簇是不是都算出了 marker。
+    #   为什么补（2026-11-19）：flow_spec 在 markers 环节声明了这条规则，
+    #   判定器里没有实现，落成 not_implemented → 汇总 unknown → 回写被拒。
+    #   实测这次：29 个簇，top15 表 420 行、覆盖 28 个簇，缺 1 个簇 ——
+    #   那是"有簇没显著 marker"的真实情况，该如实说出来，不该判 fail 也不该吞掉。
+    #   能回答的是"表里有记录、覆盖了几个簇"；不能回答"marker 生物学上对不对"。
+    mp <- as.character(facts$marker_product %||% NA)
+    if (is.na(mp) || !nzchar(mp)) {
+      return(vchk("L4", nm, "unknown",
+        "本阶段没有声明该核哪张 marker 表，判不了",
+        expected = rule, actual = "未声明",
+        evidence = "engine/flow_spec.R review$products"))
+    }
+    tf <- verdict_table_for(facts, mp)
+    if (is.null(tf) || is.null(tf$tab)) {
+      return(vchk("L4", nm, "unknown",
+        paste0("回写没带 ", mp, " 的结构，无法核有没有 marker 记录"),
+        expected = rule, actual = "无结构证据",
+        evidence = "回写 tables{}（执行端读该表得到）"))
+    }
+    if (!isTRUE(tf$md5_ok)) {
+      return(vchk("L4", nm, "unknown",
+        "上报的表结构与回写清单的 md5 对不上，不能采信",
+        expected = rule,
+        actual = paste0("结构 md5 ", tf$md5, " / 清单 ", tf$artifact_md5),
+        evidence = paste0(tf$rel, "（执行端读表得到）")))
+    }
+    rows <- suppressWarnings(as.integer(tf$tab$rows %||% NA))
+    if (is.na(rows)) {
+      return(vchk("L4", nm, "unknown", "上报里没有可用的行数",
+        expected = rule, actual = "未给出", evidence = tf$rel))
+    }
+    if (rows <= 0L) {
+      return(vchk("L4", nm, "fail",
+        detail = paste0("数据行 ", rows, "：只有表头，一个 marker 都没有"),
+        expected = rule, actual = paste0("数据行 ", rows),
+        evidence = paste0(tf$rel, " 的数据行数（执行端读表得到）")))
+    }
+    # 覆盖簇数：marker 表里出现的簇，对上 cluster_stats 的簇数。
+    #   两个都读得到才比；读不到就只报"有记录"，并把缺的那层说清楚。
+    with_mk <- suppressWarnings(as.integer((tf$tab$distinct %||% list())$cluster %||% NA))
+    cs <- (facts$tables %||% list())[["5.markers/cluster_stats.xls"]]
+    total_cl <- suppressWarnings(as.integer((cs %||% list())$rows %||% NA))
+    if (!is.na(with_mk) && !is.na(total_cl) && total_cl > 0L && with_mk < total_cl) {
+      return(vchk("L4", nm, "warn",
+        detail = paste0("有 ", rows, " 条 marker 记录，覆盖 ", with_mk, " / ", total_cl,
+                        " 个簇；有 ", total_cl - with_mk,
+                        " 个簇没有达到显著阈值的 marker。",
+                        "这是该有的没有的如实记录，不是判据写错；",
+                        "只说明记录存在与簇覆盖情况，不评价 marker 的生物学合理性"),
+        expected = rule,
+        actual = paste0("rows=", rows, " clusters_with_markers=", with_mk,
+                        " clusters_total=", total_cl),
+        evidence = paste0(tf$rel, " 与 5.markers/cluster_stats.xls（执行端读表得到，md5 已对齐）")))
+    }
+    return(vchk("L4", nm, "pass",
+      detail = paste0("有 ", rows, " 条 marker 记录",
+                      if (!is.na(with_mk)) paste0("，覆盖 ", with_mk, " 个簇") else "",
+                      "。只说明表里有真实记录，不评价 marker 的生物学合理性"),
+      expected = rule, actual = paste0("rows=", rows),
+      evidence = paste0(tf$rel, " 的行数（执行端读表得到，md5 已对齐）")))
+  }
   if (identical(rule, "markers_not_all_genes")) {
     # 只认 top15_markers.xls 这一张表，按名字点名 + md5 对齐。
     #   为什么不能取第一张表：tables 里还有 cluster_stats，
@@ -2166,6 +2229,66 @@ verdict_l4_one <- function(rule, tab, rel, facts) {
       actual = paste0("页 ", slides, " / 图 ", images),
       evidence = paste0(arel, "（verify_delivery.py --step ppt，md5 已对齐）")))
   }
+  # 簇数：只核技术结构，不评价"多少个簇才合适"。
+  #   为什么补（2026-11-18）：flow_spec 在 merge 环节已经声明了这条规则，
+  #   判定器里却没有实现，于是它每轮落成 not_implemented、汇总成 unknown，
+  #   回写被拒。代码自己写着"责任在应用，重跑同一环不可能让一个没写的检查通过"，
+  #   所以这里按 sibling 规则 batch_corrected 的口径补齐：
+  #   能核的是"聚类已落地且编号自洽"，核不了的是"簇数在生物学上是否合适"，
+  #   后者不在 pass 的结论里冒充。
+  if (identical(rule, "cluster_count_in_range")) {
+    bo <- verdict_object_for(facts, "merge_7sample.rds")
+    if (is.null(bo) || is.null(bo$obj))
+      return(vchk("L4", nm, "unknown",
+        "回写没带合并后对象的真实结构，无法核簇数",
+        expected = rule, actual = "无结构证据",
+        evidence = "回写 objects{}（执行端读 RDS 得到）"))
+    if (!isTRUE(bo$md5_ok))
+      return(vchk("L4", nm, "unknown",
+        "上报的对象结构与回写清单的 md5 对不上，不能采信",
+        expected = rule, actual = paste0("结构 md5 ", bo$md5, " / 清单 ", bo$artifact_md5),
+        evidence = paste0(bo$rel, "（执行端读对象得到）")))
+    o <- bo$obj
+    n <- suppressWarnings(as.integer(o$n_clusters %||% NA))
+    ids <- as.character(unlist(o$clusters %||% character(0)))
+    cells <- suppressWarnings(as.integer(o$cells %||% NA))
+    if (is.na(n) || n <= 0L)
+      return(vchk("L4", nm, "fail",
+        "对象的簇数读不出或为 0，聚类这一步没有落地",
+        expected = "n_clusters > 0", actual = as.character(n),
+        evidence = paste0(bo$rel, "（执行端读对象得到）")))
+    if (!length(ids))
+      return(vchk("L4", nm, "unknown",
+        "回写没给簇编号清单，无法确认簇数是数出来的还是自报的",
+        expected = "clusters[]", actual = "未给", evidence = bo$rel))
+    if (length(unique(ids)) != length(ids))
+      return(vchk("L4", nm, "fail",
+        "簇编号清单里有重复，簇数不可信",
+        expected = "编号唯一", actual = paste0("清单 ", length(ids), " 项"),
+        evidence = bo$rel))
+    if (length(ids) != n)
+      return(vchk("L4", nm, "fail",
+        "簇数与簇编号清单长度不一致，两者必有一处不实",
+        expected = as.character(length(ids)), actual = as.character(n),
+        evidence = bo$rel))
+    if (is.na(cells) || cells <= 0L)
+      return(vchk("L4", nm, "unknown",
+        "对象细胞数读不出，无法确认簇是细胞分出来的",
+        expected = rule, actual = "未给出", evidence = bo$rel))
+    if (n > cells)
+      return(vchk("L4", nm, "fail",
+        "簇数大于细胞数，聚类结果不可能成立",
+        expected = "簇数 <= 细胞数",
+        actual = paste0(n, " > ", cells), evidence = bo$rel))
+    return(vchk("L4", nm, "pass",
+      detail = paste0("技术结构核验通过：对象 ", cells, " 个细胞、", n,
+                      " 个簇，簇数与编号清单一致。只说明聚类已落地且编号自洽，",
+                      "不评价簇数在生物学上是否合适"),
+      expected = rule,
+      actual = paste0("n_clusters=", n, " cells=", cells),
+      evidence = paste0(bo$rel, "（执行端读对象得到，md5 已对齐）")))
+  }
+
   # 其余规则：没有实现就如实说算不了。
   if (identical(rule, "batch_corrected")) {
     # 只做技术结构核验，不是生物学结论。

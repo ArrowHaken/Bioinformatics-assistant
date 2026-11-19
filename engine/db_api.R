@@ -899,6 +899,17 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
     if (is.na(pid)) pid <- as.character(db_ensure_project(con, owner_key, sr$name %||% sid))
     vid <- sess_id_of(sr$version_id)
     if (is.na(vid)) vid <- as.character(db_ensure_version(con, pid, owner_key))
+    # 建出来的版本号必须写回分析记录（2026-11-18 修）。
+    #   原来只在内存里算一次，sessions.version_id 一直是 NULL ——
+    #   于是每一条回写都会再建一个新版本：doublet 在 V1、merge 在 V2、markers 在 V3……
+    #   同一条分析记录的产物散落在不同版本里，闸门按版本查上游就查不到，
+    #   回写也会被误判成 stale_write。写回之后同一条记录的所有环节共用同一个版本。
+    if (!is.na(pid) && !is.na(vid) &&
+        (is.na(sess_id_of(sr$version_id)) || is.na(sess_id_of(sr$project_id))))
+      tryCatch(DBI::dbExecute(con,
+        "UPDATE sessions SET project_id = COALESCE(project_id, ?),
+                             version_id = COALESCE(version_id, ?)
+         WHERE session_id = ?", list(pid, vid, sid)), error = function(e) NULL)
     rid <- db_ensure_run(con, vid, owner_key, work_root = as.character(sr$run_dir %||% runDir))
   } else {
     # 没有这条分析记录时，顺手把记录建出来。
@@ -924,7 +935,9 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
   ticket_in <- trimws(as.character(b$ticket_id %||% ""))
 
   # 先看这次回写是否对应一个已存在的 attempt（带 req_id 或 ticket_id 的返工回写）。
-  att <- db_attempt_by_req(con, req_id)
+  #   必须带上 step_id：整条链共用一个请求号，不限定环节就会命中上一环那条已验收记录，
+  #   进而被判 stale_write。口径与链条记账 (chain_id, step) 一致。
+  att <- db_attempt_by_req(con, req_id, step_id)
   if (is.null(att) && nzchar(ticket_in)) {
     r <- db_rows(con, "SELECT * FROM step_attempts WHERE ticket_id = ? ORDER BY attempt_no DESC LIMIT 1",
                  list(ticket_in))
