@@ -70,6 +70,65 @@ ref_save <- function(name, b64, note = "", species = "", tissue = "") {
   writeBin(raw, con)
   close(con)
 
+  digest_now <- unname(tools::md5sum(fp))
+
+  # ---- 内容去重（gina 2026-11-19）-------------------------------------
+  #   她的原话：「同一个文件要检查里面的内容，完全一致就只显示这一份，
+  #   如果不一致就存成新的一份」。
+  #
+  #   原来是每传一次就新生成一个 ID、新落一份文件、新加一条索引 ——
+  #   同一个表传三次就在列表里出现三条，磁盘上三份，看不出哪份算数。
+  #
+  #   现在：先算内容的 md5（不是文件名），拿它跟已登记的条目比。
+  #   完全一致 -> 复用那一条，不落新文件；只把这次填的用途说明与物种组织
+  #   补进去（空的不覆盖已有值），并把 original_name 记下传过的文件名。
+  #   不一致 -> 照旧落新的一份。
+  #   为什么按内容而不是文件名：同一个表换个名字传上来还是同一份，
+  #   而两个不同版本的表常常同名。按名字判会两头都错。
+  d <- ref_index_read()
+  dup <- NULL
+  for (x in (d$items %||% list())) {
+    if (!identical(tolower(as.character(x$digest %||% "")), tolower(digest_now))) next
+    # 服务器来源的条目没有本地副本；内容一致时优先复用真正在本地的那一份。
+    if (identical(as.character(x$source %||% ""), "server") &&
+        !nzchar(as.character(x$stored %||% "")) && is.null(dup)) {
+      dup <- x
+      next
+    }
+    dup <- x
+    break
+  }
+
+  if (!is.null(dup)) {
+    # 复用：删掉刚写的那份临时副本，改成更新原条目。
+    unlink(fp)
+    idx <- NA_integer_
+    for (i in seq_along(d$items)) {
+      if (identical(as.character(d$items[[i]]$id %||% ""), as.character(dup$id %||% ""))) {
+        idx <- i; break
+      }
+    }
+    if (!is.na(idx)) {
+      it <- d$items[[idx]]
+      it$note <- as.character(note)
+      if (nzchar(as.character(species %||% ""))) it$species <- as.character(species)
+      if (nzchar(as.character(tissue %||% ""))) it$tissue <- as.character(tissue)
+      # 传过的文件名都留着：同一个内容可能被叫过好几个名字，
+      #   以后按名字找它时不至于找不到。
+      prev <- as.character(unlist(it$aliases %||% list()))
+      prev <- unique(c(prev, as.character(it$name %||% "")))
+      if (!(nm %in% prev)) prev <- c(prev, nm)
+      it$aliases <- as.list(prev[nzchar(prev)])
+      it$reused_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+      it$reuse_count <- as.integer(it$reuse_count %||% 0L) + 1L
+      d$items[[idx]] <- it
+      ref_index_write(d)
+      return(list(ok = TRUE, item = it, duplicate = TRUE, reused = TRUE,
+                  message = paste0("这份表的内容与已登记的「", as.character(it$name %||% ""),
+                                   "」完全一致，已复用那一条，没有多存一份。")))
+    }
+  }
+
   item <- list(
     id = id,
     name = nm,
@@ -77,7 +136,7 @@ ref_save <- function(name, b64, note = "", species = "", tissue = "") {
     bytes = length(raw),
     # 字段名就叫 digest。用 md5（与守卫同一套），不号称 sha256 ——
     #   把 md5 标成 sha256 是"看起来更安全"的谎，校验逻辑按名字走就会错。
-    digest = unname(tools::md5sum(fp)),
+    digest = digest_now,
     note = as.character(note),
     species = as.character(species %||% ""),
     tissue = as.character(tissue %||% ""),
@@ -85,10 +144,9 @@ ref_save <- function(name, b64, note = "", species = "", tissue = "") {
     server_path = "",             # source=server 时，服务器上的绝对路径
     uploaded_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"))
 
-  d <- ref_index_read()
   d$items[[length(d$items) + 1]] <- item
   ref_index_write(d)
-  list(ok = TRUE, item = item)
+  list(ok = TRUE, item = item, duplicate = FALSE)
 }
 
 # ---- 这份依据适不适用于这批数据 -------------------------------------

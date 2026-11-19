@@ -130,9 +130,14 @@ SCRIPTS_FILE <- file.path(ENGINE_DIR, "script_ops.R")
 #   页面刷新后靠它知道自己停在哪、看的是哪一份、那一次的识别结果是什么。
 #   混进 serve.R 会让"记录"和"页面收发"两件事互相牵制。
 SESSIONS_FILE <- file.path(ENGINE_DIR, "sessions.R")
+# 脚本存档（自动入库）：每次环节验收后把实际跑过的脚本登记进库。
+#   为什么单独一个文件：它是「脚本库会自己长大」这条路的唯一写入方，
+#   和 script_ops.R（换脚本/审脚本）职责不同，混在一起会让"登记"和"改文件"互相牵制。
+ARCHIVE_FILE <- file.path(ENGINE_DIR, "script_archive.R")
 HAS_HISTORY <- file.exists(HISTORY_FILE)
 HAS_SCRIPT_OPS <- file.exists(SCRIPTS_FILE)
 HAS_SESSIONS <- file.exists(SESSIONS_FILE)
+HAS_SCRIPT_ARCHIVE <- file.exists(ARCHIVE_FILE)
 # 决策：跑到那一步才生成问题、才发给人。
 #   为什么不复用 gates.json：那份是初始化时把九条一次性抄进 run-dir 的，
 #   本质上是"提前有清单"，正是要改掉的做法。详见 engine/decisions.R 抬头。
@@ -140,6 +145,7 @@ DECISIONS_FILE <- file.path(ENGINE_DIR, "decisions.R")
 HAS_DECISIONS <- file.exists(DECISIONS_FILE)
 if (HAS_HISTORY) source(HISTORY_FILE, local = TRUE)
 if (HAS_SCRIPT_OPS) source(SCRIPTS_FILE, local = TRUE)
+if (HAS_SCRIPT_ARCHIVE) source(ARCHIVE_FILE, local = TRUE)
 if (HAS_SESSIONS) source(SESSIONS_FILE, local = TRUE)
 if (HAS_DECISIONS) source(DECISIONS_FILE, local = TRUE)
 
@@ -202,6 +208,12 @@ if (HAS_RUNS) source(RUNS_FILE, local = TRUE)
 NOTEBOOK_FILE <- file.path(ENGINE_DIR, "notebook_build.R")
 HAS_NOTEBOOK <- file.exists(NOTEBOOK_FILE)
 if (HAS_NOTEBOOK) source(NOTEBOOK_FILE, local = TRUE)
+# 按记录汇编 ipynb：给「生成执行快照 / 生成 notebook / 脚本库下载 ipynb」用。
+#   为什么单独一个文件：它读的是「这条记录实际登记过哪些脚本」，
+#   不是执行端实时推来的流水。两条来源不同，混在一起会让"没有流水"被当成"没有东西可导出"。
+NB_RECORD_FILE <- file.path(ENGINE_DIR, "notebook_from_record.R")
+HAS_NB_RECORD <- file.exists(NB_RECORD_FILE)
+if (HAS_NB_RECORD && HAS_NOTEBOOK) source(NB_RECORD_FILE, local = TRUE)
 REPLAY_FILE <- file.path(ENGINE_DIR, "notebook_replay.R")
 if (file.exists(REPLAY_FILE)) source(REPLAY_FILE, local = TRUE)
 REPLAY_API_FILE <- file.path(ENGINE_DIR, "notebook_replay_api.R")
@@ -1695,11 +1707,62 @@ read_utf8_complete <- function(path) {
 remote_steps_snapshot <- function() {
   if (!file.exists(REMOTE_STEP_FILE)) return(list(steps = list()))
   x <- jsonlite::fromJSON(read_utf8_complete(REMOTE_STEP_FILE), simplifyVector = FALSE)
+  # 迁移来的实例里这份文件只剩 {"items": []}：旧格式的执行端清单在建库时
+  #   已经拆进 step_attempts，文件本身没有 steps 键。以前这里直接 stop()，
+  #   于是每读一次状态就报一次错，页面上每一步都写「尚无运行记录」——
+  #   而记录其实都在库里。缺 steps 当空清单，不是坏文件；
+  #   steps 存在但结构不对的，仍旧报错。
+  if (is.list(x) && is.null(x$steps)) return(list(steps = list()))
   if (!is.list(x) || is.null(x$steps) || !is.list(x$steps) ||
       !all(vapply(x$steps, function(s) is.list(s) &&
         length(s$id) == 1L && is.character(s$id) && nzchar(s$id), TRUE)))
     stop("invalid_remote_steps_snapshot", call. = FALSE)
   x
+}
+
+# 迁移来的记录：每一步到哪了，只能从已验证回写记录重建。
+#   为什么重建成同一份形状：页面读的是「每一步一条记录」，而库里存的是
+#   「每次回写一条 attempt」。同一步有多条历史时取时间最新那条，与
+#   artifact_expected_md5 同一口径 —— 这里答的是这一步现在到哪了，不是流水账。
+#   只读重建：不写回 remote_steps.json，不补造库里没有的步骤。
+remote_steps_from_db <- function(sid = NULL) {
+  sid <- as.character(sid %||% "")
+  if (!nzchar(sid) || !isTRUE(DB_READY)) return(list())
+  rows <- tryCatch(DBI::dbGetQuery(DB_CON, paste0(
+    "SELECT step_id AS step_id, status AS status, ",
+    "COALESCE(verified_at, reported_at) AS t, payload AS payload ",
+    "FROM step_attempts ",
+    "WHERE json_extract(payload, '$.session_id') = ? ",
+    "ORDER BY t ASC"), list(sid)),
+    error = function(e) NULL)
+  if (is.null(rows) || !nrow(rows)) return(list())
+  latest <- list()
+  for (i in seq_len(nrow(rows))) {
+    pl <- tryCatch(jsonlite::fromJSON(rows$payload[[i]], simplifyVector = FALSE),
+                   error = function(e) NULL)
+    if (is.null(pl)) pl <- list()
+    step <- as.character(rows$step_id[[i]] %||% "")
+    if (!nzchar(step)) step <- as.character(pl$step %||% "")
+    if (!nzchar(step)) next
+    stv <- as.character(rows$status[[i]] %||% "")
+    latest[[step]] <- list(
+      id = step,
+      title = as.character(pl$title %||% ""),
+      status = if (identical(stv, "verified")) "done"
+               else if (identical(stv, "rejected")) "failed" else stv,
+      code = if (is.null(pl$code)) NULL else pl$code,
+      log = as.character(pl$log %||% ""),
+      artifacts = pl$artifacts %||% list(),
+      imported_at = as.character(rows$t[[i]] %||% ""),
+      req_id = as.character(pl$req_id %||% ""),
+      exec_id = as.character(pl$exec_id %||% ""),
+      session_id = sid,
+      run_dir = as.character(pl$run_dir %||% ""),
+      subs = pl$subs %||% list(),
+      source = "verified_writeback",
+      migrated = TRUE)
+  }
+  unname(latest)
 }
 
 remote_status_projection <- function(steps) {
@@ -3338,7 +3401,7 @@ serve_request <- function(con, req) {
       h <- curl::new_handle(timeout = 6, connecttimeout = 4)
       if (length(hdrs)) curl::handle_setheaders(h, .list = hdrs)
       r <- curl::curl_fetch_memory(
-        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis", handle = h)
+        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis-assistant", handle = h)
       if (r$status_code != 200L) stop(paste0("网关返回 ", r$status_code))
       jsonlite::fromJSON(rawToChar(r$content), simplifyVector = FALSE)
     }, error = function(e) list(error = conditionMessage(e)))
@@ -3541,20 +3604,94 @@ serve_request <- function(con, req) {
 
   if (p == "/api/notebook/build" && identical(req$method, "POST")) {
     if (!HAS_NOTEBOOK)
-      return(send_json(con, 400, list(ok = FALSE, error = "缺少 engine/notebook_build.R")))
-    b <- body_json()
-    sid_nb <- trimws(as.character(record_preflight$target$sid %||% ""))
-    access <- record_preflight$access
-    store <- nb_store_dir(APP_DIR, sid_nb)
-    session_nb <- tryCatch(sess_find(APP_DIR, sid_nb), error = function(e) NULL)
-    synced <- tryCatch({ if (!is.null(session_nb)) nb_sync_local(APP_DIR, session_nb); TRUE },
-      error = function(e) e)
-    if (inherits(synced, "error")) return(send_json(con, 409, list(ok = FALSE, error = conditionMessage(synced))))
-    out <- tryCatch(nb_build_export(store, session_nb$name %||% NULL),
-      error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-    out$session_id <- sid_nb
-    return(send_json(con, if (isTRUE(out$ok)) 200 else 400,
-                     c(out, record_cap_fields(access$cap))))
+      return(send_json(con, 400, list(ok = FALSE, code = "notebook_module_missing",
+        error = "缺少 engine/notebook_build.R")))
+    # ---- 整段包一层，永远不带裸 500 ------------------------------------
+    #   gina 2026-11-19 报「生成 notebook 请求未完成（HTTP 500）」。
+    #   裸 500 的 body 里没有 code，页面只能显示一句 HTTP 状态码 ——
+    #   那句话既不能定位，也看着像服务挂了，实际只是某一步 throw 了。
+    #   现在无论卡在哪一步，都回 400 + 具体 code + 中文原因，页面能直接显示。
+    nb_res <- tryCatch({
+      b <- body_json()
+      sid_nb <- trimws(as.character(record_preflight$target$sid %||% ""))
+      access <- record_preflight$access
+      if (!nzchar(sid_nb))
+        return(list(ok = FALSE, code = "session_missing", status = 400L,
+                    error = "没有指定分析记录，导不出 notebook。"))
+      store <- nb_store_dir(APP_DIR, sid_nb)
+      session_nb <- tryCatch(sess_find(APP_DIR, sid_nb), error = function(e) NULL)
+      # 先把这条记录自己的流水同步过来（仅 local 模式会成功，server 模式返回 FALSE 不算错）。
+      synced <- tryCatch({ if (!is.null(session_nb)) nb_sync_local(APP_DIR, session_nb); TRUE },
+                         error = function(e) e)
+      if (inherits(synced, "error"))
+        return(list(ok = FALSE, code = "ledger_sync_failed", status = 409L,
+                    error = paste0("同步执行流水失败：", conditionMessage(synced))))
+      out <- tryCatch(nb_build_export(store, session_nb$name %||% NULL),
+                      error = function(e) list(ok = FALSE, code = "build_error",
+                                               error = conditionMessage(e)))
+      # ---- 没有流水时不再直接失败 --------------------------------------
+      #   这里只认 state/notebooks/<sid>/status/cells.jsonl，而那份流水只有
+      #   助手推、且只对 local 模式同步（nb_sync_local 对 server 模式直接返回
+      #   FALSE）。于是一条 server 模式的记录点「生成执行快照」或「生成
+      #   notebook」永远是 no_cells_file —— 按钮看着能用，实际是死路。
+      #   现在：流水在就按流水汇编（证据最硬）；流水不在，就按这条记录实际
+      #   登记过的脚本汇编，并把这个来源如实写进 notebook 元数据，不冒充
+      #   "有执行流水"。
+      source_used <- "ledger"
+      if (!isTRUE(out$ok) && identical(as.character(out$code %||% ""), "no_cells_file")) {
+        fb <- if (isTRUE(HAS_NB_RECORD))
+          tryCatch(nfr_cells_for_session(APP_DIR, ENGINE_DIR, DB_CON, sid_nb),
+                   error = function(e) list(ok = FALSE, code = "fallback_error",
+                                            error = conditionMessage(e)))
+        else list(ok = FALSE, code = "notebook_module_missing",
+                  error = "缺少 engine/notebook_from_record.R")
+        if (!isTRUE(fb$ok)) {
+          out <- list(ok = FALSE, code = as.character(fb$code %||% "no_cells_file"),
+                      error = paste0("这条记录既没有执行流水，脚本库里也没有登记过它的脚本，",
+                                     "因此导不出 notebook。",
+                                     if (nzchar(as.character(fb$error %||% "")))
+                                       paste0("（", as.character(fb$error), "）") else "",
+                                     "先跑完一个环节（验收通过）之后再试。"))
+        } else {
+          w <- tryCatch({
+            nb_with_lock(store, function() {
+              dst <- nb_cells_file(store)
+              dir.create(dirname(dst), showWarnings = FALSE, recursive = TRUE)
+              lines <- vapply(fb$cells, function(x)
+                as.character(jsonlite::toJSON(x, auto_unbox = TRUE, null = "null", digits = NA)), "")
+              tmp <- tempfile(".fromrec-", tmpdir = dirname(dst))
+              writeLines(lines, tmp, useBytes = TRUE)
+              if (!file.rename(tmp, dst)) stop("无法写入流水文件")
+              TRUE
+            })
+          }, error = function(e) e)
+          if (inherits(w, "error")) {
+            out <- list(ok = FALSE, code = "ledger_write_failed",
+                        error = paste0("写入流水失败：", conditionMessage(w)))
+          } else {
+            out <- tryCatch(nb_build_export(store, session_nb$name %||% NULL),
+                            error = function(e) list(ok = FALSE, code = "build_error",
+                                                     error = conditionMessage(e)))
+            source_used <- "record_scripts"
+          }
+        }
+      }
+      out$session_id <- sid_nb
+      if (isTRUE(out$ok)) out$source <- source_used
+      out
+    }, error = function(e) list(ok = FALSE, code = "notebook_build_exception",
+                                 error = paste0("生成 notebook 时出错：", conditionMessage(e))))
+
+    # 兜底：任何落下来的结果都必须带可读原因，不能只有状态码。
+    if (!isTRUE(nb_res$ok)) {
+      if (!nzchar(as.character(nb_res$code %||% "")))
+        nb_res$code <- "notebook_build_failed"
+      if (!nzchar(as.character(nb_res$error %||% "")))
+        nb_res$error <- "没有生成 notebook，原因未记录。"
+      nb_res$ok <- FALSE
+    }
+    capf <- tryCatch(record_cap_fields(record_preflight$access$cap), error = function(e) list())
+    return(send_json(con, if (isTRUE(nb_res$ok)) 200L else 400L, c(nb_res, capf)))
   }
 
   if (p == "/api/notebook/download" && identical(req$method, "GET")) {
@@ -5476,6 +5613,39 @@ serve_request <- function(con, req) {
                                  error = conditionMessage(e)))
     }
 
+    # ---- 脚本自动入库 --------------------------------------------------
+    #   gina 2026-11-19：「我需要你把脚本自动存进脚本库，这个功能要做好」。
+    #   为什么放在这个位置：/api/step/import 是每一次环节回写唯一必经的点，
+    #   判定结果也刚好在这里出来 —— 有判定才知道这一次算成功还是退回。
+    #   只登记实际跑过、且带 fingerprint 的脚本；探针步骤不登记。
+    #   内容只在能证明字节一致时才收（script_archive.R 里的第一条规则），
+    #   拿不到就如实标 content_missing，不伪造一份副本。
+    if (HAS_SCRIPT_ARCHIVE && nzchar(sid_step) && !is_probe &&
+        stv %in% c("done", "failed")) {
+      tryCatch({
+        s0a <- if (HAS_SESSIONS) tryCatch(sess_find(APP_DIR, sid_chk), error = function(e) NULL) else NULL
+        sa_register(
+          APP_DIR, ENGINE_DIR,
+          sid = sid_chk,
+          session_name = as.character((s0a %||% list())$name %||% ""),
+          run_dir = as.character((s0a %||% list())$run_dir %||% b$run_dir %||% ""),
+          step = sid_step,
+          script_path = as.character(b$script_path %||% b$script %||% ""),
+          script_md5 = as.character(b$script_md5 %||% b$script_digest %||% ""),
+          attempt_id = as.character((db_report %||% list())$attempt_id %||% b$req_id %||% ""),
+          # 归属：脚本库要按使用者隔离，登记时就要带上，否则后续无法过滤。
+          owner_key = as.character(owner_ctx_key(owner_ctx) %||% ""),
+          ok = isTRUE((db_report %||% list())$accepted) || identical(stv, "done"))
+      }, error = function(e) {
+        # 入库失败不能把一次已经合格的验收变成失败：记一条事件，人能从状态里看到。
+        tryCatch(db_event(DB_CON, "script_archive_error",
+                          owner_key = owner_ctx_key(owner_ctx),
+                          step_id = sid_step,
+                          payload = list(why = conditionMessage(e))),
+                 error = function(e2) NULL)
+      })
+    }
+
     # ---- 应用侧质检 + 台账写入 ----
     #   为什么放在这里：/api/step/import 是这个 handler 里唯一必经的点。
     #   之前放在 envcheck 的回写块里，那段永远不会被这一步执行到 ——
@@ -5768,6 +5938,12 @@ serve_request <- function(con, req) {
       # 只报当前这条分析的进度：全局表里混着别的分析时，
       #   页面上的状态灯会显示别人跑到哪了。
       d <- remote_steps_read(log_sid)
+      # 迁移来的记录：回写清单只剩空壳，进度只能从已验证回写记录重建。
+      #   不重建的话每一步都写「尚无运行记录」，而它其实早跑完、也验收过了。
+      if (!length(d$steps)) {
+        rebuilt2 <- tryCatch(remote_steps_from_db(log_sid), error = function(e) list())
+        if (length(rebuilt2)) d$steps <- rebuilt2
+      }
       d$steps <- lapply(d$steps, function(x) {
         if (!nzchar(record_trim(x$session_id))) x$session_id <- log_sid
         if (!nzchar(record_trim(x$run_dir))) x$run_dir <- runDir
@@ -8363,11 +8539,135 @@ serve_request <- function(con, req) {
     if (!file.exists(f)) return(send_json(con, 200, list(ok = FALSE, error = "没有脚本存档")))
     d <- tryCatch(read_json_file(f), error = function(e) NULL)
     if (is.null(d)) return(send_json(con, 200, list(ok = FALSE, error = "存档索引读不出来")))
+    # ---- 逐文件核对实体在不在（gina 2026-11-19）------------------------
+    #   她的问题：「这两个记录都读不到脚本，前端为什么还会有这个内容」。
+    #   原因是列表只按索引画，从没问过存档目录里到底有没有那个文件：
+    #   索引是一条一条登进去的，文件却是另一件事 —— 迁移只搬了索引、
+    #   某次复制失败、或者根本没取回正文，都会变成"列得出来、点开是空的"。
+    #   现在每条文件带上 exists / bytes_now，记录上带 readable 与 missing，
+    #   页面对着这两项决定是给按钮还是标「缺」。
+    #   只读：不补文件、不改索引，缺了就如实说缺。
+    base_arc <- file.path(ENGINE_DIR, "library", "archive")
+    recs <- d$records %||% list()
+
+    # ---- 按使用者隔离（gina 2026-11-19 要求）----------------------------
+    #   以前 archive 是全局一份：谁打开都看到同一批记录，包括别人的分析
+    #   用过的脚本、服务器路径、成功与退回次数。要求是「脚本数据库也要做好
+    #   用户隔离」。
+    #   规则跟记录列表同一套口径，不另立一套：
+    #     · 官方底稿（随应用分发，owner_key 为空）所有人可见 —— 那是产品
+    #       自带的东西，不是某个人的处理历史；
+    #     · 自己的记录自己可见；
+    #     · 管理员可见全部（他要能核对整库）；
+    #     · 记录隔离被显式关掉时，退回"全员可见"，并在返回里标明原因，
+    #       免得有人以为隔离还开着。
+    pol_arc <- if (isTRUE(HAS_ADMIN_POLICY)) record_policy(APP_DIR) else
+      list(record_isolation = TRUE, write_isolation = TRUE)
+    me_key <- as.character(owner_ctx_key(owner_ctx) %||% "")
+    am_admin <- FALSE
+    if (isTRUE(HAS_ADMIN_POLICY)) {
+      a_arc <- tryCatch(admin_identity(APP_DIR, owner_ctx), error = function(e) NULL)
+      am_admin <- isTRUE(a_arc$is_admin)
+    }
+    isolation_on <- isTRUE(pol_arc$record_isolation) && isTRUE(pol_arc$write_isolation)
+    keep_arc <- vapply(recs, function(rec) {
+      own <- trimws(as.character(rec$owner_key %||% ""))
+      if (!nzchar(own)) return(TRUE)          # 官方底稿
+      if (!isolation_on) return(TRUE)         # 隔离被显式关掉
+      if (am_admin) return(TRUE)
+      nzchar(me_key) && identical(own, me_key)
+    }, logical(1))
+    recs <- recs[keep_arc]
+
+    recs <- lapply(recs, function(rec) {
+      rid <- as.character(rec$id %||% "")
+      root <- normalizePath(file.path(base_arc, rid), winslash = "/", mustWork = FALSE)
+      files <- rec$files %||% list()
+      n_ok <- 0L
+      files <- lapply(files, function(x) {
+        rel <- as.character(x$rel %||% "")
+        fp <- if (nzchar(rel)) normalizePath(file.path(root, rel), winslash = "/", mustWork = FALSE) else ""
+        inside <- nzchar(fp) && startsWith(fp, paste0(root, "/"))
+        exists_now <- inside && file.exists(fp)
+        if (isTRUE(exists_now)) n_ok <<- n_ok + 1L
+        c(x, list(
+          exists = isTRUE(exists_now),
+          bytes_now = if (isTRUE(exists_now)) as.numeric(file.size(fp)) else NA_real_,
+          # 索引登记了但正文本来就没收进来（自动入库时本机没有同内容副本）。
+          #   这和"文件丢了"是两种不同的缺，页面分开说，人才知道该不该找回来。
+          never_stored = isTRUE(x$content_missing)))
+      })
+      # 直接改原列表字段，不要再用 c(rec, list(files=...))：
+      #   rec 里已经有 files，再追加一个同名元素，jsonlite 会写成
+      #   files 与 files.1 两个键 —— 页面读的是旧的那个，核对结果白算一遍。
+      rec$files <- files
+      rec$dir_exists <- dir.exists(root)
+      rec$readable <- n_ok
+      rec$missing <- length(files) - n_ok
+      rec
+    })
     return(send_json(con, 200, list(ok = TRUE, built_at = as.character(d$built_at %||% ""),
-                                    records = d$records)))
+                                    records = recs)))
   }
 
   # 存档里的脚本正文。只放行存档目录下的文件，不做任意路径读取。
+  # ---- 按一条脚本库记录下载 ipynb（gina 2026-11-19 要求）------------
+  #   她要在「按记录」每个条目右侧有一个下载 ipynb 的按钮，格式跟
+  #   zjz 机器上那份 scRNA_analysis_GPU.ipynb 一样（含标题写法）。
+  #   导出的是这条记录实际登记过、且存档里有正文的脚本，按流程顺序排列。
+  #   取不到正文的段落只出标题并注明缺失，绝不补一段假代码。
+  if (p == "/api/script-archive/notebook" && identical(req$method, "GET")) {
+    if (!isTRUE(HAS_NB_RECORD) || !exists("nfr_from_archive", mode = "function"))
+      return(send_json(con, 503, list(ok = FALSE, code = "notebook_module_missing",
+        error = "缺少 engine/notebook_from_record.R")))
+    rid <- as.character(qget(q, "record") %||% "")
+    if (!nzchar(rid)) return(send_json(con, 400, list(ok = FALSE, error = "缺 record")))
+    if (grepl("\\.\\.", rid) || grepl("[/\\\\]", rid))
+      return(send_json(con, 400, list(ok = FALSE, error = "record 不合法")))
+    # 可见性：与列表同一口径（官方底稿所有人可见，其余按归属）。
+    if (exists("sa_visible", mode = "function")) {
+      vis2 <- sa_visible(ENGINE_DIR,
+                         owner_key = as.character(owner_ctx_key(owner_ctx) %||% ""),
+                         is_admin = local({
+                           a0 <- tryCatch(admin_identity(APP_DIR, owner_ctx),
+                                          error = function(e) NULL)
+                           isTRUE(a0$is_admin) }),
+                         isolation_on = local({
+                           p0 <- if (isTRUE(HAS_ADMIN_POLICY)) record_policy(APP_DIR) else
+                             list(record_isolation = TRUE, write_isolation = TRUE)
+                           isTRUE(p0$record_isolation) && isTRUE(p0$write_isolation) }))
+      if (!(rid %in% vis2$ids))
+        return(send_json(con, 403, list(ok = FALSE, code = "not_visible",
+          error = "这条脚本记录不属于当前身份")))
+    }
+    d_arc <- tryCatch(read_json_file(file.path(ENGINE_DIR, "library", "archive", "index.json")),
+                      error = function(e) NULL)
+    rec_arc <- NULL
+    for (x in ((d_arc %||% list())$records %||% list()))
+      if (identical(as.character(x$id %||% ""), rid)) { rec_arc <- x; break }
+    if (is.null(rec_arc))
+      return(send_json(con, 404, list(ok = FALSE, code = "record_missing",
+        error = "没有这条脚本记录")))
+    built <- tryCatch(nfr_from_archive(ENGINE_DIR, rec_arc),
+                      error = function(e) list(ok = FALSE, code = "build_failed",
+                                               error = conditionMessage(e)))
+    if (!isTRUE(built$ok))
+      return(send_json(con, 400, list(ok = FALSE,
+        code = as.character(built$code %||% "build_failed"),
+        error = as.character(built$error %||% "生成失败"))))
+    txt <- as.character(jsonlite::toJSON(built$notebook, auto_unbox = TRUE,
+                                         null = "null", pretty = TRUE, digits = NA))
+    bytes <- charToRaw(enc2utf8(txt))
+    fname <- paste0(gsub("[^A-Za-z0-9._-]", "_", rid), ".ipynb")
+    hdr <- paste0("HTTP/1.1 200 OK\r\n",
+                  "Content-Type: application/x-ipynb+json\r\n",
+                  "Content-Length: ", length(bytes), "\r\n",
+                  "Content-Disposition: attachment; filename=\"", fname, "\"\r\n",
+                  "Cache-Control: no-store\r\nConnection: close\r\n\r\n")
+    writeBin(c(charToRaw(hdr), bytes), con); flush(con)
+    return(invisible(NULL))
+  }
+
   if (p == "/api/archive-read") {
     rid <- as.character(q$record %||% "")
     rel <- as.character(q$rel %||% "")
@@ -8375,6 +8675,22 @@ serve_request <- function(con, req) {
       return(send_json(con, 400, list(ok = FALSE, error = "缺 record 或 rel")))
     if (grepl("\\.\\.", rid) || grepl("\\.\\.", rel))
       return(send_json(con, 400, list(ok = FALSE, error = "路径不合法")))
+    # 读正文也要过可见性：列表挡住了、这条路不挡，等于给了个绕过去的门。
+    if (exists("sa_visible", mode = "function")) {
+      visr <- sa_visible(ENGINE_DIR,
+                         owner_key = as.character(owner_ctx_key(owner_ctx) %||% ""),
+                         is_admin = local({
+                           a0 <- tryCatch(admin_identity(APP_DIR, owner_ctx),
+                                          error = function(e) NULL)
+                           isTRUE(a0$is_admin) }),
+                         isolation_on = local({
+                           p0 <- if (isTRUE(HAS_ADMIN_POLICY)) record_policy(APP_DIR) else
+                             list(record_isolation = TRUE, write_isolation = TRUE)
+                           isTRUE(p0$record_isolation) && isTRUE(p0$write_isolation) }))
+      if (!(rid %in% visr$ids))
+        return(send_json(con, 403, list(ok = FALSE, code = "not_visible",
+          error = "这条脚本记录不属于当前身份")))
+    }
     base <- normalizePath(file.path(ENGINE_DIR, "library", "archive", rid), winslash = "/", mustWork = FALSE)
     fp <- normalizePath(file.path(base, rel), winslash = "/", mustWork = FALSE)
     if (!startsWith(fp, paste0(base, "/")) || !file.exists(fp))
@@ -8922,6 +9238,48 @@ serve_request <- function(con, req) {
         if (!nzchar(rel) || rel %in% seen) next
         seen <- c(seen, rel)
         items[[length(items) + 1L]] <- x
+      }
+      # 迁移来的记录必须能从已验证记录补出产物清单。
+      #   原实例的执行端清单在建库时已拆进 step_attempts，remote_steps.json
+      #   只剩空壳，record_artifact_index_read 那份也从未写过 —— 于是上面两处
+      #   都列不出东西，页面写「还没有产物」，而镜像里躺着 195 个真实文件。
+      #   只读回退：按本会话已验证记录重拼，同一 rel 取最新一条，与
+      #   artifact_expected_md5 同一口径。不推测、不补造不存在的文件。
+      if (length(items) == 0L && isTRUE(DB_READY)) {
+        rowsA <- tryCatch(DBI::dbGetQuery(DB_CON, paste0(
+          "SELECT a.payload AS payload, COALESCE(a.verified_at, a.reported_at) AS t ",
+          "FROM step_attempts a ",
+          "WHERE a.status = 'verified' ",
+          "AND json_extract(a.payload, '$.session_id') = ? ",
+          "ORDER BY t ASC"), list(sid_art)),
+          error = function(e) NULL)
+        byRel <- list()
+        if (!is.null(rowsA) && nrow(rowsA)) {
+          for (iA in seq_len(nrow(rowsA))) {
+            pA <- tryCatch(jsonlite::fromJSON(rowsA$payload[[iA]], simplifyVector = FALSE),
+                           error = function(e) NULL)
+            if (is.null(pA)) next
+            for (aA in (pA$artifacts %||% list())) {
+              relA <- gsub("\\\\", "/", as.character(if (is.list(aA)) aA$rel %||% "" else aA))
+              if (!nzchar(relA)) next
+              byRel[[relA]] <- aA   # 后写覆盖先写 = 取时间最新的一条
+            }
+          }
+        }
+        for (relA in names(byRel)) {
+          if (relA %in% seen) next
+          aA <- byRel[[relA]]
+          extA <- paste0(".", tolower(tools::file_ext(relA)))
+          kindA <- ARTIFACT_KINDS[[extA]]
+          if (is.null(kindA)) kindA <- "其他"
+          szA <- suppressWarnings(as.numeric(if (is.list(aA)) aA$bytes %||% NA else NA))
+          items[[length(items) + 1L]] <- list(
+            rel = relA, name = basename(relA), kind = kindA,
+            size = if (is.finite(szA)) szA else NULL,
+            mtime = as.character(if (is.list(aA)) aA$mtime %||% "" else ""),
+            step = "", step_title = "", full = NULL)
+          seen <- c(seen, relA)
+        }
       }
       listed <- length(items) > 0
       # 给每个产物标三件事：能不能在应用里看、多大、取回了没有。

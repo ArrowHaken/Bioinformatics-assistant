@@ -9,7 +9,7 @@ pa_platform_identity <- function(req) {
   if (!length(headers)) stop('identity_unavailable', call. = FALSE)
   h <- curl::new_handle(timeout = 6, connecttimeout = 3, followlocation = FALSE)
   curl::handle_setheaders(h, .list = headers)
-  r <- curl::curl_fetch_memory('https://artifact.catsco.cc/_gateway/me?app=personal-analysis', handle = h)
+  r <- curl::curl_fetch_memory('https://artifact.catsco.cc/_gateway/me?app=personal-analysis-assistant', handle = h)
   if (r$status_code != 200L) stop('identity_unavailable', call. = FALSE)
   identity <- jsonlite::fromJSON(rawToChar(r$content), simplifyVector = FALSE)
   if (!is.list(identity) || !isTRUE(identity$authenticated)) stop('identity_unavailable', call. = FALSE)

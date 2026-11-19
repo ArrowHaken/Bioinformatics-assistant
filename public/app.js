@@ -1044,6 +1044,10 @@ function openAdminDialog() {
 }
 
 function adminSwitchRow(id, title, on, note) {
+  // note 为空时不渲染那一段。
+  //   gina 2026-11-19 把面板里那几行说明整块划掉了：她要的是一个开关本身，
+  //   不是一段解释。留着空 <p> 还会多出一行空白。
+  const n = String(note || '');
   return '<div class="card card-pad" style="margin-bottom:10px">'
     + '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">'
     + '<b>' + esc(title) + '</b>'
@@ -1053,7 +1057,7 @@ function adminSwitchRow(id, title, on, note) {
     + ' data-admin-target="' + (on ? 'false' : 'true') + '">'
     + (on ? '关闭隔离' : '打开隔离') + '</button>'
     + '</div>'
-    + '<p class="small" style="margin:8px 0 0">' + esc(note) + '</p>'
+    + (n ? ('<p class="small" style="margin:8px 0 0">' + esc(n) + '</p>') : '')
     + '</div>';
 }
 
@@ -1066,23 +1070,36 @@ function renderAdminBody() {
     host.innerHTML = '<div class="small">读不到权限设置：' + esc(a.error || '未知原因') + '</div>';
     return;
   }
+  // 非主人：不给任何可操作的开关（gina 2026-11-19）。
+  //   她的原话：「应该只有账号主人可以做到」；并且接受退一步的方案：
+  //   「非主人账号点击关闭是无效的，弹出无效的弹窗」。
+  //   这里两层都做：面板里不渲染任何按钮，后端 POST 也已经 403 ——
+  //   前端不给入口只是不让人点了才被拒，真正的边界在后端。
   if (!a.is_admin) {
     if (note) note.textContent = '';
-    host.innerHTML = '<div class="small">这个入口只对应用所属机器人的主人开放。'
-      + '当前身份不是管理员，无法修改隔离设置。</div>';
+    host.innerHTML = '<div class="rz bad" style="margin:0"><span class="mk">!</span>'
+      + '<span><b>无效操作</b>：这个入口只对应用所属机器人的主人开放。'
+      + '当前账号（' + esc((a.me && (a.me.username || a.me.uid || a.me.owner_key)) || '未识别') + '）不是主人，'
+      + '不能查看或修改隔离设置。</span></div>';
     return;
   }
   const p = a.policy || S.policy || { record_isolation: true, write_isolation: true };
-  if (note) note.textContent = p.updated_at ? ('上次修改 ' + String(p.updated_at).replace('T', ' ')) : '还没改过';
-  let h = '';
-  h += adminSwitchRow('record_isolation', '记录隔离（用户记录互相可见）',
-    p.record_isolation !== false,
-    '开启时每个人只能看到自己的分析记录和别人显式共享的。关闭后，任何已登录用户都能看到全部记录。');
-  h += adminSwitchRow('write_isolation', '修改权限隔离（别人能不能改）',
-    p.write_isolation !== false,
-    '开启时别人只能看、不能改；也包括不能让助手改应用代码（脚本库里的脚本）。关闭后任何已登录用户都能改别人的记录、也能让助手改代码。');
-  h += '<p class="small">开关存到本应用配置里，刷新即生效。每次修改都留审计记录。</p>';
-  host.innerHTML = h;
+  // 上次是谁改的：只写日志不够，人打开面板就该看到上一手。
+  if (note) {
+    const who = (p.updated_by_username && p.updated_by_username !== '')
+      ? p.updated_by_username
+      : ((p.updated_by && p.updated_by !== '') ? p.updated_by : '');
+    note.textContent = p.updated_at
+      ? ('上次修改 ' + String(p.updated_at).replace('T', ' ') + (who ? (' · ' + who) : ''))
+      : '还没改过';
+  }
+  // 只留一个开关：记录隔离（gina 2026-11-19）。
+  //   她的原话：「截图1里红框的部分都去掉，就留下一个，因为你现在修改权限隔离
+  //   实际上是不存在的」。那个开关不产生真实效果，摆着会让人以为改了就有用。
+  //   后端 write_isolation 仍保持原值（默认开启），只是不再给一个假的旋钮。
+  //   说明段落也一并去掉 —— 红框覆盖的就是这几行字。
+  host.innerHTML = adminSwitchRow('record_isolation', '记录隔离（用户记录互相可见）',
+    p.record_isolation !== false, '');
 }
 
 async function toggleAdminSwitch(id, target) {
@@ -1379,7 +1396,10 @@ function renderRefPicker() {
       + '<span class="small" id="litMsg"></span></div>';
   }
 
-  sheet('注释依据 · ' + (stepTitleCN(stepId) || stepId || '注释'), h);
+  // key 固定：三个页签是同一条选择的三个答案，切换只换这张卡里的内容，
+  //   卡本身（位置、宽高、层数、遮罩）一次定了就不动。
+  //   以前这里每切一次页签就新建一层浮层，旧的不关，于是看起来像三个弹窗。
+  sheet('注释依据 · ' + (stepTitleCN(stepId) || stepId || '注释'), h, null, { key: 'refpicker' });
 }
 
 
@@ -2248,6 +2268,35 @@ const SHEET_STACK = [];
 
 function sheet(title, bodyHTML, footHTML, opts) {
   const o = opts || {};
+  // ---- 同一张卡就地换内容，不叠新的一层 ----
+  //   gina 2026-11-19：「修改选择」里注释依据的三个选项变成三个弹窗，
+  //   切一次页签就多一层，她说「切换就是切换，弹窗大小都不要变」。
+  //   根因是每次重画都新建浮层、旧的不关。需要就地更新的卡带一个 key，
+  //   已开着就只换标题和正文，尺寸、遮罩、层数都不动。
+  if (o.key) {
+    const hit = SHEET_STACK.filter(x => x.key === o.key);
+    if (hit.length) {
+      const top = hit[hit.length - 1];
+      const hd = top.el.querySelector('.sheet-h b');
+      const bd = top.el.querySelector('.sheet-b');
+      if (hd) hd.textContent = title;
+      if (bd) bd.innerHTML = bodyHTML;
+      top.title = title;
+      const ft = top.el.querySelector('.sheet-f');
+      if (footHTML) {
+        if (ft) ft.innerHTML = footHTML;
+        else {
+          const d = document.createElement('div');
+          d.className = 'sheet-f';
+          d.innerHTML = footHTML;
+          top.el.querySelector('.sheet-box').appendChild(d);
+        }
+      } else if (ft && ft.parentNode) {
+        ft.parentNode.removeChild(ft);
+      }
+      return top.el;
+    }
+  }
   const box = document.createElement('div');
   // 第一层保留 id=stSheet：页面里不少地方按这个 id 找浮层（刷新内容、判断开没开）。
   //   第二层起换成 stSheet2/3…，这样"关掉最上面一层"不会误伤下面那层。
@@ -2270,7 +2319,7 @@ function sheet(title, bodyHTML, footHTML, opts) {
     if (e.key === 'Escape') closeSheet(box);
   });
   document.body.appendChild(box);
-  SHEET_STACK.push({ el: box, title: title });
+  SHEET_STACK.push({ el: box, title: title, key: o.key || '' });
   // 顶部工具条：层数 >1 时给出「返回」，让人知道自己在第几层
   const hd = box.querySelector('.sheet-h');
   if (hd && SHEET_STACK.length > 1) {
@@ -5547,6 +5596,12 @@ async function renderLib() {
   // 环节顺序跟流程走，没登记的排后面
   const ORDER = ['env', 'doublet', 'merge', 'markers', 'filter', 'final', 'fullmark',
                  'annotate', 'diff', 'figs', 'enrich', 'ppt', 'pack'];
+  // 「按记录」只列从环境体检起的正式环节（gina 2026-11-19）。
+  //   她的原话：「只需要留下从环境体检开始的脚本内容」。
+  //   未归类的、以及不属于流程的条目（例如只在索引里留了个名字的）
+  //   不再铺进来 —— 那些既不构成一次处理的流程，也读不到正文。
+  const STAGE_ORDER_FROM_ENV = ['env', 'doublet', 'merge', 'markers', 'filter', 'final',
+                                'fullmark', 'annotate', 'diff', 'figs', 'enrich', 'ppt', 'pack'];
   const stepRank = id => {
     const k = ORDER.indexOf(id);
     return k < 0 ? 99 : k;
@@ -5555,22 +5610,18 @@ async function renderLib() {
   let h = '';
 
   // ============ L1 可调用库 ============
-  // L1 里面还分三小层，按"这套脚本从哪来"排：
+  // L1 里面还分两小层，按"这套脚本从哪来"排：
   //   ① Seurat 官方那套脚本（甲方给的第一手）
-  //   ② 服务器上实际在跑的那套
-  //   ③ 我们 AI 补写的 skill
-  // 前两层现在都列不全：Seurat 那套只有甲方给过的那几个文件，
-  //   服务器那套要看那台机器上到底有什么。列不全就如实说列不全，
-  //   并给出"让助手去调研一次"的入口 —— 调研结果会写回这里。
+  //   ② 我们 AI 补写的 skill
+  // 原来的「服务器上的脚本」那一层指向 R3-1026，而那条记录已被移除
+  //   （gina 2026-11-19：她要求把 R2-1022 与 R3-1026 都去掉）。
+  //   留着一个指向不存在记录的层，页面会显示成空壳，比不显示更误导。
+  //   现在服务器上实际在用的脚本改为随每条分析记录自动登记到「按记录」里。
   const l1defs = [
     { key: 'seurat', name: 'Seurat 官方脚本',
       hint: '甲方最初交付的那套脚本，逐样本去双、合并聚类、出 marker 都靠它。',
       recId: 'R1-official',
       gap: '这套只收进了甲方交付过的那些文件，实际在他们服务器上可能还有别的。' },
-    { key: 'server', name: '服务器上的脚本',
-      hint: '远端机器上实际在用的那套，跑一次处理就取一次。',
-      recId: 'R3-1026',
-      gap: '这里只有取回过的那些；服务器上还可能存在没被调用、也就没被取回的脚本。' },
     { key: 'skill', name: 'AI 补写的 skill',
       hint: '我们自己写的技能，服务器没有的部分靠它补。',
       recId: '',
@@ -5580,7 +5631,7 @@ async function renderLib() {
   h += '<details class="libfold" open><summary>'
     + '<span class="libfold-n">L1</span>'
     + '<b>可调用库</b>'
-    + '<span class="libfold-c">3 类 · ' + skills.length + ' 个 skill</span>'
+    + '<span class="libfold-c">2 类 · ' + skills.length + ' 个 skill</span>'
     + '</summary><div class="libfold-b">';
 
   l1defs.forEach(def => {
@@ -5598,7 +5649,8 @@ async function renderLib() {
       items = arr(rec && rec.files)
         .filter(f => f.name && /\.(R|r|py|sh)$/.test(f.name))
         .filter(f => { if (seen[f.name]) return false; seen[f.name] = 1; return true; })
-        .map(f => ({ name: f.name, record: def.recId, rel: f.rel, openable: true }));
+        .map(f => ({ name: f.name, record: def.recId, rel: f.rel, openable: true,
+                     exists: f.exists !== false }));
     }
 
     // 她要求前两层也能折叠：默认收起，点开才铺文件。
@@ -5638,6 +5690,13 @@ async function renderLib() {
       } else {
         h += '<div class="l1files">';
         items.forEach(it => {
+          // 索引里有、存档里没有的，不给按钮：点开只会是空的。
+          //   她的问题就是这一类 —— 列得出来但读不到。
+          if (it.exists === false) {
+            h += '<span class="libfile off" title="索引里有登记，存档目录里没有这个文件">'
+              + esc(it.name) + ' <span class="libfile-n">缺</span></span>';
+            return;
+          }
           h += '<button class="libfile" data-arc-open="' + esc(it.record) + '|' + esc(it.rel) + '">'
             + esc(it.name) + '</button>';
         });
@@ -5667,7 +5726,11 @@ async function renderLib() {
       cur.records.push(rec.id);
       cur.ok += Number(f.used_ok || 0);
       cur.fail += Number(f.used_fail || 0);
-      cur.refs.push({ record: rec.id, rel: f.rel });
+      // 只要有一条记录里这个文件是真能读的，L2 这行就给按钮。
+      //   以前是"最后一条覆盖"，于是最后一条恰好没正文时，
+      //   明明别处有可读副本，这一行却会变成不可点。
+      cur.refs.push({ record: rec.id, rel: f.rel, exists: f.exists !== false });
+      if (f.exists !== false && !cur.live) { cur.live = { record: rec.id, rel: f.rel }; }
       byStage[st][key] = cur;
     });
   });
@@ -5688,10 +5751,17 @@ async function renderLib() {
       + '</summary><div class="libsub-b">';
     list.forEach(it => {
       const ref = it.refs[it.refs.length - 1];
-      h += '<div class="librow">'
-        + '<button class="libfile" data-arc-open="' + esc(ref.record) + '|' + esc(ref.rel) + '">'
-        + esc(it.name) + '</button>'
-        + '<span class="librow-m">'
+      const live = it.live || null;
+      h += '<div class="librow">';
+      // 有一个可读副本就给按钮，一个都没有就标缺并说明。
+      if (live) {
+        h += '<button class="libfile" data-arc-open="' + esc(live.record) + '|' + esc(live.rel) + '">'
+          + esc(it.name) + '</button>';
+      } else {
+        h += '<span class="libfile off" title="只在索引里登记过，存档目录里没有正文">'
+          + esc(it.name) + ' <span class="libfile-n">缺</span></span>';
+      }
+      h += '<span class="librow-m">'
         + '记录 ' + esc(it.records.join('、'))
         + '　成功 ' + it.ok + ' 次' + (it.fail ? '　退回 ' + it.fail + ' 次' : '')
         + '</span></div>';
@@ -5715,23 +5785,49 @@ async function renderLib() {
       const st = String(f.stage || '') || '未归类';
       if (!perStage[st]) perStage[st] = f;
     });
-    const sts = Object.keys(perStage).sort((a, b) => stepRank(a) - stepRank(b));
-    h += '<details class="libsub"><summary>'
+    // 只列「环境体检」及其后的环节（gina 2026-11-19）。
+    //   以前把未归类的、以及不属于正式流程的条目也铺进来，她要求
+    //   「只需要留下从环境体检开始的脚本内容」。
+    //   env 固定排第一：那是每次真跑的第一段，其余按流程顺序。
+    const sts = Object.keys(perStage)
+      .filter(st => STAGE_ORDER_FROM_ENV.indexOf(st) >= 0)
+      .sort((a, b) => stepRank(a) - stepRank(b));
+    // 这条记录到底能读几份：0 份就在标题上明说，不要让人点进去才发现全空。
+    const nLive = files.filter(f => f.exists !== false).length;
+    const recTag = nLive === 0
+      ? '<span class="libsub-c bad">这次没有任何脚本正文</span>'
+      : (nLive < files.length
+        ? '<span class="libsub-c">可读 ' + nLive + ' / ' + files.length + ' 份</span>'
+        : '<span class="libsub-c">' + files.length + ' 份均可读</span>');
+    // 右侧下载：按这条记录汇编一份 ipynb。
+    //   为什么放在记录这一层而不是每个脚本一行：她要的是「这一次处理
+    //   用的整脚本合集」，一个脚本一个 ipynb 反而没法看。
+    const canDl = nLive > 0;
+    const dlBtn = canDl
+      ? '<button class="btn btn-sm" data-rec-nb="' + esc(rec.id) + '"'
+        + ' title="按这条记录登记过的脚本汇编一份 ipynb">下载 ipynb</button>'
+      : '<button class="btn btn-sm" disabled title="这条记录没有可读的脚本正文">下载 ipynb</button>';
+    h += '<div class="librec">'
+      + '<details class="libsub"><summary>'
       + '<span class="libsub-n">' + esc(rec.name || rec.id) + '</span>'
       + '<span class="libsub-c">' + esc(rec.when || '') + ' · ' + sts.length + ' 个环节</span>'
-      + '</summary><div class="libsub-b">'
-      + (rec.where ? '<div class="libhint">' + esc(rec.where) + '</div>' : '')
-      + (rec.note ? '<div class="libhint">' + esc(rec.note) + '</div>' : '');
+      + recTag
+      + '</summary><div class="libsub-b">';
     sts.forEach(st => {
       const f = perStage[st];
       h += '<div class="librow">'
         + '<span class="librow-k">' + esc(stepName(st)) + '</span>'
-        + '<button class="libfile" data-arc-open="' + esc(rec.id) + '|' + esc(f.rel) + '">'
-        + esc(f.name) + '</button>'
+        + (f.exists === false
+          ? '<span class="libfile off" title="存档目录里没有正文">' + esc(f.name)
+            + ' <span class="libfile-n">缺</span></span>'
+          : '<button class="libfile" data-arc-open="' + esc(rec.id) + '|' + esc(f.rel) + '">'
+            + esc(f.name) + '</button>')
         + '<span class="librow-m">' + (f.used_ok ? '成功 ' + f.used_ok + ' 次' : '') + '</span>'
         + '</div>';
     });
-    h += '</div></details>';
+    h += '</div></details>'
+      + '<div class="librec-dl">' + dlBtn + '</div>'
+      + '</div>';
   });
   h += '</div></details>';
 
@@ -5840,6 +5936,46 @@ async function sendL1Probe(key) {
 }
 
 /* 打开存档里的脚本：记录 id + 相对路径 */
+/* 按一条脚本库记录下载 ipynb。
+   ---------------------------------------------------------------------
+   她要的是「这一次处理用的整脚本合集」，所以按记录汇编一份，
+   不是每个脚本一个 ipynb。生成与格式都在后端做（用户要求跟 zjz 机器上
+   那份模板一致：一级标题 + 章节编号｜中文名），前端只负责触发下载。
+   没有可读正文时后端会明确报错，这里把那句话原样显示，不吞掉。 */
+async function downloadRecordNotebook(recordId, btn) {
+  const __recordScope = recordContext();
+  try {
+    const old = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
+    try {
+      const resp = await fetch('/api/script-archive/notebook?record=' + encodeURIComponent(recordId),
+        { credentials: 'same-origin' });
+      if (!resp.ok) {
+        let msg = '生成失败';
+        try {
+          const j = await resp.json();
+          msg = (j && (j.error || j.code)) || msg;
+        } catch (e) { /* 非 JSON，保持通用文案 */ }
+        toast('ipynb：' + msg, 'bad');
+        return;
+      }
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = String(recordId).replace(/[^A-Za-z0-9._-]/g, '_') + '.ipynb';
+      document.body.appendChild(a);
+      try { a.click(); } finally { a.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
+      toast('这份 ipynb 已交给浏览器下载。', 'good');
+    } finally {
+      if (btn) { btn.disabled = false; btn.textContent = old || '下载 ipynb'; }
+    }
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    toast('ipynb：' + String(e.message || e), 'bad');
+  }
+}
+
 async function openArchiveFile(record, rel) {
   const __recordScope = recordContext();
   try {
@@ -8383,6 +8519,9 @@ document.addEventListener('click', async function (ev) {
     openArchiveFile(parts[0], parts.slice(1).join('|'));
     return;
   }
+  // 按记录下载 ipynb：整条记录汇编成一份，不是单脚本。
+  const rnb = t.closest('[data-rec-nb]');
+  if (rnb) { downloadRecordNotebook(rnb.getAttribute('data-rec-nb'), rnb); return; }
 
   /* ---- 脚本四个动作 ---- */
   const sa = t.closest('[data-sw-act]');

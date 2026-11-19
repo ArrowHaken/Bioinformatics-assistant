@@ -254,6 +254,20 @@ record_capability <- function(con, app_dir, sid, owner_ctx) {
   visibility <- record_scalar(row$visibility, "private")
   is_owner <- nzchar(requester) && nzchar(record_owner) && identical(requester, record_owner)
 
+  # 迁移来的记录要能被本人认领。
+  #   owner_key 里存的是 viewer:<伪名>，而伪名是「按应用」发的：同一个平台账号
+  #   在不同应用里拿到的伪名不同。记录从旧应用迁过来，伪名留在了旧应用那一版，
+  #   换新应用后本人再进来伪名已经变了 —— 于是 is_owner 恒为假，
+  #   连读都读不了，更切不过去。这不是数据缺失，是认人认错了。
+  #   伪名不可跨应用对齐，但平台账号本身可以：config/admin_policy.json 里
+  #   显式登记了 uid / username 的账号，按管理员认回来。
+  #   只在配置里点名的人才算，不是「已登录就放行」。
+  is_admin_owner <- FALSE
+  if (!is_owner && exists('admin_identity', mode = 'function')) {
+    a0 <- tryCatch(admin_identity(app_dir, owner_ctx), error = function(e) NULL)
+    is_admin_owner <- isTRUE(a0$is_admin)
+  }
+
   # 两个开关在这里落地，别处不再各写一遍。
   #   record_isolation 关掉 = 已识别的人都能读别人的记录（管理员显式选择）。
   #   write_isolation 关掉 = 已识别的人都能改别人的记录，其中包括让助手改代码。
@@ -263,10 +277,10 @@ record_capability <- function(con, app_dir, sid, owner_ctx) {
   write_open <- identified && !isTRUE(pol$write_isolation)
   read_open <- identified && !isTRUE(pol$record_isolation)
 
-  can_write <- is_owner || write_open
+  can_write <- is_owner || is_admin_owner || write_open
   # 能写必须能读：只放开修改、不放开可见时，会出现「能改但看不到」的状态，
   #   页面于是能切进一条自己读不了的记录 —— 那不是放开权限，那是数据错位。
-  can_read <- is_owner || identical(visibility, "shared") || read_open || can_write
+  can_read <- is_owner || is_admin_owner || identical(visibility, "shared") || read_open || can_write
 
   # The execution context comes from the sessions row. A JSON record cannot
   # supply a missing mode/run_dir and thereby bypass the fail-closed rules.

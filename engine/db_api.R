@@ -94,7 +94,7 @@ db_api_owner <- function(app_dir, req) {
       if (!is.null(au) && nzchar(as.character(au))) hdrs$authorization <- as.character(au)
       if (length(hdrs)) curl::handle_setheaders(h, .list = hdrs)
       r <- curl::curl_fetch_memory(
-        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis", handle = h)
+        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis-assistant", handle = h)
       if (r$status_code != 200L) stop(paste0("gateway ", r$status_code))
       jsonlite::fromJSON(rawToChar(r$content), simplifyVector = FALSE)
     }, error = function(e) list(error = conditionMessage(e)))

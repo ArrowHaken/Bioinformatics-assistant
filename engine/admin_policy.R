@@ -95,11 +95,15 @@ record_policy <- function(app_dir) admin_policy_read(app_dir)
 
 # 回给页面的形状：只有开关和更新时间，不含管理员名单。
 #   名单是部署事实，不该随每个页面响应分发出去。
+#   加上「上次是谁改的」：gina 2026-11-19 要求任何修改都要登记好是谁做的，
+#   只写进 jsonl 不够 —— 人打开这个面板时就该看到上一手是谁。
 record_policy_public <- function(pol = NULL) {
   p <- if (is.null(pol)) admin_policy_default() else pol
   list(record_isolation = isTRUE(p$record_isolation),
        write_isolation = isTRUE(p$write_isolation),
-       updated_at = p$updated_at %||% NULL)
+       updated_at = p$updated_at %||% NULL,
+       updated_by = p$updated_by %||% NULL,
+       updated_by_username = p$updated_by_username %||% NULL)
 }
 
 admin_policy_write <- function(app_dir, record_isolation, write_isolation, actor = NULL,
@@ -109,6 +113,11 @@ admin_policy_write <- function(app_dir, record_isolation, write_isolation, actor
   pol$write_isolation <- isTRUE(write_isolation)
   pol$updated_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
   pol$updated_by <- if (is.null(actor) || is.na(actor)) "" else as.character(actor)
+  # 谁改的，除了 owner_key 还要存平台账号。
+  #   owner_key 是应用内伪名，人看不出这是谁；用户名和 uid 才是人能对上号的。
+  #   gina 2026-11-19：任何修改都要登记好是谁做的。
+  pol$updated_by_username <- if (is.null(username) || is.na(username)) "" else as.character(username)
+  pol$updated_by_uid <- if (is.null(uid) || is.na(uid)) "" else as.character(uid)
   # 管理员第一次成功操作后记住自己的 owner_key。
   if (!is.null(actor) && !is.na(actor) && nzchar(as.character(actor)))
     pol$admin_owner_keys <- unique(c(pol$admin_owner_keys, as.character(actor)))
@@ -171,6 +180,15 @@ record_visibility_query <- function(app_dir, owner_ctx) {
   # 任一隔离被关掉都要给出全部记录：
   #   记录隔离关 = 能读别人的；修改隔离关 = 能改别人的，而能改就必须能读。
   if (!isTRUE(pol$record_isolation) || !isTRUE(pol$write_isolation))
+    return(list(sql = "SELECT session_id, owner_key, visibility, name, updated_at FROM sessions",
+                params = NULL))
+  # 管理员要看得到迁移来的记录。
+  #   迁移记录的 owner_key 里是旧应用发的伪名，伪名按应用发放、跨应用对不上，
+  #   本人换了应用之后靠 owner_key 永远匹配不到自己的历史记录 ——
+  #   列表里看不到，自然也切不进去。
+  #   这里按配置里点名的平台账号认回（uid / username），不是「登录了就全给看」。
+  a <- tryCatch(admin_identity(app_dir, owner_ctx), error = function(e) NULL)
+  if (isTRUE(a$is_admin))
     return(list(sql = "SELECT session_id, owner_key, visibility, name, updated_at FROM sessions",
                 params = NULL))
   key <- if (is.null(owner_ctx)) "" else trimws(as.character(owner_ctx$key %||% ""))

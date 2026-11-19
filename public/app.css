@@ -734,6 +734,16 @@ table.pt tr.changed{background:#fbfdf9}
    颜色跟随所在层，所以同层条目是一个色系、跨层一眼能分开。 */
 /* 条目卡片：左侧一道层色、标题行浅色底。
    她要求"这些条目卡片都要有一些颜色" —— 上色的是条目，不是外面那三张大卡。 */
+/* 「按记录」每个条目：左边是折叠卡片，右边是下载 ipynb。
+   为什么横向排：她要的是"条目的最右侧"有一个下载按钮，跟卡片同一行。
+   窄屏自动换行，不让按钮把标题挤扁。 */
+.librec{display:flex;align-items:flex-start;gap:8px;margin-bottom:7px}
+.librec>.libsub{flex:1 1 auto;min-width:0;margin-bottom:0}
+.librec-dl{flex:0 0 auto;padding-top:2px}
+@media (max-width:720px){
+  .librec{flex-wrap:wrap}
+  .librec-dl{flex:1 1 100%;padding-top:0}
+}
 .libsub{border:1px solid #e4ebe7;border-left:3px solid var(--acc,var(--brand));
   border-radius:8px;margin-bottom:7px;background:#fff;overflow:hidden}
 .libsub>summary{padding:8px 11px 8px 10px;cursor:pointer;list-style:none;
