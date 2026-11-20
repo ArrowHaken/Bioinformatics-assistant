@@ -6021,6 +6021,38 @@ async function requestRecordBodies(recordId, btn) {
   }
 }
 
+/* 打开脚本库里登记过的一个文件（L1 的 skill 文件走这里）。
+   ---------------------------------------------------------------------
+   gina 2026-11-20：「AI 补写的 skill 里面的脚本不可点击查看」。
+   原因是点击处调用了 openLibFile()，但这个函数从来没定义过 ——
+   点了只会抛 ReferenceError，页面上表现为"按钮没反应"。
+   现在补上实现：走 /api/lib-read（只放行库表登记过的路径），
+   复用脚本弹窗显示正文。 */
+async function openLibFile(path) {
+  const __recordScope = recordContext();
+  const t = $('#scriptTitle');
+  if (t) t.textContent = String(path || '').split('/').pop();
+  const b = $('#scriptBody');
+  if (b) b.innerHTML = '<div class="small">正在读…</div>';
+  openDlg('dlgScript');
+  try {
+    const d = await recordAwait(getJSON('/api/lib-read?path=' + encodeURIComponent(path)), __recordScope);
+    if (!d || !d.ok) {
+      if (b) b.innerHTML = '<div class="small">读不到：' + esc((d && d.error) || '未知原因') + '</div>';
+      return;
+    }
+    let h = '<div class="scrmeta">'
+      + '<span><span class="k">文件</span> <b>' + esc(d.name || '') + '</b></span>'
+      + '<span><span class="k">大小</span> ' + fmtSize(d.size)
+      + '　<span class="k">改于</span> ' + esc(d.mtime || '') + '</span></div>';
+    h += '<pre class="scriptcode">' + esc(d.content || '') + '</pre>';
+    if (b) b.innerHTML = h;
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    if (b) b.innerHTML = '<div class="small">读不到：' + esc(String(e.message || e)) + '</div>';
+  }
+}
+
 async function openArchiveFile(record, rel) {
   const __recordScope = recordContext();
   try {
