@@ -5,7 +5,7 @@ run <- function() {
   source('engine/db.R', local = e)
   source('engine/sessions.R', local = e)
   source(Sys.getenv('INTENT_TEST_BRIDGE', 'engine/intent_bridge.R'), local = e)
-  lines <- readLines(Sys.getenv('INTENT_TEST_SERVE', 'serve.R'), warn = FALSE)
+  lines <- readLines(Sys.getenv('INTENT_TEST_SERVE', 'engine/server_main.R'), warn = FALSE)
   first <- grep('^  if \\(p == "/api/intent/import"', lines)
   last <- grep('^  if \\(p == "/api/sessions/new"', lines)
   e$route <- eval(parse(text = paste(c('function() {', lines[first:(last - 1L)], '}'), collapse = '\n')), e)

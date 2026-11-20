@@ -2,7 +2,7 @@
 # Definitions only; all reads/writes below use a fresh temporary state tree.
 local({
   e <- new.env(parent = globalenv())
-  for (x in parse('serve.R')) {
+  for (x in parse('engine/server_main.R')) {
     if (is.call(x) && identical(x[[1]], as.name('<-')) &&
         is.call(x[[3]]) && identical(x[[3]][[1]], as.name('function'))) eval(x, e)
   }

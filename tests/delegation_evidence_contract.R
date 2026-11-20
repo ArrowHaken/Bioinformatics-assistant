@@ -1,5 +1,5 @@
 e <- new.env(parent=globalenv())
-for(x in parse('serve.R')) if(is.call(x)&&identical(x[[1]],as.name('<-'))&&is.call(x[[3]])&&identical(x[[3]][[1]],as.name('function'))) eval(x,e)
+for(x in parse('engine/server_main.R')) if(is.call(x)&&identical(x[[1]],as.name('<-'))&&is.call(x[[3]])&&identical(x[[3]][[1]],as.name('function'))) eval(x,e)
 old <- list(status='delegated',delegated_at='2026-11-06T16:10:01',session_id='B',req_id='r')
 stopifnot(identical(e$rec_display_status(old),'handoff_unconfirmed'))
 confirmed <- old; confirmed$delivered_at <- '2026-11-06T16:10:02'

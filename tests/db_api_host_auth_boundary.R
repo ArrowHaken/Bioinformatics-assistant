@@ -3,7 +3,7 @@
 run_contract <- function() {
   e <- new.env(parent = baseenv())
   # Real owner mapping and request parser, without sourcing serve.R startup.
-  for (file in c('engine/db.R', 'serve.R')) {
+  for (file in c('engine/db.R', 'engine/server_main.R')) {
     wanted <- if (file == 'engine/db.R') 'owner_from_identity' else 'read_request'
     for (x in parse(file)) {
       if (is.call(x) && identical(x[[1]], as.name('<-')) &&

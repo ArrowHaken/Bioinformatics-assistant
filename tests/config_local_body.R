@@ -2,7 +2,7 @@
 # Extract the actual route only; never initialize the server or production state.
 suppressPackageStartupMessages(library(jsonlite))
 `%||%` <- function(a,b) if(is.null(a)||!length(a)) b else a
-text <- readLines('serve.R', warn=FALSE)
+text <- readLines('engine/server_main.R', warn=FALSE)
 a <- grep('^  if \\(p == "/api/config" &&',text)
 b <- grep('^  if \\(p == "/api/run" &&',text)
 stopifnot(length(a)==1L,length(b)==1L,b>a)

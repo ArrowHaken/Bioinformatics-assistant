@@ -7,7 +7,7 @@ load_assignments <- function(path, names, env) {
   }
 }
 e <- new.env(parent = globalenv())
-load_assignments('serve.R', c('SPECIES_ALIASES', 'species_canon', 'flow_record_server',
+load_assignments('engine/server_main.R', c('SPECIES_ALIASES', 'species_canon', 'flow_record_server',
                             'flow_vars', 'remote_step_instruction', 'flow_subs_of'), e)
 e$HAS_SESSIONS <- TRUE; e$HAS_REFERENCE <- FALSE; e$HAS_FLOW <- TRUE
 e$APP_DIR <- '/fixture'; e$pjoin <- file.path
