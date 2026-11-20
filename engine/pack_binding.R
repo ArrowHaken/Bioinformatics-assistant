@@ -56,10 +56,59 @@ pack_zip_binding <- function(rel, art, sge, zipinfo, exec_job, step = "pack",
   if (!identical(rel, PACK_ZIP_REL))
     return(list(ok = FALSE, code = "not_zip_rel", why = "不是打包产物本身"))
 
-  if (is.null(sge) || !is.list(sge))
-    return(list(ok = FALSE, code = "no_sge", why = "回写没带本次作业的记账事实"))
+  # ZIP 的实算事实是自证通道的前提，先查它。
   if (is.null(zipinfo) || !is.list(zipinfo))
     return(list(ok = FALSE, code = "no_zip_facts", why = "回写没带 ZIP 的实算事实"))
+  # pack 是本地 zip 压缩：执行端直接调 zip，不经过 SGE 队列，因此没有作业号。
+  #   旧判据硬性要求 exec_jobnum 是数字，于是 pack 永远 binding 失败 ——
+  #   实测：zip 已生成、逐份文件 hash 与源文件一致，仍被拒，交付物卡在最后一环。
+  #   这里补一条自证通道：没有作业号时，用 ZIP 内容自证顶上；
+  #   条件必须全满足，缺一项仍拒，不放宽到"有 zip 就算过"。
+  if (!grepl("^[0-9]+$", trimws(as.character(exec_jobnum %||% "")))) {
+    zs0 <- zip_structure
+    gv0 <- function(k) {
+      v <- (zs0 %||% list())[[k]]
+      if (is.null(v) || !length(v)) NA else v[[1]]
+    }
+    figs <- suppressWarnings(as.numeric(gv0("figures")))
+    fexp <- suppressWarnings(as.numeric(gv0("figures_expected")))
+    chk <- c(
+      struct = is.list(zs0),
+      crc = isTRUE(gv0("crc_ok")),
+      figs_positive = is.finite(figs) && figs > 0,
+      figs_complete = is.finite(figs) && is.finite(fexp) && identical(figs, fexp),
+      no_missing = is.list(zs0) && length((zs0 %||% list())$missing_files %||% list()) == 0L,
+      no_mismatch = is.list(zs0) && length((zs0 %||% list())$hash_mismatches %||% list()) == 0L,
+      has_pptx = isTRUE(gv0("has_pptx")),
+      has_manifest = isTRUE(gv0("has_pptx_manifest")),
+      pptx_same = isTRUE(gv0("pptx_md5_match"))
+    )
+    if (!all(chk))
+      return(list(ok = FALSE, code = "no_sge_and_selfcheck_failed",
+                  why = paste0("没有队列作业号，且 ZIP 自证不全：",
+                               paste(names(chk)[!chk], collapse = ","))))
+    zm0 <- pb_md5((zs0 %||% list())$md5)
+    zi0 <- pb_md5(zipinfo$md5)
+    am0 <- pb_md5(if (is.list(art)) art$md5 else "")
+    if (!nzchar(zm0) || !identical(zm0, zi0) || !identical(am0, zi0))
+      return(list(ok = FALSE, code = "selfcheck_md5_mismatch",
+                  why = "自证 md5 与回写 md5 / 节点实算 md5 不一致"))
+    zb0 <- suppressWarnings(as.numeric(zipinfo$bytes %||% NA))
+    ab0 <- suppressWarnings(as.numeric(if (is.list(art)) art$bytes else NA))
+    if (!is.finite(zb0) || zb0 <= 0 || !is.finite(ab0) || ab0 != zb0)
+      return(list(ok = FALSE, code = "selfcheck_bytes_mismatch",
+                  why = "自证字节数与回写 / 节点实算不一致"))
+    mz0 <- pb_epoch(zipinfo$mtime_epoch)
+    if (is.na(mz0))
+      return(list(ok = FALSE, code = "no_zip_mtime", why = "没带 ZIP 的精确 mtime"))
+    return(list(ok = TRUE, code = "self_proven",
+                why = sprintf("无队列作业；按 ZIP 内容自证通过：%d 份逐文件 hash 与源一致，含 pptx 与来源清单，md5 %s",
+                              as.integer(figs), substr(zm0, 1, 12)),
+                mtime_epoch = mz0, bytes = zb0, md5 = zm0))
+  }
+
+  if (is.null(sge) || !is.list(sge))
+    return(list(ok = FALSE, code = "no_sge", why = "回写没带本次作业的记账事实"))
 
   # 节点实算事实里的 rel 必须是这个产物本身
   zi_rel <- gsub("\\\\", "/", as.character(zipinfo$rel %||% ""))

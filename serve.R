@@ -5540,6 +5540,23 @@ serve_request <- function(con, req) {
           Sys.chmod(side, "0600")
         }, error = function(e) NULL)
       }
+      # 判定通过就必须落库为 verified。
+      #   这一段以前没有：判定器说 accepted=TRUE，attempt 却仍停在 delegated，
+      #   数据库里没有 verified 行。下游取上游证据时（出图取注释的逐类型计数、
+      #   未定型数、已定型类型集合）查 verified 永远查不到，
+      #   于是「产物完全正确」的一步被判成整串 unknown/fail。
+      #   实测：注释判定通过后，出图的守恒全部失败。这里补齐落库。
+      if (isTRUE(accepted) && !is.null(judge)) {
+        tryCatch({
+          aid2 <- as.character(judge$attempt_id %||% "")
+          if (nzchar(aid2)) {
+            DBI::dbExecute(DB_CON,
+              paste0("UPDATE step_attempts SET status='verified', verified_at=?, payload=? ",
+                     "WHERE attempt_id=?"),
+              list(db_now(), db_json(b), aid2))
+          }
+        }, error = function(e) NULL)
+      }
       # Preserve run-chain bookkeeping; rc_validate above remains the admission gate.
       chain_result <- rc_callback(b, !is.null(judge) && isTRUE(judge$accepted))
       if (stv %in% c("done", "failed", "stopped")) attempt_release_output(APP_DIR, sid_chk, b$req_id)

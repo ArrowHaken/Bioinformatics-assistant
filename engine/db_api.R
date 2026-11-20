@@ -1084,6 +1084,18 @@ db_api_gate <- function(con, app_dir, owner, version_id, step_id) {
   i <- match(step_id, order)
   if (is.na(i) || i <= 1L) return(NULL)
   prev <- order[i - 1L]
+  # 上游若已被后续阶段覆盖（cover_by），就以覆盖它的那一阶段为准。
+  #   为什么（2026-11-19 实测）：annotate 的上游 diff 在 flow_spec 里是
+  #   cover_by="final" —— 终版已按簇做过组间差异，diff 不再单独跑，
+  #   所以永远不会有 diff 的回写记录。闸门只按顺序找 diff，
+  #   于是「终版已经验收」也被拦成 upstream_not_verified，链路停在注释口。
+  #   覆盖关系本就写在 flow_spec 里，闸门必须认它，否则每换一轮都会重演。
+  if (exists("flow_stage", mode = "function")) {
+    st0 <- tryCatch(flow_stage(prev, "server"), error = function(e) NULL)
+    cb0 <- ""
+    if (is.list(st0) && !is.null(st0$cover_by)) cb0 <- as.character(st0$cover_by)
+    if (nzchar(cb0) && cb0 %in% order) prev <- cb0
+  }
   r <- db_rows(con, "SELECT * FROM step_attempts WHERE version_id=? AND step_id=?
                      ORDER BY attempt_no DESC LIMIT 1", list(version_id, prev))
   if (!nrow(r)) {

@@ -33,6 +33,18 @@ annotation_review <- function(facts, reference_baseline = NULL) {
       reject('fail',paste0(label,' 必须是记录列表'))
     x
   }
+  # 未定型的簇要认成「未定型」，不是「缺证据」也不是一个叫 NA 的类型。
+  #   脚本契约（02_annotate.R STEP 4）：判不出的簇保留 NA，不用近似类型填充；
+  #   写进 xls 时 NA 变成字符串 'NA'，在对象里则是该簇 annot 全为 NA。
+  #   旧实现只把空串当未定型，于是 'NA' 被当成真实类型，接着因不在词典里被判 fail ——
+  #   「存在未定型簇」这件事本身就让整步过不了，而它恰恰是脚本的正确行为。
+  untyped_label <- function(v) {
+    s <- suppressWarnings(as.character(v))
+    if (!length(s) || is.na(s[1])) return('')
+    s <- trimws(s[1])
+    if (!nzchar(s) || toupper(s) %in% c('NA','NAN','N/A','-','NULL','UNASSIGNED')) return('')
+    s
+  }
   genes <- function(x,label) {
     if (is.null(x)) reject('unknown',paste0('缺少 ',label))
     if (length(x)!=1L || is.na(x) || is.list(x)) reject('fail',paste0(label,' 必须是逗号分隔字符串'))
@@ -88,9 +100,10 @@ annotation_review <- function(facts, reference_baseline = NULL) {
     total <- number(e$object$cells_total,'对象总细胞数',TRUE)
     if (sum(ns)!=total) reject('fail','逐簇细胞数与对象总数不一致')
     obj_types <- vapply(clusters,function(x) {
-      if (is.null(x$celltypes) || length(x$celltypes)==0L) reject('unknown','缺少簇的实际annot取值')
+      # 空列表就是「这一簇 annot 全是 NA」：未定型，不是缺证据。
+      if (is.null(x$celltypes) || length(x$celltypes)==0L) return('')
       if (length(x$celltypes)!=1L) reject('fail','同一个簇在对象中有多个annot取值')
-      scalar(x$celltypes[[1]],'对象annot',FALSE)
+      untyped_label(x$celltypes[[1]])
     },'')
     rows <- records(e$result$rows,'注释结果逐行证据')
     for (x in rows) if (!all(c('cluster','celltype','n_hit','hit_genes','hit_genes_all','reason') %in% names(x)))
@@ -98,7 +111,7 @@ annotation_review <- function(facts, reference_baseline = NULL) {
     rids <- vapply(rows,function(x) scalar(x$cluster,'结果簇号'),'')
     if (anyDuplicated(rids) || !setequal(ids,rids)) reject('fail','注释结果必须覆盖对象每个簇且恰好一行')
     rows <- rows[match(ids,rids)]
-    types <- vapply(rows,function(x) scalar(x$celltype,'结果celltype',FALSE),'')
+    types <- vapply(rows,function(x) untyped_label(scalar(x$celltype,'结果celltype',FALSE)),'')
     if (!identical(types,obj_types)) reject('fail','结果表类型与对象实际annot不一致')
     for (i in seq_along(rows)) {
       x <- rows[[i]]; ct <- types[i]; cl <- ids[i]

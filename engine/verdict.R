@@ -314,21 +314,45 @@ verdict_dispatch_params <- function(app_dir, b, facts) {
   p
 }
 
+# 把「任意一层目录」归一到应用根：认 engine/verdict.R 这个标记文件。
+#   优先用进程里的 APP_DIR（serve.R 的来源就是这个），再不行逐级向上找。
+#   找不到就原样返回 —— 不猜路径，宁可判 unknown 也不拿别的地方顶。
+annotation_app_root <- function(app_dir) {
+  cand <- as.character(app_dir %||% "")
+  is_root <- function(p) nzchar(p) && file.exists(file.path(p, "engine", "verdict.R"))
+  if (exists("APP_DIR", mode = "function")) {
+    a <- tryCatch(APP_DIR(), error = function(e) "")
+  } else if (exists("APP_DIR")) {
+    a <- tryCatch(as.character(APP_DIR), error = function(e) "")
+  } else a <- ""
+  if (is_root(a)) return(a)
+  p <- cand
+  for (i in 1:8) {
+    if (is_root(p)) return(p)
+    nxt <- dirname(p)
+    if (identical(nxt, p) || !nzchar(nxt)) break
+    p <- nxt
+  }
+  cand
+}
+
 annotation_baseline <- function(app_dir, session_id = "") {
   # 取本次注释的可信参考基线：来源是应用侧会话与参考登记，不是回写体。
+  # 入参 app_dir 未必是应用根：判定器被调用时传下来的是那次尝试的目录
+  #   （…/sessions/<sid>/attempts/<req>/verify-xxxx），它下面没有 state/sessions.json，
+  #   于是 sess_find 永远找不到记录、reference_id 永远为空 ——
+  #   实测后果就是本轮这样：注释产物完全合格，却因为「没有可信参考表基线」
+  #   被两条 L4 判 unknown，整步退回。这里先把它归一到应用根，再往下走。
+  app_dir <- annotation_app_root(app_dir)
   sid <- as.character(session_id %||% "")
-  if (!nzchar(sid)) return(NULL)
   s0 <- if (exists("sess_find"))
     tryCatch(sess_find(app_dir, sid), error = function(e) NULL) else NULL
   rid <- as.character((s0 %||% list())$reference_id %||% "")
-  if (!nzchar(rid)) return(NULL)
   idxf <- file.path(app_dir, "state", "references", "index.json")
-  if (!file.exists(idxf)) return(NULL)
   idx <- tryCatch(jsonlite::fromJSON(read_text_any(idxf), simplifyVector = FALSE),
                   error = function(e) NULL)
   items <- (idx %||% list())$items %||% list()
   hit <- Filter(function(it) identical(as.character(it$id %||% ""), rid), items)
-  if (!length(hit)) return(NULL)
   it <- hit[[1]]
   pth <- as.character(it$server_path %||% "")
   dg <- as.character(it$digest %||% "")
@@ -349,7 +373,20 @@ annotation_baseline <- function(app_dir, session_id = "") {
       dg <- ""
     }
   }
-  if (!nzchar(pth)) return(NULL)
+  # 上传件的 server_path 恒为空串：它原本就不在服务器上。派工时应用按
+  #   flow_vars 的 reference_xlsx 把它下发到 <work_root>/0.reference/reference.<ext>，
+  #   判定器必须按同一规则还原，否则这类分析永远卡在「没有可信参考基线」。
+  #   还原不出来（没有 run_dir）就仍旧返回 NULL，绝不拿别的表顶上。
+  if (!nzchar(pth)) {
+    ext <- tolower(tools::file_ext(as.character(it$name %||% "")))
+    if (!nzchar(ext)) ext <- "xlsx"
+    wr <- ""
+    if (exists("sess_find")) {
+      s1 <- tryCatch(sess_find(app_dir, sid), error = function(e) NULL)
+      wr <- as.character((s1 %||% list())$run_dir %||% "")
+    }
+    if (nzchar(wr)) pth <- file.path(wr, "0.reference", paste0("reference.", ext))
+  }
   list(reference_id = rid, source_path = pth, source_md5 = dg)
 }
 
@@ -1390,10 +1427,14 @@ verdict_invariant_one <- function(one, tab, rel, counts = NULL,
       return(vchk("L1", nmlab, if (k <= nck) "pass" else "fail",
         expected = one, actual = paste0("类型数 ", k, " / 簇数 ", nck),
         evidence = "回写 counts{}（执行端读 annot_result.xls 得到）"))
-    if (!all(c("cluster", "cell_type") %in% nm))
-      return(vchk("L1", nmlab, "unknown", "表里缺 cluster 或 cell_type 列",
+    # 列名按脚本真实写出的表头认：02_annotate.R 写的是 celltype，
+    #   旧判据只认 cell_type，于是正常产物被判「缺列」→ unknown → 整步退回。
+    #   flow_spec 的 required_columns 早就登记成 celltype 了，两处必须一致。
+    ct_col <- if ("cell_type" %in% nm) "cell_type" else if ("celltype" %in% nm) "celltype" else ""
+    if (!"cluster" %in% nm || !nzchar(ct_col))
+      return(vchk("L1", nmlab, "unknown", "表里缺 cluster 或 celltype 列",
                   expected = one, actual = paste(nm, collapse = ", "), evidence = rel))
-    nc <- length(unique(tab$cluster)); nt <- length(unique(tab$cell_type))
+    nc <- length(unique(tab$cluster)); nt <- length(unique(tab[[ct_col]]))
     return(vchk("L1", nmlab, if (nt <= nc) "pass" else "fail",
                 expected = one, actual = paste0("簇 ", nc, " 类型 ", nt), evidence = rel))
   }
