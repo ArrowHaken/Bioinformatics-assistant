@@ -8084,9 +8084,26 @@ serve_request <- function(con, req) {
         #   作业 60739 已经在 master01 上跑，页面还写着交接未确认。
         #   只在没有回写、或回写还没开始时才用队列状态，避免盖掉真实结论。
         status = {
+          # 已验收优先于一切：同一环后来通过判定、库里已有 verified 行时，
+          #   页面必须显示已完成。否则一次历史失败任务会永久盖住真结论 ——
+          #   实测：注释已验收并落库，流程表仍显示失败，下游按钮点不动。
+          #   判据按「本记录 + 本步骤 + verified」查库，不猜、不看队列残留。
+          vf_flow <- local({
+            ok0 <- FALSE
+            sid0 <- if (is.null(sid)) cur_sid() else sid
+            if (isTRUE(DB_READY) && nzchar(sid0)) {
+              q0 <- tryCatch(DBI::dbGetQuery(DB_CON,
+                paste0("SELECT COUNT(*) AS n FROM step_attempts ",
+                       "WHERE step_id = ? AND status = 'verified' ",
+                       "AND json_extract(payload, '$.session_id') = ?"),
+                list(id, sid0)), error = function(e) NULL)
+              ok0 <- !is.null(q0) && nrow(q0) == 1L && isTRUE(as.integer(q0$n[[1]]) > 0L)
+            }
+            ok0
+          })
           # 先按「执行队列优先、其次回写」得一个状态，再校正一种特例：
           #   申报 done、但判定器拒过。
-          st0 <- {
+          st0 <- if (isTRUE(vf_flow)) "done" else {
             # 队列结论优先（含"本 req 明确失败"），其次回写。
             #   判据集中在 flow_exec_state 里，可单测；这里只做回退。
             es <- exPick
