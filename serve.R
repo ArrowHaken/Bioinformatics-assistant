@@ -5564,6 +5564,30 @@ serve_request <- function(con, req) {
               list(db_now(), db_json(b), aid2))
           }
         }, error = function(e) NULL)
+        # 同时把这一步的正式记录写进 remote_steps。
+        #   为什么必须写：页面（/api/flow）读的是 remote_steps.json，不是库。
+        #   这条分支（尝试未被选为当前有效）原来只 attempt_save，不写 remote_steps，
+        #   于是库里 verified、页面上这一步仍是 delegated、产物空、日志空 ——
+        #   实测：注释判定通过并落库后，页面上仍显示没有回写。
+        #   记录内容直接由回写体构造，字段与正常路径保持一致。
+        tryCatch({
+          rec_pub <- list(
+            title = (STEP_TASK[[sid_step]] %||% list(title = sid_step))$title,
+            status = as.character(stv),
+            code = if (is.null(code)) NULL else code,
+            log = as.character(b$log %||% ""),
+            run_dir = as.character(b$run_dir %||% ""),
+            source_host = as.character(b$host %||% ""),
+            exec_pc = as.character(b$exec_pc %||% ""),
+            imported_at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S"),
+            session_id = sid_chk,
+            artifacts = b$artifacts %||% list(),
+            started_at = as.character(b$started_at %||% ""),
+            ended_at = as.character(b$ended_at %||% ""),
+            subs = b$subs %||% list(),
+            req_id = as.character(b$req_id %||% ""))
+          remote_step_put(sid_step, rec_pub, sid = sid_chk)
+        }, error = function(e) NULL)
       }
       # Preserve run-chain bookkeeping; rc_validate above remains the admission gate.
       chain_result <- rc_callback(b, !is.null(judge) && isTRUE(judge$accepted))
