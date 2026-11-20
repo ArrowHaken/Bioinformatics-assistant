@@ -13,6 +13,10 @@ Rscript serve.R --port 19980
 
 R 依赖以 `安装R依赖.R` 为准，实际所需的系统工具、Python 包、分析工具链及外部服务需按使用功能另行配置。可参考 `使用说明.txt` 和启动脚本；这些保留的历史说明不等于本次验收结论。
 
+`serve.R` 只是启动入口；HTTP 主实现位于 `engine/server_main.R`，回写身份、静态资源、
+启动保护等边界分别在 `engine/writeback_identity.R`、`engine/http_static.R`、
+`engine/startup_guard.R`。完整边界与回写契约见 `docs/architecture.md`。
+
 ## 运行配置与数据边界
 
 运行 `config/` 不收录。部署前须自行设置适合目标环境的配置及凭据，不应把真实凭据加入版本控制。

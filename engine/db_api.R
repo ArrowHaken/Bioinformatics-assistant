@@ -11,6 +11,14 @@
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 
+# Contract tests may source this file alone. Load the stable write-back
+# resolver into the same evaluation environment when serve.R has not done so.
+if (!exists("wbi_bind_attempt", mode = "function")) {
+  .wbi_root <- get0("APP_DIR", ifnotfound = get0("APP", ifnotfound = "."))
+  .wbi_file <- file.path(.wbi_root, "engine", "writeback_identity.R")
+  if (file.exists(.wbi_file)) source(.wbi_file, local = TRUE)
+}
+
 # db_api.R is also sourced by small contract tests without serve.R. Keep the
 # preflight accessors local-compatible; serve.R replaces these with the shared
 # implementations from record_access.R when it loads later.
@@ -936,43 +944,94 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
   req_id <- trimws(as.character(b$req_id %||% ""))
   ticket_in <- trimws(as.character(b$ticket_id %||% ""))
 
-  # 先看这次回写是否对应一个已存在的 attempt（带 req_id 或 ticket_id 的返工回写）。
-  #   必须带上 step_id：整条链共用一个请求号，不限定环节就会命中上一环那条已验收记录，
-  #   进而被判 stale_write。口径与链条记账 (chain_id, step) 一致。
-  att <- db_attempt_by_req(con, req_id, step_id)
-  if (is.null(att) && nzchar(ticket_in)) {
-    r <- db_rows(con, "SELECT * FROM step_attempts WHERE ticket_id = ? ORDER BY attempt_no DESC LIMIT 1",
-                 list(ticket_in))
-    if (nrow(r)) att <- as.list(r[1, ])
+  # A dispatch owns one stable attempt_id. Bind by that id first; only legacy
+  # callers without one fall back to req_id + step. A mismatched id is never
+  # guessed into another attempt.
+  target_vid <- vid
+  target_rid <- rid
+  # An explicit attempt carries its own immutable version. Legacy req_id/ticket
+  # callers are anchored to the version of the record being written now.
+  bind_vid <- if (nzchar(wbi_chr(b$attempt_id))) wbi_chr(b$version_id) else target_vid
+  bind_rid <- if (nzchar(wbi_chr(b$attempt_id))) wbi_chr(b$run_id) else target_rid
+  bind <- wbi_bind_attempt(con, b, step_id, owner_key,
+                           version_id = bind_vid, run_id = bind_rid)
+  if (!isTRUE(bind$ok)) {
+    db_event(con, "writeback_rejected", owner_key = owner_key, version_id = vid,
+             run_id = rid, step_id = step_id,
+             attempt_id = wbi_chr((bind$attempt %||% list())$attempt_id),
+             payload = list(code = bind$code, binding = bind$binding,
+                            req_id = req_id, attempt_id = wbi_chr(b$attempt_id),
+                            error = bind$error))
+    return(list(accepted = FALSE, code = bind$code, error = bind$error,
+                attempt_id = wbi_chr((bind$attempt %||% list())$attempt_id)))
   }
-
-  # 旧 attempt 晚到：比 attempt_no 与 req_id，小者丢弃并记 stale_write（A7）。
-  if (!is.null(att) && identical(as.character(att$status), "verified") &&
-      !identical(as.character(att$version_id), vid)) {
-    db_event(con, "stale_write", owner_key = owner_key, version_id = att$version_id,
-             step_id = step_id, attempt_id = att$attempt_id,
-             payload = list(req_id = req_id, why = "版本不一致"))
-    return(list(accepted = FALSE, code = "stale_write",
-                error = "这份回写属于别的版本，不能写入当前记录"))
-  }
-
-  # ---- 同一步骤的再次申报要新开一次尝试（J2 / F8）------------------
-  #   原来的行为：同一个 req_id 二次回写直接 UPDATE 那一行，attempt_no 不变。
-  #   后果有两个，都很具体：
-  #     ① 返工轮次永远算作第 1 次，max_auto=3 的上限失效，催不动；
-  #     ② 「重跑后旧 attempt 仍可查」不成立 —— 旧结论被覆盖，事后无法对比
-  #        「上一轮错在哪、这一轮改了什么」。
-  #   现在的规则：只有「这条回写是同一请求的重试」才沿用原行；
-  #   已经判过（rejected / verified / released / escalated）的，一律新开一行。
+  att <- bind$attempt
   if (!is.null(att)) {
-    closed <- as.character(att$status) %in% c("rejected", "verified", "released", "escalated")
-    if (closed) {
+    # The attempt is the source of truth for run/version identity.
+    vid <- as.character(att$version_id)
+    rid <- as.character(att$run_id)
+  }
+
+  job_in <- trimws(as.character(b$job_number %||% ""))
+  if (!is.null(att) && nzchar(job_in)) {
+    kept_job <- wbi_chr(wbi_payload(att)$job_number)
+    if (nzchar(kept_job) && !identical(kept_job, job_in)) {
+      db_event(con, "writeback_rejected", owner_key = owner_key, version_id = vid,
+               run_id = rid, step_id = step_id, attempt_id = att$attempt_id,
+               payload = list(code = "job_number_conflict", kept = kept_job,
+                              rejected = job_in, req_id = req_id))
+      return(list(accepted = FALSE, code = "job_number_conflict",
+                  attempt_id = as.character(att$attempt_id),
+                  error = paste0("该 attempt 已登记作业号 ", kept_job,
+                                 "，拒绝改写为 ", job_in, "。")))
+    }
+  }
+
+  # An explicit attempt_id identifies one execution. Replaying it must be
+  # idempotent; it must not silently create a new attempt or duplicate a review.
+  if (!is.null(att)) {
+    closed <- as.character(att$status) %in% c("verified", "rejected", "released", "escalated")
+    if (closed && isTRUE(bind$explicit)) {
+      in_digest <- wbi_chr(b$script_digest)
+      if (!nzchar(in_digest)) in_digest <- wbi_chr(b$script_md5)
+      kept_digest <- wbi_chr(att$script_digest)
+      if (identical(as.character(att$status), "verified") &&
+          (!nzchar(in_digest) || !nzchar(kept_digest) || identical(in_digest, kept_digest))) {
+        db_event(con, "writeback_idempotent", owner_key = owner_key,
+                 version_id = vid, run_id = rid, step_id = step_id,
+                 attempt_id = att$attempt_id,
+                 payload = list(req_id = req_id, status = as.character(att$status)))
+        return(list(accepted = TRUE, verdict = "idempotent",
+                    attempt_id = as.character(att$attempt_id),
+                    ticket_id = if (is.na(att$ticket_id %||% NA)) NULL else att$ticket_id,
+                    status = "verified", failed_checks = list(), duplicate = TRUE,
+                    claims_ignored = TRUE))
+      }
+      code <- if (identical(as.character(att$status), "verified"))
+        "attempt_script_mismatch" else "attempt_closed"
+      db_event(con, "writeback_rejected", owner_key = owner_key,
+               version_id = vid, run_id = rid, step_id = step_id,
+               attempt_id = att$attempt_id,
+               payload = list(code = code, status = as.character(att$status),
+                              req_id = req_id, job_number = job_in))
+      return(list(accepted = FALSE, code = code,
+                  attempt_id = as.character(att$attempt_id),
+                  error = if (identical(code, "attempt_closed"))
+                    "该 attempt 已关闭；重跑必须先在应用侧派发新的 attempt_id。"
+                  else "同一 attempt_id 的脚本指纹与已验收结果不一致。"))
+    }
+    if (closed && !isTRUE(bind$explicit)) {
+      # Legacy req_id replay keeps the historical rework behaviour.
       db_event(con, "reopen_attempt", owner_key = owner_key, version_id = vid,
                run_id = rid, step_id = step_id, attempt_id = att$attempt_id,
                payload = list(prev_status = as.character(att$status),
                               prev_attempt_no = as.integer(att$attempt_no),
-                              why = "对上一步的再次申报：新开一次尝试，旧结论保留"))
+                              why = "legacy req_id replay: create a new attempt"))
       att <- NULL
+      # The closed attempt may belong to an older version. Reopen in the
+      # record's current target version, never back into the stale one.
+      vid <- target_vid
+      rid <- target_rid
     }
   }
 
@@ -990,7 +1049,10 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
              suppressWarnings(as.integer(b$exit_code %||% b$code %||% NA)),
              "reported", db_now(),
              as.character(b$started_at %||% NA), as.character(b$ended_at %||% NA),
-             db_json(b)))
+             wbi_merge_payload(NULL, b, list(
+               job_number = if (nzchar(job_in)) job_in else NULL,
+               executor_task_id = if (nzchar(wbi_chr(b$exec_id))) wbi_chr(b$exec_id) else NULL,
+               executor_mode = if (nzchar(wbi_chr(b$executor_mode))) wbi_chr(b$executor_mode) else NULL))))
     })
   } else {
     aid <- as.character(att$attempt_id)
@@ -1006,7 +1068,10 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
       DBI::dbExecute(con,
         "UPDATE step_attempts SET payload=?, reported_at=?, exit_code=?, script_path=?, script_digest=?
           WHERE attempt_id=?",
-        list(db_json(b), db_now(),
+        list(wbi_merge_payload(att, b, list(
+               job_number = if (nzchar(job_in)) job_in else NULL,
+               executor_task_id = if (nzchar(wbi_chr(b$exec_id))) wbi_chr(b$exec_id) else NULL,
+               executor_mode = if (nzchar(wbi_chr(b$executor_mode))) wbi_chr(b$executor_mode) else NULL)), db_now(),
              suppressWarnings(as.integer(b$exit_code %||% b$code %||% NA)),
              as.character(b$script_path %||% b$script %||% NA),
              as.character(b$script_md5 %||% b$script_digest %||% NA), aid))

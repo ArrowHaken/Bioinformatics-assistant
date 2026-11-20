@@ -338,9 +338,8 @@ async function boot() {
   //   以前没选目录就先给一页引导，选完才进主界面；现在第一步本身就
   //   是「选机器 + 选路径」，所以直接进主界面，由第一块负责这件事。
   $('#main').style.display = 'block';
-  await recordAwait(loadPlace(), __recordScope);
+  await recordAwait(Promise.all([loadPlace(), loadIdentity()]), __recordScope);
   // 先认清"我在哪个会话里"。拿不到也不阻塞页面，只是不显示会话号。
-  await recordAwait(loadIdentity(), __recordScope);
   // 先恢复「我在哪一份分析里」。
   //   这一条是需求的根：刷新之后页面必须停在原处，而不是回到空白。
   //   所以顺序是：拿到服务端的记录 -> 决定看哪一份 -> 再按它设置各项状态。
@@ -464,6 +463,9 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
   const s = d.session || null;
   S.readonly = !!(s && s.can_write === false);
   S.collapsed = (s && s.collapsed) || {};
+  S.sessionState = d;
+  S.sessionStateId = S.sessionId;
+  S.sessionStateAt = Date.now();
 
   // 记录里存的识别结果 = 这一份当时识别出来的东西。
   //   为什么不用 /api/envcheck：那个回答的是"最近一次识别是什么"，
@@ -7119,7 +7121,18 @@ async function renderIdentify() {
   let fromSession = false;
   if (S.sessionId) {
     try {
-      const ss = await recordAwait(getJSON('/api/sessions/state?id=' + encodeURIComponent(S.sessionId)), __recordScope);
+      // boot() just loaded this exact record. Reuse it for a few seconds so the
+      // first paint does not fetch /api/sessions/state twice.
+      let ss = null;
+      if (S.sessionState && S.sessionStateId === S.sessionId &&
+          (Date.now() - (S.sessionStateAt || 0)) < 5000) {
+        ss = S.sessionState;
+      } else {
+        ss = await recordAwait(getJSON('/api/sessions/state?id=' + encodeURIComponent(S.sessionId)), __recordScope);
+        if (ss && ss.ok) {
+          S.sessionState = ss; S.sessionStateId = S.sessionId; S.sessionStateAt = Date.now();
+        }
+      }
       const ident = ss && ss.session && ss.session.identify;
       if (ident && ident.result
           && (!S.commitReq || ident.req_id === S.commitReq)) {
@@ -7131,11 +7144,10 @@ async function renderIdentify() {
     if (!recordCurrent(__recordScope)) return;
 }
   }
-  // 一律问一次：服务器模式下，/api/envcheck 读的是执行端回写的那份结果。
-  //   只认「属于最近一次保存并识别」的结果。
-  //   不属于的话，它只是上一轮跑出来的旧数据 —— 拿来当结论显示，
-  //   会让人以为刚点的那次已经生效了，而助手可能根本还没动。
-  if (!fromSession) {
+  // These three reads are independent. Issue them together instead of paying
+  // three serial round trips before first paint.
+  const envP = (async () => {
+    if (fromSession) return;
     try {
       const ec = await recordAwait(getJSON('/api/envcheck'), __recordScope);
       envStale = !!ec.stale || (!!S.commitReq && !ecIsFresh(ec));
@@ -7146,17 +7158,26 @@ async function renderIdentify() {
         env = ec.result || null;
       }
     } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
-}
-  }
-  if (!S.needsRemote) {
-    try { dec = (await recordAwait(getJSON('/api/decision'), __recordScope)).result || null; } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
-}
-  }
-  try { lib = await recordAwait(getJSON('/api/library'), __recordScope); } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
-}
+      if (!recordCurrent(__recordScope)) return;
+    }
+  })();
+  const decP = (async () => {
+    if (S.needsRemote) return;
+    try {
+      dec = (await recordAwait(getJSON('/api/decision'), __recordScope)).result || null;
+    } catch (e) {
+      if (!recordCurrent(__recordScope)) return;
+    }
+  })();
+  const libP = (async () => {
+    try {
+      lib = await recordAwait(getJSON('/api/library'), __recordScope);
+    } catch (e) {
+      if (!recordCurrent(__recordScope)) return;
+    }
+  })();
+  await Promise.all([envP, decP, libP]);
+  if (!recordCurrent(__recordScope)) return;
   S.envCheck = env; S.decision = dec;
   S.envStale = envStale; S.staleEnv = staleEnv;
   // 本机模式下没拿到体检/判定结果就没什么可说的；

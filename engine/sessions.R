@@ -525,6 +525,15 @@ sess_archive_restore <- function(app_dir, id, archive_id) {
 }
 
 # Keep attempt facts outside profile snapshots and archive restore.
-source(file.path(dirname(sys.frame(1)$ofile %||% 'engine/sessions.R'), 'attempts.R'), local = FALSE)
-
-source(file.path(dirname(sys.frame(1)$ofile %||% "engine/sessions.R"), "instruction_handoff.R"), local = FALSE)
+# Prefer the explicitly loaded engine root: sys.frame(1)$ofile points at the
+# outer entrypoint when this file is reached through a bootstrap source(),
+# which used to resolve engine/attempts.R against the app root and fail.
+.sessions_engine_dir <- if (exists("ENGINE_DIR", inherits = TRUE)) {
+  get("ENGINE_DIR", inherits = TRUE)
+} else {
+  self <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
+  if (nzchar(as.character(self %||% ""))) dirname(self) else file.path(getwd(), "engine")
+}
+source(file.path(.sessions_engine_dir, "attempts.R"), local = FALSE)
+source(file.path(.sessions_engine_dir, "instruction_handoff.R"), local = FALSE)
+rm(.sessions_engine_dir)

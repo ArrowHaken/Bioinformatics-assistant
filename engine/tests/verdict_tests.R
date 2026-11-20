@@ -189,7 +189,7 @@ res_ver <- tryCatch(db_api_report_step(con, TMP,
   list(key = OWNER, kind = "viewer"), b_ver, runDir = ROOT, sid = NA),
   error = function(e) list(accepted = FALSE, code = "error", error = conditionMessage(e)))
 # db_api_report_step 自身不拦 verified，拦在 HTTP 入口；这里验 HTTP 层有断言
-srv <- readLines(file.path(APP, "serve.R"), warn = FALSE)
+srv <- readLines(file.path(APP, "engine", "server_main.R"), warn = FALSE)
 ok("HTTP 入口拒绝 status=verified", any(grepl("verified_not_writable", srv, fixed = TRUE)))
 ok("verified 不在允许的回写状态表里", !any(grepl('c\\("done", "failed", "running", "delegated", "stopped", "verified"', srv)))
 

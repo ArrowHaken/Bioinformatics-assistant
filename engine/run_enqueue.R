@@ -799,6 +799,67 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
                             pool_id = exec_default_pool_id()),
                          error = function(e) NULL)
       }
+      # ---- one stable attempt id before either executor mode sees the task ----
+      # qsub/batch and login/interactive observe must report the same id. The
+      # dispatcher, not the executor, owns this number.
+      if (!is.null(enq) && !nzchar(as.character(enq$attempt_id %||% "")) &&
+          nzchar(as.character(enq$req_id %||% "")) && isTRUE(DB_READY) && !is.null(con)) {
+        oldr <- tryCatch(db_rows(con,
+          paste0("SELECT * FROM step_attempts WHERE req_id = ? AND step_id = ? ",
+                 "ORDER BY attempt_no DESC LIMIT 1"),
+          list(as.character(enq$req_id), stepId)), error = function(e) NULL)
+        if (!is.null(oldr) && nrow(oldr)) {
+          enq$attempt_id <- as.character(oldr$attempt_id[[1]])
+          enq$run_id <- as.character(oldr$run_id[[1]])
+          enq$version_id <- as.character(oldr$version_id[[1]])
+          exec_set(as.character(enq$id %||% ""), list(
+            attempt_id = enq$attempt_id, run_id = enq$run_id,
+            version_id = enq$version_id))
+        }
+      }
+      if (!is.null(enq) && nzchar(stepRq) &&
+          identical(as.character(enq$req_id %||% ""), stepRq) &&
+          isTRUE(DB_READY) && !is.null(con)) {
+        vinfo0 <- tryCatch(db_api_version_of(con, execSid), error = function(e) NULL)
+        vid0 <- as.character((vinfo0 %||% list())$version_id %||% "")
+        if (!nzchar(vid0)) vid0 <- as.character(access$ctx$version_id %||% "")
+        octx0 <- if (is.null(owner_ctx$key) || is.na(owner_ctx$key)) "unattributed"
+                 else as.character(owner_ctx$key)
+        reg0 <- tryCatch(
+          db_register_dispatch(
+            con, owner_key = octx0,
+            session_id = execSid, version_id = vid0, step_id = stepId,
+            req_id = stepRq, exec_id = as.character(enq$id %||% ""),
+            script_path = as.character(enqCmd %||% ""),
+            script_digest = as.character(b$script_digest %||% b$script_md5 %||% ""),
+            run_dir = as.character(V$run_dir %||% ""),
+            executor_mode = if (isTRUE((execStage %||% list())$qsub)) "batch" else "login"),
+          error = function(e) list(ok = FALSE, code = "dispatch_attempt_error",
+                                   error = conditionMessage(e)))
+        if (isTRUE(reg0$ok)) {
+          enq$attempt_id <- reg0$attempt_id
+          enq$run_id <- reg0$run_id
+          enq$version_id <- reg0$version_id
+          enq$executor_mode <- if (isTRUE((execStage %||% list())$qsub)) "batch" else "login"
+          exec_set(as.character(enq$id %||% ""), list(
+            attempt_id = enq$attempt_id, run_id = enq$run_id,
+            version_id = enq$version_id, executor_mode = enq$executor_mode))
+        } else {
+          bindWarn <- paste0("作业已派出，但稳定 attempt 未登记：",
+                             as.character(reg0$error %||% reg0$code %||% "unknown"))
+          tryCatch({
+            af0 <- file.path(STATE_DIR, "exec_binding_warnings.jsonl")
+            dir.create(dirname(af0), showWarnings = FALSE, recursive = TRUE)
+            cat(paste0(jsonlite::toJSON(list(
+              at = exec_ts(), kind = "dispatch_attempt_register_failed",
+              exec_id = as.character(enq$id %||% ""), session_id = execSid,
+              step = stepId, req_id = stepRq,
+              code = as.character(reg0$code %||% ""),
+              why = as.character(reg0$error %||% "")), auto_unbox = TRUE), "\n"),
+              file = af0, append = TRUE)
+          }, error = function(e) NULL)
+        }
+      }
       # ---- 只有确实由本次新建的任务才登记绑定 --------------------------
       #   双重保险：上面已用 exec_active_for 挡掉"复用"的情况，
       #   这里再断言任务带回的 req_id 就是本次生成的号。
@@ -948,7 +1009,12 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
                        "这次重新执行的额外要求：", extra)
       }
       ins <- remote_step_instruction(stepId, pl, session_id = as.character(sid %||% ""),
-                                     req_id = rq, gate_note = note)
+                                     req_id = rq, gate_note = note,
+                                     binding = list(
+                                       attempt_id = as.character((enq %||% list())$attempt_id %||% ""),
+                                       run_id = as.character((enq %||% list())$run_id %||% ""),
+                                       version_id = as.character((enq %||% list())$version_id %||% ""),
+                                       executor_mode = as.character((enq %||% list())$executor_mode %||% "")))
       remote_step_put(stepId, list(
         title = (STEP_TASK[[stepId]] %||% list(title = stepId))$title,
         status = "delegated", code = NULL,
@@ -976,34 +1042,36 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
             rid0 <- db_ensure_run(DB_CON, vinfo$version_id,
                                   if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
                                   work_root = as.character(V$run_dir %||% ""))
-            org <- db_rows(DB_CON,
-              "SELECT run_id FROM runs WHERE version_id = ? ORDER BY started_at LIMIT 1",
-              list(vinfo$version_id))
-            if (nrow(org)) rid0 <- as.character(org$run_id[1])
-            no <- db_next_attempt_no(DB_CON, rid0, stepId)
-            aid0 <- db_new_id("att")
-            db_tx(DB_CON, function() {
-              DBI::dbExecute(DB_CON,
-                "INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,step_id,
-                   attempt_no,req_id,status,started_at,payload)
-                 VALUES(?,?,?,?,?,?,?,?,?,?)",
-                list(aid0, rid0, vinfo$version_id,
-                     if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
-                     stepId, no, if (nzchar(rq)) rq else NA, "delegated",
-                     db_now(), db_json(list(via = via, run_dir = V$run_dir %||% ""))))
-              # 六要素齐全才建：缺一项就不建，而不是建一个发不出去的作业。
-              #   这正是 A6 要求的「缺字段不发消息、不标分析失败」。
-              DBI::dbExecute(DB_CON,
-                "INSERT INTO poll_jobs(job_id,kind,owner_key,run_id,version_id,step_id,
-                   attempt_id,query_request_id,payload,state,next_check_at,created_at,updated_at)
-                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                list(paste0("job-poll-", aid0), "poll",
-                     if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
-                     rid0, vinfo$version_id, stepId, aid0,
-                     if (nzchar(rq)) rq else paste0("q-", aid0),
-                     db_json(list(project = vinfo$project_id, run_dir = V$run_dir %||% "")),
-                     "pending", db_iso_add(600), db_now(), db_now()))
-            })
+            aid0 <- as.character((enq %||% list())$attempt_id %||% "")
+            if (nzchar(as.character((enq %||% list())$run_id %||% "")))
+              rid0 <- as.character(enq$run_id)
+            if (!nzchar(aid0)) {
+              no <- db_next_attempt_no(DB_CON, rid0, stepId)
+              aid0 <- db_new_id("att")
+              db_tx(DB_CON, function() {
+                DBI::dbExecute(DB_CON,
+                  "INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,step_id,
+                     attempt_no,req_id,status,started_at,payload)
+                   VALUES(?,?,?,?,?,?,?,?,?,?)",
+                  list(aid0, rid0, vinfo$version_id,
+                       if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
+                       stepId, no, if (nzchar(stepRq)) stepRq else NA, "delegated",
+                       db_now(), db_json(list(via = via, run_dir = V$run_dir %||% ""))))
+              })
+            }
+            # Six fields must be present before a poll job is created. Reusing
+            # the dispatch attempt keeps poll and write-back on one identity.
+            DBI::dbExecute(DB_CON,
+              paste0("INSERT OR IGNORE INTO poll_jobs(job_id,kind,owner_key,run_id,",
+                     "version_id,step_id,attempt_id,query_request_id,payload,state,",
+                     "next_check_at,created_at,updated_at) ",
+                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+              list(paste0("job-poll-", aid0), "poll",
+                   if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
+                   rid0, vinfo$version_id, stepId, aid0,
+                   if (nzchar(stepRq)) stepRq else paste0("q-", aid0),
+                   db_json(list(project = vinfo$project_id, run_dir = V$run_dir %||% "")),
+                   "pending", db_iso_add(600), db_now(), db_now()))
           }
         }, error = function(e) NULL)
       }
@@ -1072,6 +1140,10 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
         #   已入队时以任务自带的 req_id 为准；未入队时用本步的真实请求号。
         req_id = if (queuedOk) as.character(enq$req_id %||% "") else as.character(stepRq %||% ""),
         request_id = if (queuedOk) as.character(enq$req_id %||% "") else as.character(stepRq %||% ""),
+        attempt_id = if (queuedOk) as.character(enq$attempt_id %||% "") else NULL,
+        run_id = if (queuedOk) as.character(enq$run_id %||% "") else NULL,
+        version_id = if (queuedOk) as.character(enq$version_id %||% "") else NULL,
+        executor_mode = if (queuedOk) as.character(enq$executor_mode %||% "") else NULL,
         step_id = as.character(stepId),
         exec_id = if (queuedOk) as.character(enq$id %||% "") else NULL,
         exec_status = if (queuedOk) as.character(enq$status %||% "") else NULL,

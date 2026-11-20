@@ -1,5 +1,59 @@
 # 更新说明
 
+## 2026-11-20｜首屏加载、冷启动与稳定回写身份
+
+本次修复针对三类真实问题：网页端首包慢/偶发不可用、服务重启前的长时间 CPU 占用，
+以及 batch(qsub) 与 login/observe 混用导致的回写编号错位。
+
+### 首屏与静态资源
+
+- 新增 `engine/http_static.R`：文本资源支持 gzip、`ETag`、`If-None-Match -> 304`、
+  `Vary: Accept-Encoding`；`index.html` 为 `no-cache`，普通资源短缓存。
+- 实测 `app.js` 从 442,965 B 压到 140,803 B；本机单资源请求约 95 ms。
+- `public/app.js` 将地点与身份、环境体检、判定、脚本库请求并行化，并复用首屏刚读取的
+  session state，减少重复往返。
+- 首屏脚本版本号同步更新，避免已缓存旧 `app.js` 的浏览器在部署后继续跑旧逻辑。
+
+### 冷启动与单实例
+
+- 将原 `serve.R` 的一万行实现移到 `engine/server_main.R`；根目录 `serve.R` 改为极小
+  bootstrap。原因是 `Rscript` 逐表达式解析旧入口时，冷启动会占用约 34 秒 CPU；
+  改为 `sys.source()` 后，模块定义加载实测约 0.2 秒。
+- 新增 `engine/startup_guard.R`：端口被占用时先探测已有实例的 `/api/env`，健康实例
+  存在则以状态 0 退出，避免 systemd 重启风暴。
+- 修正启动探测本身：原先用文本 socket 调 `writeBin()` 会直接失败，健康实例也被判成
+  “端口被未知进程占用”。改为二进制 socket 后，真实双实例验证为第二进程约 0.4 秒
+  以状态 0 退出。
+- 修复首个请求的二次冷启动：R 默认 JIT 首次调用七千多行的 `serve_request()` 时要
+  编译约 18 秒，即使请求的是不查库、不问网关的 `/api/ping`。入口现显式关闭 JIT，
+  实测首个请求由 18.1 秒降到 15 毫秒；路由继续拆分后再评估恢复。
+- 启动时加载 `engine/migrate_history.R`，修复“调用迁移函数但模块未加载”的缺陷。
+- `engine/sessions.R` 不再依赖脆弱的 `sys.frame(1)$ofile` 解析依赖路径，优先使用
+  明确的 `ENGINE_DIR`。
+
+### 稳定回写身份
+
+- 新增 `engine/writeback_identity.R`。一次派工只生成一个 `attempt_id`，并固定
+  `run_id/version_id`；batch 与 login 必须回传同一个编号。
+- `attempt_id` 是权威绑定；过期 `version_id/run_id` 由服务端按 attempt 纠正并记录，
+  不再误拒整份回写。owner/step 不匹配、已关闭 attempt、脚本指纹不一致、作业号冲突
+  都返回明确错误码。
+- 旧调用方按 `req_id + step` 绑定时限定在记录当前版本；旧版本的 attempt 不能再接住
+  新版本回写。派工时对应用主机可读的脚本直接计算 MD5，避免脚本摘要只靠回写方自报。
+- 同一 `attempt_id` 的已验收回写按脚本指纹幂等处理；已关闭 attempt 不会被偷偷重开，
+  新派工会获得新 attempt。
+- `job_number` 首次登记后不可被另一个作业号覆盖；轮询任务复用同一 attempt。
+
+### 验证与边界
+
+- `tests/static_assets.R`：15 项通过。
+- `tests/writeback_identity.R`：19 项通过。
+- `tests/startup_entrypoint.R`：9 项通过。
+- 已用真实 `Rscript serve.R --port ...` 启动验证端口监听、gzip 响应与迁移加载。
+- Windows 环境缺少创建符号链接权限，依赖 symlink 的旧契约测试无法在本机执行；这是
+  环境限制，不是本次改动引入的失败。生产部署仍需重启一次应用并观察首屏与一次真实
+  回写，才能宣称端到端验收完成。
+
 ## 2026-11-12｜排队回收、重跑放行与请求号分槽
 
 本次更新 10 个已有文件和 4 个测试文件，内容如下。

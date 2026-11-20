@@ -35,6 +35,7 @@ if (!dir.exists(file.path(APP, "engine"))) APP <- normalizePath(file.path(APP, "
 VERBOSE <- "-v" %in% args
 
 src <- function(f) {
+  if (identical(f, "serve.R")) f <- "engine/server_main.R"
   p <- file.path(APP, f)
   if (!file.exists(p)) return("")
   paste(readLines(p, warn = FALSE, encoding = "UTF-8"), collapse = "\n")
