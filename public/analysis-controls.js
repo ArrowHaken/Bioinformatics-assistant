@@ -110,12 +110,14 @@
     if (document.hidden) { if (runController) runController.abort(); }
     else refreshRuns();
   });
-  /* ---- 产物面板的三个页签 -----------------------------------------
-     查看各环节产物 / 执行快照 / 打包notebook。
-     三个面板互斥：一次只显示一个，高亮跟着走。
-     为什么不再用「再点一次收起」：收起后三个都不亮，人会以为坏了；
-     而且产物清单本来就是这一页的默认内容，没有"什么都不显示"的状态。 */
-  const panels = { art: 'panelArt', snap: 'panelSnap', nb: 'panelNb' };
+  /* ---- 产物面板的两个页签 -----------------------------------------
+     查看各环节产物 / 打包 ipynb。
+     两个面板互斥：一次只显示一个，高亮跟着走。
+     为什么不再用「再点一次收起」：收起后两个都不亮，人会以为坏了；
+     而且产物清单本来就是这一页的默认内容，没有"什么都不显示"的状态。
+     原「执行快照」页签已移除（gina 2026-11-20）：它与打包 ipynb 生成的是
+     同一份文件，留两个入口只会让人以为有两种东西。 */
+  const panels = { art: 'panelArt', nb: 'panelNb' };
   const openPanel = which => {
     Object.keys(panels).forEach(k => {
       const el = byId(panels[k]);
@@ -133,13 +135,11 @@
     });
   });
 
-  /* 两个「生成」按钮的产物各自单独记状态。
-     为什么不能共用一个标记：执行快照与 notebook 是两个入口，
-     一个生成过不代表另一个可用；混成一个就会出现"没做却说做好了"。 */
-  const built = { snap: false, nb: false };
-  const statusNode = { snap: byId('snapStatus'), nb: byId('nbStatus') };
-
-  const snapButtons = [byId('btnBuildNotebook'), byId('btnDownloadNotebook')];
+  /* 打包 ipynb 的状态独立记一份。
+     为什么不能跟产物取回混用：取回有没有完成，与 ipynb 生成过没有是两件事；
+     混成一个就会出现"没做却说做好了"。 */
+  const built = { nb: false };
+  const statusNode = { nb: byId('nbStatus') };
   const nbButtons = [byId('btnBuildNb'), byId('btnDownloadNb')];
 
   async function notebookAction(kind, build) {
@@ -148,16 +148,16 @@
     if (sessionChanging || !S.sessionId) { text(note, '请先选择一条分析记录。'); return; }
     // 下载必须先有产物：没有就明说「请先生成」，不让人对着没反应的按钮反复点。
     if (!build && !built[kind]) {
-      const msg = kind === 'snap' ? '请先生成执行快照' : '请先生成 notebook';
+      const msg = '请先生成 ipynb';
       text(note, msg);
       if (typeof toast === 'function') toast(msg, 'bad');
       return;
     }
     const sid = String(S.sessionId), generation = recordContext();
     const current = () => recordCurrent(generation) && !sessionChanging && String(S.sessionId) === sid;
-    const group = kind === 'snap' ? snapButtons : nbButtons;
+    const group = nbButtons;
     notebookBusy = true; group.forEach(button => { if (button) button.disabled = true; });
-    text(note, (build ? '正在生成' : '正在下载') + '记录 ' + sid + ' 的 ' + (kind === 'snap' ? '执行快照' : 'notebook') + '…');
+    text(note, (build ? '正在生成' : '正在下载') + '记录 ' + sid + ' 的 ipynb…');
     try {
       if (build) {
         const data = await request('/api/notebook/build', {session_id: sid});
@@ -169,22 +169,19 @@
         const blob = await request('/api/notebook/download?session=' + encodeURIComponent(sid), undefined, {blob: true});
         if (!current()) return;
         const url = URL.createObjectURL(blob), anchor = element('a');
-        const suffix = kind === 'snap' ? '_execution_snapshot' : '';
         anchor.href = url;
-        anchor.download = 'analysis-' + sid.replace(/[^a-zA-Z0-9_-]/g, '_') + suffix + '.ipynb';
+        anchor.download = 'analysis-' + sid.replace(/[^a-zA-Z0-9_-]/g, '_') + '.ipynb';
         document.body.appendChild(anchor);
         try { anchor.click(); } finally { anchor.remove(); setTimeout(() => URL.revokeObjectURL(url), 1000); }
-        text(note, '记录 ' + sid + ' 的 ' + (kind === 'snap' ? '执行快照' : 'notebook') + ' 已交给浏览器下载。');
+        text(note, '记录 ' + sid + ' 的 ipynb 已交给浏览器下载。');
       }
     } catch (error) {
-      if (current()) text(note, (kind === 'snap' ? '执行快照：' : 'Notebook：') + error.message);
+      if (current()) text(note, 'ipynb：' + error.message);
     } finally {
       notebookBusy = false; group.forEach(button => { if (button) button.disabled = false; });
       if (!current()) text(note, '记录已切换，已忽略旧记录的响应。');
     }
   }
-  if (byId('btnBuildNotebook')) byId('btnBuildNotebook').addEventListener('click', () => notebookAction('snap', true));
-  if (byId('btnDownloadNotebook')) byId('btnDownloadNotebook').addEventListener('click', () => notebookAction('snap', false));
   if (byId('btnBuildNb')) byId('btnBuildNb').addEventListener('click', () => notebookAction('nb', true));
   if (byId('btnDownloadNb')) byId('btnDownloadNb').addEventListener('click', () => notebookAction('nb', false));
 
