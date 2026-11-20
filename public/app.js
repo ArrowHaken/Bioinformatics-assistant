@@ -184,7 +184,7 @@ function currentDelegated() {
    为什么必须这样：
      同一个页面可能挂在两种位置 ——
        本机直连：   http://127.0.0.1:18980/            （根路径）
-       云端应用：   https://…/personal-analysis/      （子路径）
+       云端应用：   https://…/<应用身份名>/          （子路径）
      如果写死 fetch('/api/env')，在云端会请求到 /api/env ——
      那是站点根下的路径，不属于这个应用，返回 404，
      页面就显示「连不上本地服务」。而服务其实是好的。
@@ -5957,7 +5957,7 @@ async function downloadRecordNotebook(recordId, btn) {
     const old = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
     try {
-      // 地址必须走 apiUrl()：应用挂在 /personal-analysis-assistant/ 这个子路径下，
+      // 地址必须走 apiUrl()：应用挂在 /<应用身份名>/ 这个子路径下，
       //   写死 "/api/..." 会打到站点根，被网关挡掉，浏览器只报 "Failed to fetch"。
       //   gina 2026-11-20 报的「下载 ipynb 报错」就是这个原因。
       const resp = await fetch(apiUrl('/api/script-archive/notebook?record=' + encodeURIComponent(recordId)),

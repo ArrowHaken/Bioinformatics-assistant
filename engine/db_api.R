@@ -93,8 +93,10 @@ db_api_owner <- function(app_dir, req) {
       if (!is.null(ck) && nzchar(as.character(ck))) hdrs$cookie <- as.character(ck)
       if (!is.null(au) && nzchar(as.character(au))) hdrs$authorization <- as.character(au)
       if (length(hdrs)) curl::handle_setheaders(h, .list = hdrs)
-      r <- curl::curl_fetch_memory(
-        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis-assistant", handle = h)
+      # 身份名来自本机配置，不写死：写死会把身份问到另一台应用上。
+      me_url <- if (exists("pa_gateway_me_url", mode = "function")) pa_gateway_me_url() else NA_character_
+      if (is.na(me_url) || !nzchar(me_url)) stop("no local app identity")
+      r <- curl::curl_fetch_memory(me_url, handle = h)
       if (r$status_code != 200L) stop(paste0("gateway ", r$status_code))
       jsonlite::fromJSON(rawToChar(r$content), simplifyVector = FALSE)
     }, error = function(e) list(error = conditionMessage(e)))

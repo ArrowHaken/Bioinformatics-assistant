@@ -194,6 +194,9 @@ if (HAS_EXEC_RECOVER) source(EXEC_RECOVER_FILE, local = TRUE)
 INTENT_FILE <- file.path(ENGINE_DIR, "intent_bridge.R")
 HAS_INTENT <- file.exists(INTENT_FILE)
 if (HAS_INTENT) source(INTENT_FILE, local = TRUE)
+# 应用身份名（app id）从本机配置读，必须先于任何问网关的地方加载。
+APP_IDENTITY_FILE <- file.path(ENGINE_DIR, "app_identity.R")
+if (file.exists(APP_IDENTITY_FILE)) source(APP_IDENTITY_FILE, local = TRUE)
 PLATFORM_IDENTITY_FILE <- file.path(ENGINE_DIR, "platform_identity.R")
 if (file.exists(PLATFORM_IDENTITY_FILE)) source(PLATFORM_IDENTITY_FILE, local = TRUE)
 APP_HANDOFF_FILE <- file.path(ENGINE_DIR, "app_handoff.R")
@@ -2945,7 +2948,10 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, error = "请从应用原页面操作")))
     out <- tryCatch({
       if (p == "/api/fetch-client/config") {
-        base <- paste0(as.character(req$headers[["origin"]]), "/personal-analysis")
+        # 子路径就是本机应用身份名，同样不写死：换机器换名字都不用改这里。
+        .sub <- if (exists("pa_app_id", mode = "function")) pa_app_id() else NA_character_
+        if (is.na(.sub) || !nzchar(.sub)) stop("本机没有配置应用身份名")
+        base <- paste0(as.character(req$headers[["origin"]]), "/", .sub)
         fetch_client_issue(APP_DIR, owner_ctx, base, as.character(body_json()$device_id %||% "fetch-device"))
       } else if (p == "/api/fetch-client/revoke") fetch_client_revoke(APP_DIR, owner_ctx)
       else if (p == "/api/fetch-client/client") list(ok = TRUE, source = paste(readLines(file.path(APP_DIR, "tools", "pa_fetch_client.py"), warn = FALSE), collapse = "\n"))
@@ -3400,8 +3406,10 @@ serve_request <- function(con, req) {
       if (!requireNamespace("curl", quietly = TRUE)) stop("没有 curl 包")
       h <- curl::new_handle(timeout = 6, connecttimeout = 4)
       if (length(hdrs)) curl::handle_setheaders(h, .list = hdrs)
-      r <- curl::curl_fetch_memory(
-        "https://artifact.catsco.cc/_gateway/me?app=personal-analysis-assistant", handle = h)
+      # 身份名从本机配置读，代码里不留名字。见 engine/app_identity.R。
+      me_url <- if (exists("pa_gateway_me_url", mode = "function")) pa_gateway_me_url() else NA_character_
+      if (is.na(me_url) || !nzchar(me_url)) stop("本机没有配置应用身份名")
+      r <- curl::curl_fetch_memory(me_url, handle = h)
       if (r$status_code != 200L) stop(paste0("网关返回 ", r$status_code))
       jsonlite::fromJSON(rawToChar(r$content), simplifyVector = FALSE)
     }, error = function(e) list(error = conditionMessage(e)))
@@ -10094,6 +10102,21 @@ main <- function() {
   say("")
   say("  关掉这个窗口就是停止服务。所有计算都在本机，不联网。")
   say("  运行目录：", if (is.null(st$runDir)) "（还没选）" else st$runDir)
+  # 身份自检：名字对不对，开机就写一行。
+  #   2026-11-20 那次故障里，页面能开、静态资源全 200、日志无报错，
+  #   只有每个记录接口 403 —— 因为应用在问另一台应用的身份。
+  #   这行输出的目的就是让那种情况一眼可见，不用等用户报障。
+  .idcheck <- tryCatch(
+    if (exists("pa_identity_selfcheck", mode = "function")) pa_identity_selfcheck(),
+    error = function(e) list(ok = FALSE, status = "error", app_id = NA_character_,
+                             detail = conditionMessage(e)))
+  .idapp <- if (is.na(.idcheck$app_id %||% NA_character_)) "未配置" else .idcheck$app_id
+  say("  应用身份：  ", .idapp, "  (自检 ", .idcheck$status, ": ", .idcheck$detail, ")")
+  if (!isTRUE(.idcheck$ok)) {
+    say("")
+    say("  [!] 身份自检没通过。这个状态下记录接口会一律 403，不是页面坏了。")
+    say("      正名顺序：设环境变量 PA_APP_ID，或让 connector.json 的 localPort 等于 ", PORT, "。")
+  }
   say("===========================================================")
   say("")
 
