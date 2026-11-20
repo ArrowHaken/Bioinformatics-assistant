@@ -176,6 +176,121 @@ sa_visible <- function(engine_dir, owner_key = "", is_admin = FALSE,
   list(ids = ids, isolation_on = isTRUE(isolation_on), admin = isTRUE(is_admin))
 }
 
+# ---- 缺正文的补救：从执行端取回，再按指纹收进存档 ----------------------
+#   为什么需要（gina 2026-11-20：「怎么能取不到正文呢」）：
+#   分析跑在服务器上，脚本常常只在 /share/home/... 的工作目录里。
+#   执行端回写时只带 script_path 与 script_digest，没有带正文；
+#   而本机又没有同版本副本（服务器上那份被人改过，md5 与随应用分发的不一致），
+#   于是只能登记路径与指纹。
+#   补救办法不是编一份出来，而是按当初那个路径把正文取回来，md5 与登记值一致才收。
+#   取回走已有的 mirror 通道：登记 rel -> 执行端读 run_dir/rel -> 回传 -> md5 校验落地。
+
+# 把绝对路径折成相对 run_dir 的路径，mirror 通道只接受相对路径。
+sa_rel_to <- function(where, source_path) {
+  w <- sub("/+$", "", as.character(where %||% ""))
+  sp <- gsub("\\\\", "/", as.character(source_path %||% ""))
+  if (!nzchar(w) || !nzchar(sp)) return("")
+  if (!startsWith(sp, paste0(w, "/"))) return("")
+  substring(sp, nchar(w) + 2L)
+}
+
+# 一条记录里所有缺正文的条目（含它们相对 run_dir 的路径）。
+sa_missing_entries <- function(app_dir, engine_dir, rid) {
+  d <- sa_index_read(engine_dir, app_dir)
+  out <- list()
+  for (rec in (d$records %||% list())) {
+    if (!identical(as.character(rec$id %||% ""), as.character(rid))) next
+    where <- as.character(rec$where %||% "")
+    for (f in (rec$files %||% list())) {
+      if (!isTRUE(f$content_missing)) next
+      rel <- sa_rel_to(where, f$source_path)
+      out[[length(out) + 1L]] <- list(
+        rel_field = as.character(f$rel %||% ""),
+        name = as.character(f$name %||% ""),
+        source_path = as.character(f$source_path %||% ""),
+        rel = rel,
+        md5 = as.character(f$md5 %||% ""))
+    }
+    break
+  }
+  out
+}
+
+# 把已经取回到 mirror 的脚本正文收进存档（md5 必须与登记值一致）。
+#   什么时候调：每次读脚本库列表、每次生成 notebook 之前。
+#   这样执行端一取回，下一次打开页面就能看到正文，不需要再点一次。
+sa_adopt_mirror <- function(app_dir, engine_dir, rid, mirror_root = NULL) {
+  miss <- sa_missing_entries(app_dir, engine_dir, rid)
+  if (!length(miss)) return(0L)
+  sid <- sub("^SA-", "", as.character(rid))
+  adopted <- 0L
+  d <- sa_index_read(engine_dir, app_dir)
+  idx <- NA_integer_
+  for (i in seq_along((d$records %||% list())))
+    if (identical(as.character(d$records[[i]]$id %||% ""), as.character(rid))) { idx <- i; break }
+  if (is.na(idx)) return(0L)
+  rec <- d$records[[idx]]
+  root <- if (!is.null(mirror_root) && nzchar(mirror_root)) mirror_root
+          else if (exists("mirror_dir", mode = "function")) tryCatch(mirror_dir(sid), error = function(e) "")
+          else ""
+  if (!nzchar(root)) return(0L)
+
+  for (m in miss) {
+    if (!nzchar(m$rel)) next
+    src <- file.path(root, m$rel)
+    if (!file.exists(src)) next
+    got <- unname(tools::md5sum(src))
+    want <- tolower(trimws(m$md5))
+    if (nzchar(want) && !identical(tolower(as.character(got)), want)) next
+    dst <- file.path(sa_archive_root(engine_dir), rid, m$rel_field)
+    dir.create(dirname(dst), showWarnings = FALSE, recursive = TRUE)
+    if (!isTRUE(file.copy(src, dst, overwrite = TRUE))) next
+    for (j in seq_along((rec$files %||% list()))) {
+      if (!identical(as.character(rec$files[[j]]$rel %||% ""), m$rel_field)) next
+      rec$files[[j]]$content_missing <- FALSE
+      rec$files[[j]]$content_note <- paste0("正文已从执行端取回，md5 与登记值一致（",
+                                            as.character(got), "）。")
+      rec$files[[j]]$adopted_at <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+      break
+    }
+    adopted <- adopted + 1L
+  }
+  if (adopted > 0L) {
+    d$records[[idx]] <- rec
+    sa_index_write(app_dir, d)
+  }
+  adopted
+}
+
+# 登记取回：把这条记录里缺正文的脚本交给执行端去读回来。
+sa_request_bodies <- function(app_dir, engine_dir, rid, owner_key = "") {
+  if (!exists("mirror_request", mode = "function"))
+    return(list(ok = FALSE, code = "mirror_unavailable",
+                error = "取回通道不可用（缺少 engine/mirror.R）"))
+  miss <- sa_missing_entries(app_dir, engine_dir, rid)
+  if (!length(miss))
+    return(list(ok = TRUE, queued = 0L, note = "这条记录没有缺正文的脚本。"))
+  sid <- sub("^SA-", "", as.character(rid))
+  d <- sa_index_read(engine_dir, app_dir)
+  where <- ""
+  for (rec in (d$records %||% list()))
+    if (identical(as.character(rec$id %||% ""), rid)) { where <- as.character(rec$where %||% ""); break }
+
+  ok_n <- 0L; skipped <- list()
+  for (m in miss) {
+    if (!nzchar(m$rel)) { skipped[[length(skipped) + 1L]] <- m$name; next }
+    r <- tryCatch(mirror_request(sid, m$rel, run_dir = where, want_md5 = m$md5,
+                                 owner_key = owner_key),
+                  error = function(e) list(ok = FALSE, error = conditionMessage(e)))
+    if (isTRUE(r$ok)) ok_n <- ok_n + 1L else skipped[[length(skipped) + 1L]] <- m$name
+  }
+  list(ok = TRUE, queued = ok_n, total = length(miss),
+       skipped = as.list(unlist(skipped)),
+       note = if (ok_n > 0L)
+         paste0("已登记 ", ok_n, " 个脚本等待执行端取回；取回并通过 md5 校验后，正文会自动补上。")
+       else "没能登记取回：这些脚本的路径不在本次运行目录下。")
+}
+
 # One record per analysis record (session). Stable id, so repeated runs of
 # the same analysis extend the same record instead of creating a new one
 # for every step.

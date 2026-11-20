@@ -8552,6 +8552,17 @@ serve_request <- function(con, req) {
     #   页面对着这两项决定是给按钮还是标「缺」。
     #   只读：不补文件、不改索引，缺了就如实说缺。
     base_arc <- file.path(ENGINE_DIR, "library", "archive")
+    # 取回补齐（gina 2026-11-20）：执行端已经把脚本正文取回来时，先收进存档再列。
+    #   只在 md5 与登记值一致时才收；对不上就不动，列表照旧标「缺」。
+    #   放在这里的原因：人打开脚本库就是想知道"能不能看到正文"，
+    #   这一步不占额外操作，取回后下一次打开就自动有了。
+    if (exists("sa_adopt_mirror", mode = "function")) {
+      for (r0 in (d$records %||% list()))
+        tryCatch(sa_adopt_mirror(APP_DIR, ENGINE_DIR, as.character(r0$id %||% "")),
+                 error = function(e) NULL)
+      d <- if (exists("sa_index_read", mode = "function"))
+        tryCatch(sa_index_read(ENGINE_DIR, APP_DIR), error = function(e) d) else d
+    }
     recs <- d$records %||% list()
 
     # ---- 按使用者隔离（gina 2026-11-19 要求）----------------------------
@@ -8672,6 +8683,42 @@ serve_request <- function(con, req) {
                   "Cache-Control: no-store\r\nConnection: close\r\n\r\n")
     writeBin(c(charToRaw(hdr), bytes), con); flush(con)
     return(invisible(NULL))
+  }
+
+  # ---- 补取正文：把缺正文的脚本交给执行端读回来（gina 2026-11-20）----
+  #   为什么需要这一步：分析跑在服务器上，脚本常只在那个工作目录里。
+  #   执行端回写时只带路径与指纹，没带正文，本机又没有同版本副本 —— 于是
+  #   notebook 里只能标「取不到正文」。这里把路径登记给执行端，取回后
+  #   md5 与登记值一致才收进存档，绝不拿一份"差不多"的文件顶替。
+  if (p == "/api/script-archive/fetch-body" && identical(req$method, "POST")) {
+    if (!exists("sa_request_bodies", mode = "function"))
+      return(send_json(con, 503, list(ok = FALSE, code = "archive_module_missing",
+        error = "缺少 engine/script_archive.R")))
+    b <- body_json()
+    rid <- as.character(b$record %||% "")
+    if (!nzchar(rid)) return(send_json(con, 400, list(ok = FALSE, error = "缺 record")))
+    if (grepl("\\.\\.", rid) || grepl("[/\\\\]", rid))
+      return(send_json(con, 400, list(ok = FALSE, error = "record 不合法")))
+    if (exists("sa_visible", mode = "function")) {
+      vis3 <- sa_visible(ENGINE_DIR,
+                         owner_key = as.character(owner_ctx_key(owner_ctx) %||% ""),
+                         is_admin = local({
+                           a0 <- tryCatch(admin_identity(APP_DIR, owner_ctx), error = function(e) NULL)
+                           isTRUE(a0$is_admin) }),
+                         isolation_on = local({
+                           p0 <- if (isTRUE(HAS_ADMIN_POLICY)) record_policy(APP_DIR) else
+                             list(record_isolation = TRUE, write_isolation = TRUE)
+                           isTRUE(p0$record_isolation) && isTRUE(p0$write_isolation) }),
+                         app_dir = APP_DIR)
+      if (!(rid %in% vis3$ids))
+        return(send_json(con, 403, list(ok = FALSE, code = "not_visible",
+          error = "这条脚本记录不属于当前身份")))
+    }
+    r <- tryCatch(sa_request_bodies(APP_DIR, ENGINE_DIR, rid,
+                                    owner_key = as.character(owner_ctx_key(owner_ctx) %||% "")),
+                  error = function(e) list(ok = FALSE, code = "request_failed",
+                                           error = conditionMessage(e)))
+    return(send_json(con, if (isTRUE(r$ok)) 200 else 400, r))
   }
 
   if (p == "/api/archive-read") {

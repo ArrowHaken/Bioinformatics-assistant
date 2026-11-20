@@ -5799,6 +5799,8 @@ async function renderLib() {
       : (nLive < files.length
         ? '<span class="libsub-c">可读 ' + nLive + ' / ' + files.length + ' 份</span>'
         : '<span class="libsub-c">' + files.length + ' 份均可读</span>');
+    // 缺正文的份数：用来决定给不给「补取正文」。
+    const nMiss = files.length - nLive;
     // 右侧下载：按这条记录汇编一份 ipynb。
     //   为什么放在记录这一层而不是每个脚本一行：她要的是「这一次处理
     //   用的整脚本合集」，一个脚本一个 ipynb 反而没法看。
@@ -5807,6 +5809,13 @@ async function renderLib() {
       ? '<button class="btn btn-sm" data-rec-nb="' + esc(rec.id) + '"'
         + ' title="按这条记录登记过的脚本汇编一份 ipynb">下载 ipynb</button>'
       : '<button class="btn btn-sm" disabled title="这条记录没有可读的脚本正文">下载 ipynb</button>';
+    // 补取正文（gina 2026-11-20）。
+    //   有脚本只在服务器上、本机没有同版本副本时，光标「缺」没有出路。
+    //   这个按钮把缺的那些路径交给执行端去读回来，md5 对上才收进存档。
+    const fetchBtn = nMiss > 0
+      ? '<button class="btn btn-sm" data-rec-body="' + esc(rec.id) + '"'
+        + ' title="让执行端按原路径把这些脚本读回来（md5 校验一致才收）">补取正文 ' + nMiss + '</button>'
+      : '';
     h += '<div class="librec">'
       + '<details class="libsub"><summary>'
       + '<span class="libsub-n">' + esc(rec.name || rec.id) + '</span>'
@@ -5948,7 +5957,10 @@ async function downloadRecordNotebook(recordId, btn) {
     const old = btn ? btn.textContent : '';
     if (btn) { btn.disabled = true; btn.textContent = '正在生成…'; }
     try {
-      const resp = await fetch('/api/script-archive/notebook?record=' + encodeURIComponent(recordId),
+      // 地址必须走 apiUrl()：应用挂在 /personal-analysis-assistant/ 这个子路径下，
+      //   写死 "/api/..." 会打到站点根，被网关挡掉，浏览器只报 "Failed to fetch"。
+      //   gina 2026-11-20 报的「下载 ipynb 报错」就是这个原因。
+      const resp = await fetch(apiUrl('/api/script-archive/notebook?record=' + encodeURIComponent(recordId)),
         { credentials: 'same-origin' });
       if (!resp.ok) {
         let msg = '生成失败';
@@ -5973,6 +5985,39 @@ async function downloadRecordNotebook(recordId, btn) {
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
     toast('ipynb：' + String(e.message || e), 'bad');
+  }
+}
+
+/* 补取正文：让执行端按原路径把缺的脚本读回来。
+   ---------------------------------------------------------------------
+   为什么会有"缺正文"：分析跑在服务器上，脚本常常只存在 /share/home/... 那个
+   工作目录里。执行端回写时只给了路径和指纹，没给正文；本机又没有同版本副本
+   （服务器那份被改过，md5 与随应用分发的不一致），所以只能先登记。
+   这个按钮就是把那些路径登记给执行端，取回来 md5 对上才收进存档 ——
+   不拿一份"差不多"的文件顶替，也不凭空生成。 */
+async function requestRecordBodies(recordId, btn) {
+  const __recordScope = recordContext();
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '正在登记…'; }
+  try {
+    const r = await api('/api/script-archive/fetch-body', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ record: recordId })
+    });
+    if (!r || !r.ok) { toast('补取正文：' + ((r && r.error) || '没能登记'), 'bad'); return; }
+    toast(r.note || ('已登记 ' + (r.queued || 0) + ' 个脚本等待取回。'),
+          (r.queued || 0) > 0 ? 'good' : 'bad');
+    if ((r.queued || 0) > 0) {
+      // 取回是异步的：过几秒刷新一次列表，正文到位后「缺」会自己消失。
+      //   函数名是 renderLib（本页脚本库列表的入口），写成别的名字只会静默失败。
+      setTimeout(() => { try { renderLib(); } catch (e) { /* 列表没开就算了 */ } }, 4000);
+    }
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    toast('补取正文：' + String(e.message || e), 'bad');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '补取正文'; }
   }
 }
 
@@ -8522,6 +8567,9 @@ document.addEventListener('click', async function (ev) {
   // 按记录下载 ipynb：整条记录汇编成一份，不是单脚本。
   const rnb = t.closest('[data-rec-nb]');
   if (rnb) { downloadRecordNotebook(rnb.getAttribute('data-rec-nb'), rnb); return; }
+  // 补取正文：把缺的那些脚本交给执行端按原路径读回来。
+  const rbd = t.closest('[data-rec-body]');
+  if (rbd) { requestRecordBodies(rbd.getAttribute('data-rec-body'), rbd); return; }
 
   /* ---- 脚本四个动作 ---- */
   const sa = t.closest('[data-sw-act]');
