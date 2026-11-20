@@ -10219,6 +10219,29 @@ if (!isTRUE(getOption("pa.serve.definitions_only", FALSE)) && HAS_DB) {
 # =====================================================================
 # 主循环
 # =====================================================================
+server_accept_with_timeout <- function(srv, timeout = 1) {
+  # Windows 的 socketAccept(timeout=) 不可用，但 socketSelect 在两个平台都支持
+  # 服务端 socket。先等“可读”再 accept，主循环就不会无限阻塞；空闲时也正好
+  # 能推进一次持久调度器。
+  ready <- tryCatch(socketSelect(list(srv), write = FALSE, timeout = timeout),
+                    error = function(e) NULL)
+  if (is.null(ready) || !length(ready) || !isTRUE(ready[[1]])) return(NULL)
+  socketAccept(srv, blocking = TRUE, open = "r+b")
+}
+
+poller_sweep <- function(limit = 10L) {
+  if (!exists("poller_drain", mode = "function")) {
+    n <- 0L
+    repeat {
+      r <- poller_step(DB_CON, APP_DIR)
+      if (is.null(r)) break
+      n <- n + 1L
+      if (n >= as.integer(limit)) break
+    }
+    n
+  } else poller_drain(DB_CON, APP_DIR, limit = limit)
+}
+
 main <- function() {
   srv <- tryCatch(serverSocket(PORT), error = function(e) {
     say("")
@@ -10268,51 +10291,44 @@ main <- function() {
 
   if (AUTOOPEN) try(browseURL(paste0("http://127.0.0.1:", PORT, "/")), silent = TRUE)
 
+  poll_meta_every <- as.numeric(get0("POLL_INTERVAL_SECS", ifnotfound = 30L))
+  last_poll_write <- 0
   repeat {
-    # Windows 上 socketAccept 的 timeout 参数不受支持，传了会直接报错，
-    # 所以按平台分开调用：Unix 给超时（否则 Ctrl+C 之后要等连接才退出），
-    # Windows 不给超时（一次 accept 就阻塞着，正常用法）。
-    con <- tryCatch(
-      if (IS_WIN) socketAccept(srv, blocking = TRUE, open = "r+b")
-      else        socketAccept(srv, blocking = TRUE, open = "r+b", timeout = 3600),
-      error = function(e) NULL)
-    if (is.null(con)) next
-    ok <- tryCatch({
-      req <- read_request(con)
-      if (!is.null(req)) serve_request(con, req)
-      TRUE
-    }, error = function(e) {
-      # 记下出错的那一行调用：只回一句 "subscript out of bounds" 无法定位，
-      #   而 500 又不会写进页面，排查时只能靠这里。
-      say("[err] ", conditionMessage(e), " <- ",
-          paste(utils::head(deparse(conditionCall(e)), 3), collapse = " "))
-      try(send_json(con, 500, list(ok = FALSE, error = enc2utf8(conditionMessage(e)))), silent = TRUE)
-      FALSE
-    })
-    try(close(con), silent = TRUE)
-    if (!ok) say("[warn] 这次请求没处理成：", format(Sys.time(), "%H:%M:%S"))
+    # socketSelect 让主循环每秒醒一次：有连接就处理，没有连接就推进
+    # 持久调度器。页面关掉后轮询/取回/返工仍会继续，也不再依赖 Windows
+    # 不支持的 socketAccept(timeout=)。
+    con <- tryCatch(server_accept_with_timeout(srv, timeout = 1),
+                    error = function(e) NULL)
+    if (!is.null(con)) {
+      ok <- tryCatch({
+        req <- read_request(con)
+        if (!is.null(req)) serve_request(con, req)
+        TRUE
+      }, error = function(e) {
+        # 记下出错的那一行调用：只回一句 "subscript out of bounds" 无法定位。
+        say("[err] ", conditionMessage(e), " <- ",
+            paste(utils::head(deparse(conditionCall(e)), 3), collapse = " "))
+        try(send_json(con, 500, list(ok = FALSE, error = enc2utf8(conditionMessage(e)))), silent = TRUE)
+        FALSE
+      })
+      try(close(con), silent = TRUE)
+      if (!ok) say("[warn] 这次请求没处理成：", format(Sys.time(), "%H:%M:%S"))
+    }
 
-    # ---- 每次处理完一个请求，顺手推一次调度 ----------------------
-    #   为什么放在主循环里而不是单独起进程：这套服务本来只开一个本机端口，
-    #   再起一个常驻进程会多一个「忘了启动它」的失败点。
-    #   放在这里的效果是：只要服务在跑、有请求进来，队列就被推动；
-    #   页面完全关掉时确实不会推进 —— 这一点必须如实写在页面上，
-    #   所以 /api/poller/status 会回 last_sweep_at 与 sweeps。
-    #   真要无人值守，用 `Rscript engine/poller.R` 单独跑，同一套租约不会重复领。
     if (DB_READY) {
-      sweep <- tryCatch({
-        n <- 0L
-        repeat {
-          r <- poller_step(DB_CON, APP_DIR)
-          if (is.null(r)) break
-          n <- n + 1L
-          if (n >= 10L) break
+      sweep <- tryCatch(poller_sweep(10L),
+                        error = function(e) { say("[warn] 调度没跑成：", conditionMessage(e)); -1L })
+      if (!is.na(sweep) && sweep >= 0L) {
+        tick <- as.numeric(Sys.time())
+        if (sweep > 0L || tick - last_poll_write >= poll_meta_every) {
+          stamp <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+          tryCatch({
+            db_meta_set(DB_CON, "poller_last_run", stamp)
+            db_meta_set(DB_CON, "poller_last_count", as.character(sweep))
+            if (sweep > 0L) db_meta_set(DB_CON, "last_sweep_at", stamp)
+          }, error = function(e) NULL)
+          last_poll_write <- tick
         }
-        n
-      }, error = function(e) { say("[warn] 调度没跑成：", conditionMessage(e)); -1L })
-      if (!is.na(sweep) && sweep > 0L) {
-        tryCatch(db_meta_set(DB_CON, "last_sweep_at", format(Sys.time(), "%Y-%m-%dT%H:%M:%S")),
-                 error = function(e) NULL)
       }
     }
   }

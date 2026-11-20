@@ -151,6 +151,8 @@ db_register_dispatch <- function(con, owner_key, session_id, version_id,
 
   run_id <- db_ensure_run(con, version_id, owner_key,
                           work_root = if (nzchar(run_dir)) run_dir else NULL)
+  project_id <- as.character(db_scalar(
+    con, "SELECT project_id FROM versions WHERE version_id = ?", list(version_id)))
   if (nzchar(req_id)) {
     r <- db_rows(con,
       paste0("SELECT * FROM step_attempts WHERE req_id = ? AND step_id = ? ",
@@ -176,10 +178,11 @@ db_register_dispatch <- function(con, owner_key, session_id, version_id,
     db_tx(con, function() {
       no <- db_next_attempt_no(con, run_id, step_id)
       DBI::dbExecute(con,
-        paste0("INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,",
+        paste0("INSERT INTO step_attempts(attempt_id,run_id,version_id,project_id,owner_key,",
                "step_id,attempt_no,req_id,script_path,script_digest,status,",
-               "started_at,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"),
-        list(aid, run_id, version_id, owner_key, step_id, no,
+               "started_at,payload) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"),
+        list(aid, run_id, version_id, if (is.na(project_id)) NA_character_ else project_id,
+             owner_key, step_id, no,
              if (nzchar(req_id)) req_id else NA_character_,
              script_path, script_digest, "delegated",
              db_now(), payload))

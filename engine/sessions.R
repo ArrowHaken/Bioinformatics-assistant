@@ -107,9 +107,18 @@ sess_chr <- function(x, d = "") {
 
 sess_read <- function(app_dir) {
   index <- sess_file(app_dir)
+  backup <- paste0(index, ".last-good")
   obj <- sess_read_json(index)
-  if (file.exists(index) && (is.null(obj) || !is.list(obj)))
-    stop("历史记录索引暂时无法读取，未清空或覆盖已有记录；请联系维护人员恢复。")
+  if ((file.exists(index) && (is.null(obj) || !is.list(obj))) ||
+      (!file.exists(index) && file.exists(backup))) {
+    recovered <- sess_read_json(backup)
+    if (!is.null(recovered) && is.list(recovered)) {
+      warning("sessions index was unreadable; using .last-good", call. = FALSE)
+      obj <- recovered
+    } else {
+      stop("历史记录索引暂时无法读取，未清空或覆盖已有记录；请联系维护人员恢复。")
+    }
+  }
   if (is.null(obj) || !is.list(obj)) obj <- list()
   if (is.null(obj$sessions) || !is.list(obj$sessions)) obj$sessions <- list()
   if (is.null(obj$current)) obj$current <- NULL

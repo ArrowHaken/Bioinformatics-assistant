@@ -1037,13 +1037,16 @@ db_api_report_step <- function(con, app_dir, owner, b, runDir, sid) {
 
   if (is.null(att)) {
     aid <- db_new_id("att")
-    no <- db_next_attempt_no(con, rid, step_id)
+    pid <- as.character(db_scalar(
+      con, "SELECT project_id FROM versions WHERE version_id = ?", list(vid)))
     db_tx(con, function() {
+      no <- db_next_attempt_no(con, rid, step_id)
       DBI::dbExecute(con,
-        "INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,step_id,attempt_no,
+        "INSERT INTO step_attempts(attempt_id,run_id,version_id,project_id,owner_key,step_id,attempt_no,
            req_id,ticket_id,script_path,script_digest,exit_code,status,reported_at,started_at,ended_at,payload)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        list(aid, rid, vid, owner_key, step_id, no, req_id %||% NA, ticket_in %||% NA,
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        list(aid, rid, vid, if (is.na(pid)) NA_character_ else pid,
+             owner_key, step_id, no, req_id %||% NA, ticket_in %||% NA,
              as.character(b$script_path %||% b$script %||% NA),
              as.character(b$script_md5 %||% b$script_digest %||% NA),
              suppressWarnings(as.integer(b$exit_code %||% b$code %||% NA)),

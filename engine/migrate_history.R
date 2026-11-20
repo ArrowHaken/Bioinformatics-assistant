@@ -108,10 +108,10 @@ migrate_history <- function(app_dir, dry_run = FALSE, verbose = TRUE) {
                            VALUES(?,?,?,?,?,?,?,?)",
                      list(vid, pid, "V1(legacy)", mig_chr(s$created_at, now), "legacy-unknown",
                           mig_chr(s$created_at, now), LEGACY_OWNER, "history_migration"))
-      DBI::dbExecute(con, "INSERT OR IGNORE INTO runs(run_id,version_id,owner_key,work_root,
+      DBI::dbExecute(con, "INSERT OR IGNORE INTO runs(run_id,project_id,version_id,owner_key,work_root,
                            exec_host,exec_pc,status,started_at,payload)
-                           VALUES(?,?,?,?,?,?,?,?,?)",
-                     list(rid, vid, LEGACY_OWNER, work_root,
+                           VALUES(?,?,?,?,?,?,?,?,?,?)",
+                     list(rid, pid, vid, LEGACY_OWNER, work_root,
                           mig_chr(srv$host), mig_chr(srv$exec_pc), "closed",
                           mig_chr(s$created_at, now),
                           db_json(list(legacy_session_id = sid, mode = mig_chr(s$mode)))))
@@ -141,9 +141,9 @@ migrate_history <- function(app_dir, dry_run = FALSE, verbose = TRUE) {
         aid <- paste0("att-legacy-", substr(digest::digest(paste(rid, step_id, i), algo = "md5"), 1, 12))
         if (!dry_run) {
           DBI::dbExecute(con, "INSERT OR IGNORE INTO step_attempts(attempt_id,run_id,version_id,
-                             owner_key,step_id,attempt_no,status,reported_at,started_at,ended_at,payload)
-                             VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-            list(aid, rid, vid, LEGACY_OWNER, step_id, 1L, mig_map_status(st$status),
+                             project_id,owner_key,step_id,attempt_no,status,reported_at,started_at,ended_at,payload)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            list(aid, rid, vid, pid, LEGACY_OWNER, step_id, 1L, mig_map_status(st$status),
                  mig_chr(st$imported_at) %||% NA, mig_chr(st$started_at) %||% NA,
                  mig_chr(st$ended_at) %||% NA,
                  db_json(list(migrated = TRUE, legacy_status = mig_chr(st$status),
@@ -164,9 +164,9 @@ migrate_history <- function(app_dir, dry_run = FALSE, verbose = TRUE) {
     if (length(items)) {
       sid_snap <- paste0("snap-legacy-", substr(digest::digest(rid, algo = "md5"), 1, 8))
       if (!dry_run) {
-        DBI::dbExecute(con, "INSERT OR IGNORE INTO snapshots(snapshot_id,version_id,owner_key,
-                           created_at,sealed,payload) VALUES(?,?,?,?,?,?)",
-          list(sid_snap, vid, LEGACY_OWNER, mig_chr(aj$listed_at, now), 1L,
+        DBI::dbExecute(con, "INSERT OR IGNORE INTO snapshots(snapshot_id,version_id,project_id,owner_key,
+                           created_at,sealed,payload) VALUES(?,?,?,?,?,?,?)",
+          list(sid_snap, vid, pid, LEGACY_OWNER, mig_chr(aj$listed_at, now), 1L,
                db_json(list(migrated = TRUE, source = "artifacts.json",
                             outdir = mig_chr(aj$outdir)))))
       }
@@ -174,11 +174,11 @@ migrate_history <- function(app_dir, dry_run = FALSE, verbose = TRUE) {
         rel <- mig_chr(it$rel)
         if (!nzchar(rel)) next
         if (!dry_run) {
-          DBI::dbExecute(con, "INSERT OR IGNORE INTO artifacts(artifact_id,snapshot_id,version_id,
-                             owner_key,rel,bytes,md5,kind,mtime,source)
-                             VALUES(?,?,?,?,?,?,?,?,?,?)",
+          DBI::dbExecute(con, "INSERT OR IGNORE INTO artifacts(artifact_id,snapshot_id,attempt_id,version_id,
+                             project_id,owner_key,rel,bytes,md5,kind,mtime,source)
+                             VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             list(paste0("art-legacy-", substr(digest::digest(paste(rid, rel), algo = "md5"), 1, 12)),
-                 sid_snap, vid, LEGACY_OWNER, rel, mig_int(it$size), NA_character_,
+                 sid_snap, NA_character_, vid, pid, LEGACY_OWNER, rel, mig_int(it$size), NA_character_,
                  mig_kind(rel), mig_chr(it$mtime) %||% NA, "artifacts.json"))
           counts$artifacts <- counts$artifacts + 1L
         } else counts$artifacts <- counts$artifacts + 1L

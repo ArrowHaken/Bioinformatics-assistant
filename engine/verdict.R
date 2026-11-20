@@ -2866,12 +2866,13 @@ verdict_step <- function(con, app_dir, attempt_id, writeback = NULL,
     snapshot_id <- as.character(snap$snapshot_id[1])
   } else {
     snapshot_id <- paste0("snap-", attempt_id)
+    attempt_project_id <- as.character(db_scalar(
+      con, "SELECT project_id FROM versions WHERE version_id=?", list(att$version_id)))
     man <- list(
       snapshot_id = snapshot_id, attempt_id = attempt_id,
       version_id = att$version_id, run_id = att$run_id, step_id = att$step_id,
       attempt_no = as.integer(att$attempt_no),
-      project_id = as.character(db_scalar(con, "SELECT project_id FROM versions WHERE version_id=?",
-                                          list(att$version_id)) %||% NA),
+      project_id = attempt_project_id %||% NA,
       created_at = db_now(), sealed = TRUE,
       inputs = list(req_id = att$req_id, ticket_id = att$ticket_id),
       params = b$params %||% NULL,
@@ -2896,10 +2897,12 @@ verdict_step <- function(con, app_dir, attempt_id, writeback = NULL,
 
     db_tx(con, function() {
       DBI::dbExecute(con,
-        "INSERT INTO snapshots(snapshot_id,attempt_id,version_id,owner_key,created_at,sealed,
+        "INSERT INTO snapshots(snapshot_id,attempt_id,version_id,project_id,owner_key,created_at,sealed,
            manifest_path,manifest_md5,input_refs,params,env_lock,command,log_tail,qc_verdict,payload)
-         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        list(snapshot_id, attempt_id, att$version_id, att$owner_key, db_now(), 1L,
+         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        list(snapshot_id, attempt_id, att$version_id,
+             if (is.na(attempt_project_id)) NA_character_ else attempt_project_id,
+             att$owner_key, db_now(), 1L,
              mfile, mmd5,
              db_json(list(req_id = att$req_id)), db_json(b$params %||% NULL),
              db_json(b$env_lock %||% NULL),
@@ -2909,10 +2912,12 @@ verdict_step <- function(con, app_dir, attempt_id, writeback = NULL,
                           inputs_declared = stage$deps %||% character(0)))))
       for (a in facts$artifacts) {
         DBI::dbExecute(con,
-          "INSERT OR IGNORE INTO artifacts(artifact_id,snapshot_id,version_id,owner_key,rel,
-             bytes,md5,kind,mtime,source) VALUES(?,?,?,?,?,?,?,?,?,?)",
+          "INSERT OR IGNORE INTO artifacts(artifact_id,snapshot_id,attempt_id,version_id,project_id,
+             owner_key,rel,bytes,md5,kind,mtime,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
           list(paste0("art-", substr(digest::digest(paste(snapshot_id, a$rel), algo = "md5"), 1, 16)),
-               snapshot_id, att$version_id, att$owner_key, a$rel, a$bytes, a$md5,
+               snapshot_id, attempt_id, att$version_id,
+               if (is.na(attempt_project_id)) NA_character_ else attempt_project_id,
+               att$owner_key, a$rel, a$bytes, a$md5,
                verdict_kind_of(a$rel), a$mtime, "writeback"))
       }
     })

@@ -74,7 +74,7 @@ db_iso_add <- function(secs, from = Sys.time()) {
 
 # ---- schema ----------------------------------------------------------
 
-DB_SCHEMA_VERSION <- "1"
+DB_SCHEMA_VERSION <- "2"
 
 db_init <- function(con) {
   stmts <- c(
@@ -114,6 +114,7 @@ db_init <- function(con) {
 
     "CREATE TABLE IF NOT EXISTS runs (
        run_id TEXT PRIMARY KEY,
+       project_id TEXT,
        version_id TEXT NOT NULL REFERENCES versions(version_id),
        owner_key TEXT NOT NULL,
        work_root TEXT,
@@ -129,6 +130,7 @@ db_init <- function(con) {
        attempt_id TEXT PRIMARY KEY,
        run_id TEXT NOT NULL REFERENCES runs(run_id),
        version_id TEXT NOT NULL,
+       project_id TEXT,
        owner_key TEXT NOT NULL,
        step_id TEXT NOT NULL,
        attempt_no INTEGER NOT NULL,
@@ -153,6 +155,7 @@ db_init <- function(con) {
        snapshot_id TEXT PRIMARY KEY,
        attempt_id TEXT REFERENCES step_attempts(attempt_id),
        version_id TEXT NOT NULL,
+       project_id TEXT,
        owner_key TEXT NOT NULL,
        created_at TEXT NOT NULL,
        sealed INTEGER NOT NULL DEFAULT 0,
@@ -170,7 +173,9 @@ db_init <- function(con) {
     "CREATE TABLE IF NOT EXISTS artifacts (
        artifact_id TEXT PRIMARY KEY,
        snapshot_id TEXT REFERENCES snapshots(snapshot_id),
+       attempt_id TEXT,
        version_id TEXT NOT NULL,
+       project_id TEXT,
        owner_key TEXT NOT NULL,
        rel TEXT NOT NULL,
        bytes INTEGER,
@@ -363,9 +368,12 @@ db_init <- function(con) {
 
   for (s in stmts) DBI::dbExecute(con, s)
 
-  # ---- 只追加保护：events / ledger ----
+  # 旧库升级：补列 -> 回填 -> 装守卫。顺序不能反过来，否则合法旧数据会被拦住。
+  db_migrate_identity(con)
+
+  # ---- 只追加保护：events / ledger / artifacts / reviews ----
   #   为什么用触发器而不是只靠约定：约定拦不住下一个人写一行 UPDATE。
-  for (tbl in c("events", "ledger")) {
+  for (tbl in c("events", "ledger", "artifacts", "reviews")) {
     for (op in c("UPDATE", "DELETE")) {
       trg <- paste0("trg_", tbl, "_no_", tolower(op))
       DBI::dbExecute(con, sprintf(
@@ -380,10 +388,150 @@ db_init <- function(con) {
     WHEN (SELECT version_id FROM runs WHERE run_id = NEW.run_id) IS NOT NEW.version_id
     BEGIN SELECT RAISE(ABORT, 'attempt.version_id != run.version_id'); END")
 
+  # 只校验版本号还不够：同一个 version 下仍可能把两个 owner 的 run 拼在一起。
+  #   这些守卫把 project / version / owner 作为同一把钥匙，任何一层错位都拒绝写。
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_run_scope_guard
+    BEFORE INSERT ON runs
+    WHEN NOT EXISTS (
+      SELECT 1 FROM versions v
+       WHERE v.version_id = NEW.version_id
+         AND (NEW.project_id IS NULL OR NEW.project_id = v.project_id)
+         AND EXISTS (
+           SELECT 1 FROM projects p
+            WHERE p.project_id = v.project_id AND p.owner_key = NEW.owner_key))
+    BEGIN SELECT RAISE(ABORT, 'run scope does not match version/project/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_run_scope_guard_update
+    BEFORE UPDATE OF project_id, version_id, owner_key ON runs
+    WHEN NOT EXISTS (
+      SELECT 1 FROM versions v
+       WHERE v.version_id = NEW.version_id
+         AND (NEW.project_id IS NULL OR NEW.project_id = v.project_id)
+         AND EXISTS (
+           SELECT 1 FROM projects p
+            WHERE p.project_id = v.project_id AND p.owner_key = NEW.owner_key))
+    BEGIN SELECT RAISE(ABORT, 'run scope does not match version/project/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_attempt_scope_guard
+    BEFORE INSERT ON step_attempts
+    WHEN NOT EXISTS (
+      SELECT 1 FROM runs r JOIN versions v ON v.version_id = r.version_id
+       WHERE r.run_id = NEW.run_id
+         AND r.version_id = NEW.version_id
+         AND r.owner_key = NEW.owner_key
+         AND (NEW.project_id IS NULL OR NEW.project_id = v.project_id))
+    BEGIN SELECT RAISE(ABORT, 'attempt scope does not match run/version/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_attempt_scope_guard_update
+    BEFORE UPDATE OF run_id, version_id, project_id, owner_key ON step_attempts
+    WHEN NOT EXISTS (
+      SELECT 1 FROM runs r JOIN versions v ON v.version_id = r.version_id
+       WHERE r.run_id = NEW.run_id
+         AND r.version_id = NEW.version_id
+         AND r.owner_key = NEW.owner_key
+         AND (NEW.project_id IS NULL OR NEW.project_id = v.project_id))
+    BEGIN SELECT RAISE(ABORT, 'attempt scope does not match run/version/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_snapshot_scope_guard
+    BEFORE INSERT ON snapshots
+    WHEN NEW.attempt_id IS NOT NULL AND NOT EXISTS (
+      SELECT 1 FROM step_attempts a JOIN runs r ON r.run_id = a.run_id
+       WHERE a.attempt_id = NEW.attempt_id
+         AND a.version_id = NEW.version_id
+         AND a.owner_key = NEW.owner_key
+         AND (NEW.project_id IS NULL OR NEW.project_id = r.project_id))
+    BEGIN SELECT RAISE(ABORT, 'snapshot scope does not match attempt/version/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_artifact_scope_guard
+    BEFORE INSERT ON artifacts
+    WHEN NEW.snapshot_id IS NULL OR NOT EXISTS (
+      SELECT 1 FROM snapshots s
+       WHERE s.snapshot_id = NEW.snapshot_id
+         AND s.version_id = NEW.version_id
+         AND s.owner_key = NEW.owner_key
+         AND (NEW.project_id IS NULL OR NEW.project_id = s.project_id)
+         AND (NEW.attempt_id IS NULL OR NEW.attempt_id = s.attempt_id))
+    BEGIN SELECT RAISE(ABORT, 'artifact scope does not match snapshot/attempt/version/owner'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_snapshot_sealed_no_update
+    BEFORE UPDATE ON snapshots
+    WHEN OLD.sealed = 1
+    BEGIN SELECT RAISE(ABORT, 'sealed snapshot is immutable'); END")
+
+  DBI::dbExecute(con, "CREATE TRIGGER IF NOT EXISTS trg_snapshot_sealed_no_delete
+    BEFORE DELETE ON snapshots
+    WHEN OLD.sealed = 1
+    BEGIN SELECT RAISE(ABORT, 'sealed snapshot is immutable'); END")
+
   db_meta_set(con, "schema_version", DB_SCHEMA_VERSION)
   db_meta_set(con, "initialized_at",
               (db_meta_get(con, "initialized_at") %||% db_now()))
   invisible(con)
+}
+
+# ---- schema migration -------------------------------------------------
+
+db_table_columns <- function(con, table) {
+  r <- DBI::dbGetQuery(con, paste0("PRAGMA table_info(", table, ")"))
+  if (!nrow(r)) character(0) else as.character(r$name)
+}
+
+db_ensure_column <- function(con, table, column, declaration) {
+  if (!column %in% db_table_columns(con, table))
+    DBI::dbExecute(con, paste0("ALTER TABLE ", table, " ADD COLUMN ", column, " ", declaration))
+  invisible(TRUE)
+}
+
+db_migrate_identity <- function(con) {
+  # v1 -> v2. 补列可以每次幂等执行；回填只对旧 schema 做一次。
+  #   原因：artifacts / snapshots 随后会被只追加 / 封存触发器保护，
+  #   不能因为一次正常启动再去 UPDATE 已经落盘的历史行。
+  from_v1 <- !identical(db_meta_get(con, "schema_version"), DB_SCHEMA_VERSION)
+  db_ensure_column(con, "runs", "project_id", "TEXT")
+  db_ensure_column(con, "step_attempts", "project_id", "TEXT")
+  db_ensure_column(con, "snapshots", "project_id", "TEXT")
+  db_ensure_column(con, "artifacts", "attempt_id", "TEXT")
+  db_ensure_column(con, "artifacts", "project_id", "TEXT")
+
+  if (from_v1) {
+    DBI::dbExecute(con, "UPDATE runs
+      SET project_id = (SELECT v.project_id FROM versions v WHERE v.version_id = runs.version_id)
+      WHERE project_id IS NULL OR project_id = ''")
+    DBI::dbExecute(con, "UPDATE step_attempts
+      SET project_id = (SELECT r.project_id FROM runs r WHERE r.run_id = step_attempts.run_id)
+      WHERE project_id IS NULL OR project_id = ''")
+    DBI::dbExecute(con, "UPDATE snapshots
+      SET project_id = (SELECT v.project_id FROM versions v WHERE v.version_id = snapshots.version_id)
+      WHERE project_id IS NULL OR project_id = ''")
+    DBI::dbExecute(con, "UPDATE artifacts
+      SET attempt_id = (SELECT s.attempt_id FROM snapshots s WHERE s.snapshot_id = artifacts.snapshot_id)
+      WHERE attempt_id IS NULL OR attempt_id = ''")
+    DBI::dbExecute(con, "UPDATE artifacts
+      SET project_id = (SELECT s.project_id FROM snapshots s WHERE s.snapshot_id = artifacts.snapshot_id)
+      WHERE project_id IS NULL OR project_id = ''")
+  }
+
+  DBI::dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_runs_project ON runs(project_id, version_id)")
+  DBI::dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_attempt_project ON step_attempts(project_id, step_id, status)")
+  DBI::dbExecute(con, "CREATE INDEX IF NOT EXISTS idx_artifacts_attempt ON artifacts(attempt_id, rel)")
+  db_migrate_active_req_index(con)
+}
+
+db_migrate_active_req_index <- function(con) {
+  # 一个 request 在同一版本、同一步骤里只能有一个未关闭 attempt。
+  #   旧库若已有重复，不删改历史；退回普通索引，启动因此仍成功。
+  tryCatch(
+    DBI::dbExecute(con, paste0(
+      "CREATE UNIQUE INDEX IF NOT EXISTS uq_attempt_active_req ",
+      "ON step_attempts(version_id, step_id, req_id) ",
+      "WHERE req_id IS NOT NULL AND req_id <> '' ",
+      "AND status IN ('delegated','reported')")),
+    error = function(e) {
+      DBI::dbExecute(con, paste0(
+        "CREATE INDEX IF NOT EXISTS idx_attempt_active_req ",
+        "ON step_attempts(version_id, step_id, req_id, status)"))
+    })
+  invisible(TRUE)
 }
 
 # ---- 元信息 ----------------------------------------------------------
@@ -669,10 +817,13 @@ db_ensure_run <- function(con, version_id, owner_key, run_id = NULL,
   }
   rid <- run_id %||% paste0("run-", substr(digest::digest(
     paste(version_id, db_now()), algo = "md5"), 1, 10))
+  project_id <- as.character(db_scalar(
+    con, "SELECT project_id FROM versions WHERE version_id = ?", list(version_id)))
   DBI::dbExecute(con,
-    "INSERT OR IGNORE INTO runs(run_id,version_id,owner_key,work_root,exec_host,exec_pc,started_at)
-     VALUES(?,?,?,?,?,?,?)",
-    list(rid, version_id, owner_key, work_root %||% NA_character_,
+    "INSERT OR IGNORE INTO runs(run_id,project_id,version_id,owner_key,work_root,exec_host,exec_pc,started_at)
+     VALUES(?,?,?,?,?,?,?,?)",
+    list(rid, if (is.na(project_id)) NA_character_ else project_id,
+         version_id, owner_key, work_root %||% NA_character_,
          host %||% NA_character_, pc %||% NA_character_, db_now()))
   rid
 }

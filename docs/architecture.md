@@ -56,6 +56,30 @@ dispatch
   这条路径会留下 `legacy` 标记，并且只在记录当前版本内绑定。旧版本的 attempt
   不能接住新版本的回写；已关闭的兼容 attempt 重开时也落在当前版本。
 
+### 3.1 六层身份链（schema v2）
+
+一次分析结果的完整归属不是 `project -> version`，而是：
+
+```text
+project -> version -> run -> step_attempt -> snapshot -> artifact
+```
+
+`step_attempt` 是执行事实的锚点；`snapshot` 和 `artifact` 都必须能回到同一个
+attempt。v2 在以下位置补上了显式列：
+
+- `runs.project_id`
+- `step_attempts.project_id`
+- `snapshots.project_id`
+- `artifacts.attempt_id`、`artifacts.project_id`
+
+数据库触发器把 `project_id / version_id / owner_key / run_id / attempt_id` 作为同一把
+钥匙校验。跨 owner 的 run、跨版本的 attempt、指向别的 attempt 的 snapshot 或 artifact
+都会被拒绝。已封存的 snapshot 不可更新或删除；`events / ledger / artifacts / reviews`
+只追加。同一版本、同一阶段、同一 `req_id` 最多只能有一个 `delegated/reported` attempt。
+
+旧库升级只在 schema v1 时回填一次，之后启动不会再改写只追加表。历史数据若本身没有
+attempt 指针，保留 `NULL`，不会凭空编造；新写入必须满足完整作用域。
+
 ## 4. 回写契约
 
 执行端向 `POST /api/step/import` 提交时，必须原样带回：
@@ -112,6 +136,19 @@ dispatch
 - login/observe 脚本不得自行生成“脚本编号/版本号”作为回写身份。
 - 轮询任务 `poll_jobs` 复用同一个 `attempt_id`，不再另建一个 attempt。
 
+### 5.1 持久调度与租约
+
+`poll_jobs` 的领取是一条 `UPDATE`：候选行由子查询选出，租约 `lease_until` 与唯一
+`claim_token` 在同一条写语句里落盘。SQLite 的写锁让并发进程只能有一个领取者；遇到
+`SQLITE_BUSY` 时有限重试。`claim_token` 只用于回查本次领到的行，避免同一 worker
+在同一秒领取多条时返回错行。`poller_finish()` 清空租约；租约到期后可被其他 worker
+重新领取。
+
+服务主循环使用 `socketSelect()` 每秒唤醒一次，再对已经可读的服务端 socket 调用
+`socketAccept()`。这样绕开了 Windows 不支持 `socketAccept(timeout=)` 的问题；页面
+关闭时主循环仍会定期调用 `poller_drain()`，轮询、取回与返工不再依赖浏览器请求。
+调度心跳最多每 30 秒写一次；有作业推进时立即刷新，避免空闲时每秒写 SQLite。
+
 ## 6. 首屏与静态资源
 
 - 文本资源（JS/CSS/HTML/JSON/SVG）在客户端支持时用 gzip。
@@ -142,7 +179,20 @@ dispatch
 探测连接必须用二进制 socket（`open = "r+b"`）。`writeBin()` 不能写文本连接；早期版本
 因此把每个健康实例都探测成失败，第二进程仍然以 1 退出，重启风暴没有被真正挡住。
 
-## 8. 不在本次范围
+### 7.1 历史索引恢复
+
+`sessions.json` 和 `state.json` 先写同目录临时文件，校验长度与字节后 `rename` 提交。
+提交前保留上一份可读索引为 `.last-good`。读取时主文件仍是权威来源；只有主文件缺失
+或解析失败时才回退到 `.last-good`，并发出明确警告。主文件和备份都不可读时失败关闭，
+不清空、不覆盖已有历史。
+
+## 8. 本次修复记录
+
+2026-11-20 的修复详情见
+`docs/identity-scheduler-session-repair-2026-11-20.md`。该记录包含问题清单、迁移与
+回滚边界、测试命令和已知限制。
+
+## 9. 不在本次范围
 
 - 不修改生产 systemd unit。
 - 不一次重写 `engine/server_main.R` 的全部路由；本次只拆启动、静态资源、回写身份与迁移边界。

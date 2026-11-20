@@ -35,37 +35,59 @@ poller_jitter <- function(secs) secs + sample(0:15, 1)
 
 # ---- 原子领取 --------------------------------------------------------
 
+poller_lease_until <- function(now) {
+  t <- if (inherits(now, "POSIXt")) now else
+    as.POSIXct(as.character(now), format = "%Y-%m-%dT%H:%M:%S")
+  if (length(t) != 1L || is.na(t)) t <- Sys.time()
+  db_iso_add(POLL_LEASE_SECS, from = t)
+}
+
+poller_claim_once <- function(con, worker, now, claim_token) {
+  # SELECT + UPDATE 分两步会在两个进程之间留下“都看见、都去领”的窗口。
+  #   把候选选择放进 UPDATE 的 WHERE 子句，领取本身成为一次原子写：
+  #   第一个写者把 lease_until 推到未来，第二个写者的子查询就不会再选中它。
+  #   这里不用显式事务，避免与 db_tx 的嵌套语义互相干扰；SQLite 的单语句
+  #   写事务表达租约，外层 poller_claim 负责对 SQLITE_BUSY 做有限重试。
+  lease_until <- poller_lease_until(now)
+  changed <- DBI::dbExecute(con, paste0(
+    "UPDATE poll_jobs SET state='leased', lease_until=?, leased_by=?, updated_at=? ",
+    "WHERE job_id = (",
+    "  SELECT job_id FROM poll_jobs ",
+    "   WHERE state IN ('pending','leased') ",
+    "     AND next_check_at <= ? ",
+    "     AND (lease_until IS NULL OR lease_until < ?) ",
+    "   ORDER BY next_check_at, created_at, job_id LIMIT 1) ",
+    "AND state IN ('pending','leased') ",
+    "AND (lease_until IS NULL OR lease_until < ?)"),
+    list(lease_until, claim_token, now, now, now, now))
+  j <- DBI::dbGetQuery(con,
+    "SELECT * FROM poll_jobs WHERE state='leased' AND leased_by=? AND lease_until=?",
+    list(claim_token, lease_until))
+  # 重试可能发生在 UPDATE 已成功、但回查前遇到短暂锁冲突之后。
+  #   同一个 claim_token 若已经落到某一行，就直接把那行还给调用者，
+  #   不要因为 subquery 已看不到它而误判成“没领到”。
+  if (!nrow(j)) return(NULL)
+  job <- as.list(j[1, ])
+  # leased_by 的存储值是一次性令牌，避免同一 worker 在同一秒领两条时
+  #   回查拿到错行；对外仍保留调用者传入的 worker 名。
+  job$leased_by <- worker
+  job$claim_token <- claim_token
+  job
+}
+
 poller_claim <- function(con, worker = "poller", now = db_now()) {
-  # SQLite 不支持 UPDATE ... RETURNING（3.35 起支持，但为兼容老版本用事务包裹）。
-  #
-  # 踩过的坑（2026-11-06）：这里原本在 dbWithTransaction 的表达式里写了
-  #   `if (!nrow(r)) return(NULL)`。R 的 return() 退出的是**外层函数**
-  #   poller_claim，不是那段表达式，于是 dbWithTransaction 的
-  #   commit/rollback 全被跳过 —— 事务就这么悬在连接上。
-  #   后果不是"这一轮没领到活"，而是连接从此卡在事务里：
-  #   接下来每一次 BEGIN 都报 "cannot start a transaction within a transaction"，
-  #   于是 /api/step/import 全部 409，进度永远写不回来。
-  #   触发条件极常见：队列里没有到期作业时就走这条路 —— 也就是绝大多数轮次。
-  #
-  # 现在改成：先把结果算进变量，事务本体正常跑完，退出事务后再决定返回什么。
-  got <- NULL
-  DBI::dbWithTransaction(con, {
-    r <- DBI::dbGetQuery(con,
-      "SELECT job_id FROM poll_jobs
-        WHERE state IN ('pending','leased')
-          AND next_check_at <= ?
-          AND (lease_until IS NULL OR lease_until < ?)
-        ORDER BY next_check_at LIMIT 1", list(now, now))
-    if (nrow(r)) {
-      job_id <- as.character(r$job_id[1])
-      DBI::dbExecute(con,
-        "UPDATE poll_jobs SET state='leased', lease_until=?, leased_by=?, updated_at=?
-          WHERE job_id=?", list(db_iso_add(POLL_LEASE_SECS), worker, now, job_id))
-      j <- DBI::dbGetQuery(con, "SELECT * FROM poll_jobs WHERE job_id=?", list(job_id))
-      got <- as.list(j[1, ])
-    }
-  })
-  got
+  claim_token <- paste0(worker, ":", Sys.getpid(), ":",
+                        sprintf("%08x", sample.int(.Machine$integer.max, 1)))
+  last <- NULL
+  for (i in seq_len(6L)) {
+    ans <- tryCatch(poller_claim_once(con, worker, now, claim_token),
+                    error = function(e) e)
+    if (!inherits(ans, "error")) return(ans)
+    last <- ans
+    if (!grepl("locked|busy", conditionMessage(ans), ignore.case = TRUE)) stop(ans)
+    Sys.sleep(0.02 * i)
+  }
+  stop(last)
 }
 
 poller_finish <- function(con, job, ok, error = NULL, delay = NULL, state = NULL) {
@@ -174,17 +196,24 @@ poller_step <- function(con, app_dir, worker = "poller", now = db_now()) {
   list(job_id = job$job_id, kind = job$kind, result = res)
 }
 
+poller_drain <- function(con, app_dir, worker = "poller", limit = 10L) {
+  limit <- suppressWarnings(as.integer(limit))
+  if (length(limit) != 1L || is.na(limit) || limit <= 0L) return(0L)
+  n <- 0L
+  repeat {
+    r <- poller_step(con, app_dir, worker = worker)
+    if (is.null(r)) break
+    n <- n + 1L
+    if (n >= limit) break
+  }
+  n
+}
+
 poller_loop <- function(app_dir, once = FALSE, interval = POLL_INTERVAL_SECS) {
   con <- db_connect(app_dir)
   on.exit(DBI::dbDisconnect(con))
   repeat {
-    n <- 0L
-    repeat {
-      r <- poller_step(con, app_dir)
-      if (is.null(r)) break
-      n <- n + 1L
-      if (once && n >= 20L) break
-    }
+    n <- poller_drain(con, app_dir, limit = if (once) 20L else 10L)
     # 每轮都盖一次时间戳，哪怕这一轮什么都没领到。
     #   为什么：原来看"调度在不在动"只有一个信号 —— 有作业被处理。
     #   队列闲的时候这个信号永远不出现，于是"调度器活着但没活干"和

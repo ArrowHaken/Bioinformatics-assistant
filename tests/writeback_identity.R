@@ -58,6 +58,10 @@ att <- wbi_attempt_by_id(con, aid)
 ok("attempt starts delegated", identical(as.character(att$status), "delegated"))
 ok("attempt carries run/version", identical(as.character(att$run_id), RID) &&
      identical(as.character(att$version_id), VID))
+ok("attempt carries project", identical(wbi_chr(att$project_id), PID))
+run_row <- db_rows(con, "SELECT * FROM runs WHERE run_id=?", list(RID))
+ok("run carries project", nrow(run_row) == 1L &&
+     identical(wbi_chr(run_row$project_id[[1]]), PID))
 
 b_good <- list(attempt_id = aid, step = "doublet", version_id = VID,
                run_id = RID, req_id = "req-1", session_id = SID)

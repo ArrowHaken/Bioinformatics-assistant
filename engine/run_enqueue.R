@@ -1046,14 +1046,15 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
             if (nzchar(as.character((enq %||% list())$run_id %||% "")))
               rid0 <- as.character(enq$run_id)
             if (!nzchar(aid0)) {
-              no <- db_next_attempt_no(DB_CON, rid0, stepId)
               aid0 <- db_new_id("att")
               db_tx(DB_CON, function() {
+                no <- db_next_attempt_no(DB_CON, rid0, stepId)
                 DBI::dbExecute(DB_CON,
-                  "INSERT INTO step_attempts(attempt_id,run_id,version_id,owner_key,step_id,
+                  "INSERT INTO step_attempts(attempt_id,run_id,version_id,project_id,owner_key,step_id,
                      attempt_no,req_id,status,started_at,payload)
-                   VALUES(?,?,?,?,?,?,?,?,?,?)",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                   list(aid0, rid0, vinfo$version_id,
+                       if (is.na(vinfo$project_id %||% NA)) NA_character_ else vinfo$project_id,
                        if (is.na(owner_ctx$key)) "unattributed" else owner_ctx$key,
                        stepId, no, if (nzchar(stepRq)) stepRq else NA, "delegated",
                        db_now(), db_json(list(via = via, run_dir = V$run_dir %||% ""))))
