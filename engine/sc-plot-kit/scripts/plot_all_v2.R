@@ -161,7 +161,60 @@ SIZE <- list(
   diff    = pick(c("size_diff"),    c(10, 10)),
   enrich  = pick(c("size_enrich"),  c(10, 10))
 )
-DPI <- pick(c("dpi"), 300)
+DPI <- pick(c("dpi"), 600)
+BASE_PT <- pick(c("base_size", "plot_base_size"), 9)
+
+# 目标框比例直接对应 sc-ppt-kit/scripts/slide_spec.json 的 images[].ext。
+# 画布按「宽 / 比例」反算高，避免把 2:1 的图塞进 4:3 的框。
+FRAME_RATIO <- list(
+  qc             = 7200000 / 5400000,
+  umap           = 7200000 / 5400000,
+  group_umap     = 7200000 / 5400000,
+  sample_split   = 8355965 / 5571490,
+  heatmap        = 7200000 / 5400000,
+  feature        = 7200000 / 5400000,
+  violin         = 7200000 / 5400000,
+  annot_cluster  = 6727825 / 4601845,
+  annot_type     = 5250180 / 3859530,
+  dotplot        = 8187690 / 4208145,
+  ratio_group    = 7200265 / 4940300,
+  ratio_sample   = 8124190 / 5415915,
+  ratio_pval     = 5944888 / 5400000,
+  volcano        = 7200000 / 5400000,
+  enrich         = 7200000 / 5400000
+)
+
+# 统一主题：刻度 = base，面板标题/图标题 = 1.3*base，轴标题 = 1.45*base。
+# 1.3 的比例来自原版；轴标题再高一点，保证落地 >= 0.28 cm。
+sc_theme <- function(base_size = BASE_PT, bg = "white") {
+  th <- theme_bw(base_size = base_size) + theme(
+    axis.title = element_text(size = base_size * 1.45, colour = "black"),
+    axis.text = element_text(size = base_size, colour = "black"),
+    plot.title = element_text(size = base_size * 1.3, hjust = 0.5, colour = "black"),
+    strip.text = element_text(size = base_size * 1.3, colour = "black"),
+    legend.text = element_text(size = base_size * 0.95, colour = "black"),
+    legend.title = element_text(size = base_size, colour = "black"),
+    axis.line = element_line(linewidth = 0.35, colour = "black"),
+    axis.ticks = element_line(linewidth = 0.35, colour = "black"),
+    panel.grid.major = element_line(linewidth = 0.3, colour = "grey92"),
+    panel.grid.minor = element_blank()
+  )
+  if (identical(bg, "transparent")) {
+    th <- th + theme(
+      plot.background = element_rect(fill = "transparent", colour = NA),
+      panel.background = element_rect(fill = "transparent", colour = NA),
+      legend.background = element_rect(fill = "transparent", colour = NA),
+      legend.key = element_rect(fill = "transparent", colour = NA)
+    )
+  }
+  th
+}
+
+# 分面图不要写死英寸：每个面板给固定宽度，再按 ncol 反算总宽。
+# ncol=2 时仍至少 10 英寸，避免两面板图被压得过窄。
+facet_width <- function(ncol, panel_w = 3.025, chrome = 1.4) {
+  max(10, ncol * panel_w + chrome)
+}
 
 # 分组配色：按实际出现的分组名顺序分配；配置可用 group_colors 指定映射
 GRP_MAP <- pick(c("group_colors"), NULL)
@@ -208,11 +261,14 @@ SAMPLE_COL <- grep("^sample_", names(PLOT_CFG), value = TRUE)
 SAMPLE_COL <- if (length(SAMPLE_COL) > 0) unlist(PLOT_CFG[[SAMPLE_COL[1]]]) else
   c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E", "#E6AB02", "#A6761D")
 
-# 统一出图：白底（原报告 PNG 是透明底，导出会变黑，必须显式白底）
-save_plot <- function(p, path, w = 10, h = 8, dpi = DPI) {
+# 统一出图：宽度 + 目标框比例反算高度，像素和框比同时受控。
+save_plot <- function(p, path, w = 10, ratio = FRAME_RATIO$umap,
+                      dpi = DPI, bg = "white") {
+  h <- w / ratio
   ggsave(paste0(path, ".png"), p, width = w, height = h, dpi = dpi,
-         bg = "white", limitsize = FALSE)
-  cat("   ->", basename(path), "\n")
+         bg = bg, limitsize = FALSE)
+  cat("   ->", basename(path), " ", round(w * dpi), "x", round(h * dpi),
+      " px\n", sep = "")
 }
 
 # ============================== 0. QC ==============================
@@ -227,13 +283,14 @@ if ("qc" %in% stages) {
       o <- subset(obj, cells = cells)
       Idents(o) <- scol
       VlnPlot(o, features = feat, pt.size = 0, cols = CORAL) +
-        labs(x = "Identity", y = NULL) +
-        theme(legend.position = "right",
-              axis.text.x = element_text(angle = 45, hjust = 1, size = 7),
-              plot.title = element_text(size = 10, hjust = 0.5))
+        labs(x = "Identity", y = NULL)
     })
-    p <- wrap_plots(plist, ncol = 3)
-    save_plot(p, file.path(d, paste0(feat, "_violin")), 12, 10)
+    p <- wrap_plots(plist, ncol = 3) &
+      sc_theme(bg = "transparent") &
+      theme(legend.position = "right",
+            axis.text.x = element_text(angle = 45, hjust = 1))
+    save_plot(p, file.path(d, paste0(feat, "_violin")),
+              w = facet_width(3), ratio = FRAME_RATIO$qc, bg = "transparent")
   }
   st <- data.frame(sample = names(table(obj@meta.data[[scol]])),
                    cell_number = as.integer(table(obj@meta.data[[scol]])))
@@ -246,23 +303,28 @@ if ("qc" %in% stages) {
 if ("cluster" %in% stages) {
   cat("\n== 1.cluster ==\n")
   d <- file.path(outdir, "1.cluster"); dir.create(d, showWarnings = FALSE)
-  umap_lab <- function(p) p + labs(x = "UMAP_1", y = "UMAP_2")
-  save_plot(umap_lab(DimPlot(obj, label = TRUE, raster = FALSE, pt.size = 0.4,
-                             cols = color_panel) & NoAxes() & theme_void()),
-            file.path(d, "merge_umap"), 10, 8)
+  umap_style <- function(p, blank_title = FALSE) {
+    p & labs(x = "UMAP_1", y = "UMAP_2") & sc_theme(bg = "transparent") &
+      (if (blank_title) theme(plot.title = element_blank()) else theme())
+  }
+  # 第 7、8 页统一：都保留 UMAP_1 / UMAP_2 轴与刻度，只用图例区分着色。
+  save_plot(umap_style(DimPlot(obj, label = TRUE, raster = FALSE, pt.size = 0.4,
+                               cols = color_panel), blank_title = TRUE),
+            file.path(d, "merge_umap"), 10, FRAME_RATIO$umap, bg = "transparent")
   # 按样本着色：原报告无标题、图上不写样本名标签、用高区分度色板
   SAMPLE_COL <- c("#1B9E77", "#D95F02", "#7570B3", "#E7298A", "#66A61E",
                   "#E6AB02", "#A6761D", "#666666", "#377EB8", "#984EA3")
-  save_plot(DimPlot(obj, group.by = scol, label = FALSE, raster = FALSE, pt.size = 0.4,
-                    cols = SAMPLE_COL) +
-              labs(x = "UMAP_1", y = "UMAP_2") + theme(plot.title = element_blank()),
-            file.path(d, "merge_sample_umap"), 10, 8)
-  save_plot(DimPlot(obj, split.by = gcol, ncol = 2, label = TRUE, raster = FALSE, pt.size = 0.4,
-                    cols = color_panel) + labs(x = "UMAP_1", y = "UMAP_2"),
-            file.path(d, "merge_group_umap"), 14, 7)
-  save_plot(DimPlot(obj, split.by = scol, ncol = 4, label = TRUE, raster = FALSE, pt.size = 0.3,
-                    cols = color_panel) + labs(x = "UMAP_1", y = "UMAP_2"),
-            file.path(d, "merge_sample_split_umap"), 16, 9)
+  save_plot(umap_style(DimPlot(obj, group.by = scol, label = FALSE, raster = FALSE,
+                               pt.size = 0.4, cols = SAMPLE_COL), blank_title = TRUE),
+            file.path(d, "merge_sample_umap"), 10, FRAME_RATIO$umap, bg = "transparent")
+  save_plot(umap_style(DimPlot(obj, split.by = gcol, ncol = 2, label = TRUE,
+                               raster = FALSE, pt.size = 0.4, cols = color_panel)),
+            file.path(d, "merge_group_umap"), facet_width(2), FRAME_RATIO$group_umap,
+            bg = "transparent")
+  save_plot(umap_style(DimPlot(obj, split.by = scol, ncol = 4, label = TRUE,
+                               raster = FALSE, pt.size = 0.3, cols = color_panel)),
+            file.path(d, "merge_sample_split_umap"), facet_width(4),
+            FRAME_RATIO$sample_split, bg = "transparent")
 }
 
 # ============================== 2. markgene ==============================
@@ -295,19 +357,23 @@ if ("markgene" %in% stages) {
   #   配色由下面的 scale_fill_gradient2 控制。
   p_hm <- DoHeatmap(obj, features = as.character(unique(top10$gene))) +
           scale_fill_gradient2(low = "#3B4CC0", mid = "#F7F7F7", high = "#D7301F") +
-          theme(axis.text.y = element_text(size = 4))
-  save_plot(p_hm, file.path(d, "top10_heatmap"), 14, 14)
+          sc_theme(bg = "white")
+  save_plot(p_hm, file.path(d, "top10_heatmap"), 12.5, FRAME_RATIO$heatmap)
 
   # FeaturePlot / 小提琴：按群出 12 基因的拼板（原报告是 3x4）
   for (i in levels(obj$seurat_clusters)) {
     g <- as.character(top12$gene[top12$cluster == i])
     if (length(g) == 0) next
     fp <- FeaturePlot(obj, features = g, ncol = 4, raster = FALSE) &
-          scale_colour_gradientn(colours = c("lightblue", "lightyellow", "orange", "red"))
-    save_plot(fp, file.path(d, paste0("featureplot_cluster", i)), 14, 9)
+          scale_colour_gradientn(colours = c("lightblue", "lightyellow", "orange", "red")) &
+          labs(x = "UMAP_1", y = "UMAP_2") & sc_theme(bg = "transparent")
+    save_plot(fp, file.path(d, paste0("featureplot_cluster", i)),
+              facet_width(4), FRAME_RATIO$feature, bg = "transparent")
     vp <- VlnPlot(obj, features = g, pt.size = 0, ncol = 4, cols = color_panel,
-                  fill.by = "ident") & labs(y = "Expression Level")
-    save_plot(vp, file.path(d, paste0("violin_cluster", i)), 14, 9)
+                  fill.by = "ident") & labs(y = "Expression Level") &
+          sc_theme(bg = "transparent")
+    save_plot(vp, file.path(d, paste0("violin_cluster", i)),
+              facet_width(4), FRAME_RATIO$violin, bg = "transparent")
     cat("   群", i, "完成\n")
   }
 }
@@ -320,12 +386,16 @@ if ("annot" %in% stages && ccol %in% colnames(obj@meta.data)) {
   obj$annot_cluster <- factor(paste0(obj$seurat_clusters, ":", obj@meta.data[[ccol]]))
   save_plot(DimPlot(obj, group.by = ccol, label = TRUE, repel = TRUE, raster = FALSE,
                     pt.size = 0.5, cols = color_panel) +
-              labs(x = "UMAP_1", y = "UMAP_2", title = ccol),
-            file.path(d, "merge_umap_annot"), 11, 8)
+              labs(x = "UMAP_1", y = "UMAP_2", title = ccol) +
+              sc_theme(bg = "transparent"),
+            file.path(d, "merge_umap_annot"), 10, FRAME_RATIO$annot_type,
+            bg = "transparent")
   save_plot(DimPlot(obj, group.by = "annot_cluster", label = TRUE, repel = TRUE,
                     raster = FALSE, pt.size = 0.5, cols = color_panel) +
-              labs(x = "UMAP_1", y = "UMAP_2", title = "annot_cluster"),
-            file.path(d, "merge_umap_cluster_annot"), 12, 9)
+              labs(x = "UMAP_1", y = "UMAP_2", title = "annot_cluster") +
+              sc_theme(bg = "transparent"),
+            file.path(d, "merge_umap_cluster_annot"), 10, FRAME_RATIO$annot_cluster,
+            bg = "transparent")
   # DotPlot：每类取前 2 个代表 marker（从 marker 表读，兼容只跑 annot 段的情况）
   f_sig <- file.path(outdir, "2.markgene", "sig_markgene.xls")
   if (file.exists(f_sig)) {
@@ -386,7 +456,9 @@ if ("annot" %in% stages && ccol %in% colnames(obj@meta.data)) {
                  })
       })
       if (!is.null(p_dot)) {
-        save_plot(p_dot, file.path(d, "genelist_dotplot"), 16, 8)
+        p_dot <- p_dot + sc_theme(bg = "transparent")
+        save_plot(p_dot, file.path(d, "genelist_dotplot"), 15,
+                  FRAME_RATIO$dotplot, bg = "transparent")
       } else {
         # 写一份说明，别让下游以为"图忘了画"。
         #   PPT 那一步会按这份说明报"缺哪张、为什么缺"，而不是干巴巴一句缺图。
@@ -440,7 +512,7 @@ if ("ratio" %in% stages) {
   ts <- tbl(scol); write.table(ts, file.path(d, "cell_number_sample.xls"),
                                quote = FALSE, sep = "\t", row.names = FALSE)
 
-  base_thm <- theme_bw(base_size = 9) +
+  base_thm <- sc_theme(bg = "white") +
     theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
           panel.grid = element_blank(), strip.background = element_blank())
 
@@ -451,7 +523,8 @@ if ("ratio" %in% stages) {
         facet_wrap(~ cell_type, scales = "free_y", ncol = 4) +
         scale_fill_manual(values = GRP_COL, name = gcol) +
         labs(x = "", y = "Percentage(%)") + base_thm
-  save_plot(p1, file.path(d, "cell_number_rate_group"), 14, 11)
+  save_plot(p1, file.path(d, "cell_number_rate_group"), facet_width(4),
+            FRAME_RATIO$ratio_group)
 
   # 图2：按样本 7 柱
   p2 <- ggplot(ts, aes(x = lvl, y = rate, fill = lvl)) +
@@ -459,7 +532,8 @@ if ("ratio" %in% stages) {
         facet_wrap(~ cell_type, scales = "free_y", ncol = 4) +
         scale_fill_manual(values = color_panel, name = scol) +
         labs(x = "", y = "Percentage(%)") + base_thm
-  save_plot(p2, file.path(d, "cell_number_rate_sample"), 16, 11)
+  save_plot(p2, file.path(d, "cell_number_rate_sample"), facet_width(4),
+            FRAME_RATIO$ratio_sample)
 
   # 图3：按组 + 误差线 + 个体散点 + p 值
   # 用样本级比例算均值±标准误，并做组间检验
@@ -479,11 +553,13 @@ if ("ratio" %in% stages) {
       geom_errorbar(data = summ, aes(x = grp, ymin = mean - se, ymax = mean + se),
                     width = 0.2, colour = "black") +
       geom_point(data = ts2, aes(x = grp, y = rate), colour = "black", size = 1) +
-      geom_text(data = pval, aes(x = 1.5, y = Inf, label = lab), vjust = 1.6, size = 2.6) +
+      geom_text(data = pval, aes(x = 1.5, y = Inf, label = lab), vjust = 1.6,
+                size = BASE_PT * 0.6) +
       facet_wrap(~ cell_type, scales = "free_y", ncol = 4) +
       scale_fill_manual(values = GRP_COL, name = gcol) +
       labs(x = "", y = "Percentage(%)") + base_thm,
-    file.path(d, "cell_number_rate_group_with_pvalue"), 14, 12)
+    file.path(d, "cell_number_rate_group_with_pvalue"), facet_width(4),
+    FRAME_RATIO$ratio_pval)
 }
 
 # ============================== 5. diff ==============================
@@ -539,16 +615,17 @@ if ("diff" %in% stages && !is.null(compare) && ccol %in% colnames(obj@meta.data)
     r$grp <- factor(lab[match(r$type, names(n))], levels = lab)
     lab2 <- r[order(-abs(r$avg_log2FC)), ][1:min(40, nrow(r)), "gene"]
     p <- ggplot(r, aes(x = avg_log2FC, y = -log10(p_val_adj))) +
-      geom_point(aes(colour = grp), size = 0.7) +
+      geom_point(aes(colour = grp), size = 0.9) +
       scale_colour_manual(values = setNames(VOLC_COL[names(n)], lab),
                           name = "p_val_adj<0.05") +
       geom_vline(xintercept = 0, linetype = 2, colour = "grey50") +
       geom_hline(yintercept = -log10(0.05), linetype = 2, colour = "grey50") +
       geom_text_repel(data = subset(r, gene %in% lab2), aes(label = gene),
-                      size = 2, max.overlaps = 25) +
+                      size = BASE_PT * 0.4, max.overlaps = 25) +
       labs(x = "avg_log2FC", y = "-log10(p_val_adj)", title = paste0(t, "  ", compare)) +
-      theme_bw(base_size = 10)
-    save_plot(p, file.path(rd, paste0(t, "_", compare, "_volcano")), 8, 7)
+      sc_theme(bg = "white")
+    save_plot(p, file.path(rd, paste0(t, "_", compare, "_volcano")), 10,
+              FRAME_RATIO$volcano)
   }
   # 循环结束后必须再写一次：no_sig 这类行是在循环里追加的，
   #   只在循环前写那一份的话，它们永远落不了盘。
@@ -645,10 +722,10 @@ if ("enrich" %in% stages) {
         geom_col() +
         scale_fill_gradientn(colours = c("#E64B35", "#C51B7D", "#7B3294", "#3C5488")) +
         labs(x = "Count", y = NULL, fill = "p.adjust") +
-        theme_bw(base_size = 9) +
+        sc_theme(bg = "white") +
         theme(panel.grid.major.y = element_line(colour = "grey90"),
               panel.grid.minor = element_blank())
-      save_plot(p, fn, 10, 7)
+      save_plot(p, fn, 10, FRAME_RATIO$enrich)
       cat("   ->", basename(fn), ":", rows_written, "条（显著共", sig_total, "条）\n")
       list(rows_written = rows_written, sig_total = sig_total,
            result_md5 = tryCatch(unname(tools::md5sum(fn_xls)), error = function(e) ""))

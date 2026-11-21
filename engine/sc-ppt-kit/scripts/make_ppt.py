@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import struct
 import sys
 import zipfile
 
@@ -307,6 +308,65 @@ def set_embed(shape_xml, rel_id, descr=None):
         else:
             out = out.replace('<p:cNvPr ', '<p:cNvPr descr="%s" ' % xml_escape(descr), 1)
     return out
+
+
+def image_pixel_size(path):
+    """读取 PNG/JPEG/GIF/BMP 的像素宽高；未知格式直接报错，不静默拉伸。"""
+    with open(path, "rb") as f:
+        head = f.read(32)
+        if head.startswith(b"\x89PNG\r\n\x1a\n") and len(head) >= 24:
+            return struct.unpack(">II", head[16:24])
+        if head[:6] in (b"GIF87a", b"GIF89a") and len(head) >= 10:
+            return struct.unpack("<HH", head[6:10])
+        if head[:2] == b"BM" and len(head) >= 26:
+            return (struct.unpack("<I", head[18:22])[0],
+                    struct.unpack("<I", head[22:26])[0])
+
+    if head[:2] == b"\xff\xd8":
+        with open(path, "rb") as f:
+            data = f.read()
+        i = 2
+        while i + 9 < len(data):
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            seg_len = struct.unpack(">H", data[i + 2:i + 4])[0]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                          0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
+                h, w = struct.unpack(">HH", data[i + 5:i + 9])
+                return w, h
+            i += 2 + seg_len
+
+    raise SystemExit("无法读取图片像素尺寸：%s" % path)
+
+
+def set_src_rect(shape_xml, src_w, src_h, ext):
+    """按源图与框的比例写 a:srcRect，填充时只裁切、不改变像素纵横比。"""
+    if not src_w or not src_h or not ext or not ext[0] or not ext[1]:
+        return shape_xml
+    src_ratio = float(src_w) / float(src_h)
+    box_ratio = float(ext[0]) / float(ext[1])
+    left = top = right = bottom = 0
+    if src_ratio > box_ratio:
+        crop = 0.5 * (1.0 - box_ratio / src_ratio) * 100000.0
+        left = right = int(round(crop))
+    elif box_ratio > src_ratio:
+        crop = 0.5 * (1.0 - src_ratio / box_ratio) * 100000.0
+        top = bottom = int(round(crop))
+    rect = '<a:srcRect l="%d" t="%d" r="%d" b="%d"/>' % (left, top, right, bottom)
+
+    out = re.sub(r"<a:srcRect\b[^>]*/>", "", shape_xml, count=1)
+    m = re.search(r"<a:blip\b[^>]*/>", out)
+    if m:
+        return out[:m.end()] + rect + out[m.end():]
+    m = re.search(r"<a:blipFill\b[^>]*>", out)
+    if m:
+        return out[:m.end()] + rect + out[m.end():]
+    return shape_xml
 
 
 # --------------------------------------------------------------------------------------
@@ -1063,6 +1123,8 @@ class DeckWriter(object):
             )
             new_pic = set_embed(pic["xml"], rid, descr=os.path.basename(img["path"]))
             new_pic = set_xfrm(new_pic, img["off"], img["ext"])
+            src_w, src_h = image_pixel_size(img["path"])
+            new_pic = set_src_rect(new_pic, src_w, src_h, img["ext"])
             reps.append((pic["start"], pic["end"], new_pic))
 
         xml = apply_replacements(xml, reps)
