@@ -607,9 +607,6 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
   const s = d.session || null;
   S.readonly = !!(s && s.can_write === false);
   S.collapsed = (s && s.collapsed) || {};
-  S.sessionState = d;
-  S.sessionStateId = S.sessionId;
-  S.sessionStateAt = Date.now();
 
   // 记录里存的识别结果 = 这一份当时识别出来的东西。
   //   为什么不用 /api/envcheck：那个回答的是"最近一次识别是什么"，
@@ -669,6 +666,7 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
 }
 
 /* 当前这份记录的一行摘要。刷新后它还在，用户一眼知道自己在哪。 */
+
 function renderSessionsBar() {
   const host = $('#sessbar'); if (!host) return;
   const cur = S.sessions.find(s => s.id === S.sessionId) || null;
@@ -1125,7 +1123,7 @@ async function loadRun() {
     // 没有运行目录不等于"什么都不用画"。
     //   以前这里直接 return，调用方后面那些渲染全不执行 —— 刷新后顶栏名字、
     //   会话栏都停在上一次的样子，主体一片空白，看起来像页面没加载完。
-    //   现在先把外壳画出来，主体明说「未设运行目录」。
+    //   现在先把外壳画出来，主体明说「未设运行目录」，再去补那句话。
     if (!recordCurrent(__recordScope)) return;
     // 这里不清 bootFail：读成功只是"确实没有目录"，
     //   不该顺手把启动时记下的失败原因（比如身份没校验成）抹成正常。
@@ -1134,7 +1132,6 @@ async function loadRun() {
     renderNoRunDir();
     return;
   }
-  // 真的读到了运行目录，说明启动那一路是通的，清掉首屏失败标记。
   bootFail = null;
   S.runDir = r.runDir;
   S.pipeline = r.pipeline || null;
@@ -1180,6 +1177,7 @@ async function loadRun() {
    两个开关的含义写死在文案里，因为"关闭隔离"这件事必须让人看清楚
    代价是什么，不然点一下就会把所有人的记录变成互相可见。
    页面只负责显示和提交；判定全在后端（/api/admin/policy）。 */
+
 async function loadAdmin() {
   const __recordScope = recordContext();
   try {
@@ -2084,12 +2082,13 @@ async function answerDecision(id, useSuggested) {
    以前会显示「还没设置文件」「已答复 N」「未保存的改动 N 处」——
    前两个是过程噪音（配置在保存选择时自动生成、答复进度在闸门区看得到），
    第三个暴露的是实现细节而不是用户要关心的事，都删掉了。 */
+/* 状态行只写「分析名称：X」这一件事。
+   单独拆出来是因为启动阶段要提前写它一次（那时主体还没画完），
+   而失败原因又不能被这一句盖掉 —— 两处调同一段代码，格式才不会漂。 */
+
 function renderHeadSubline() {
   const sub = $('#subline');
   if (!sub) return;
-  // 启动失败的原因要一直带在状态行上：renderHead 会重刷这一行，
-  //   不挡一下，「身份没校验成」就会被「分析名称：X」盖成正常。
-  //   后续真的把运行目录读回来时由 loadRun() 清掉。
   if (bootFail) { sub.textContent = bootFail; return; }
   const cur = (S.sessions || []).find(x => x.id === S.sessionId) || null;
   const nm = cur && cur.name ? cur.name : (S.sessionId ? S.sessionId : '');
@@ -5780,6 +5779,9 @@ async function renderLib() {
   const stepName = id => STEP_CN[id] || id || '未归类';
 
   // 环节顺序跟流程走，没登记的排后面
+  //   fullmark / diff 已于 2026-11-21 从流程摘除（它们从来没有可执行体，
+  //   产物其实是 final 产的）。这里不再列出，否则流程视图里会重新冒出来。
+  //   旧记录的 step_id 仍然存在，靠 STEP_CN 兜底显示名字。
   const ORDER = ['env', 'doublet', 'merge', 'markers', 'filter', 'final', 'fullmark',
                  'annotate', 'diff', 'figs', 'enrich', 'extract', 'ppt', 'pack'];
   // 「按记录」只列从环境体检起的正式环节（gina 2026-11-19）。
@@ -6049,6 +6051,7 @@ async function renderLib() {
    反而要花力气判断"这堆是不是都得改"。示例句给个方向就够，
    真正要发出去的固定部分（只读、回写接口、参数）由代码在后面补，
    不占她的注意力。 */
+
 const L1_PROBE = {
   seurat: {
     name: 'Seurat 官方脚本',
@@ -7306,18 +7309,7 @@ async function renderIdentify() {
   let fromSession = false;
   if (S.sessionId) {
     try {
-      // boot() just loaded this exact record. Reuse it for a few seconds so the
-      // first paint does not fetch /api/sessions/state twice.
-      let ss = null;
-      if (S.sessionState && S.sessionStateId === S.sessionId &&
-          (Date.now() - (S.sessionStateAt || 0)) < 5000) {
-        ss = S.sessionState;
-      } else {
-        ss = await recordAwait(getJSON('/api/sessions/state?id=' + encodeURIComponent(S.sessionId)), __recordScope);
-        if (ss && ss.ok) {
-          S.sessionState = ss; S.sessionStateId = S.sessionId; S.sessionStateAt = Date.now();
-        }
-      }
+      const ss = await recordAwait(getJSON('/api/sessions/state?id=' + encodeURIComponent(S.sessionId)), __recordScope);
       const ident = ss && ss.session && ss.session.identify;
       if (ident && ident.result
           && (!S.commitReq || ident.req_id === S.commitReq)) {
@@ -7329,10 +7321,11 @@ async function renderIdentify() {
     if (!recordCurrent(__recordScope)) return;
 }
   }
-  // These three reads are independent. Issue them together instead of paying
-  // three serial round trips before first paint.
-  const envP = (async () => {
-    if (fromSession) return;
+  // 一律问一次：服务器模式下，/api/envcheck 读的是执行端回写的那份结果。
+  //   只认「属于最近一次保存并识别」的结果。
+  //   不属于的话，它只是上一轮跑出来的旧数据 —— 拿来当结论显示，
+  //   会让人以为刚点的那次已经生效了，而助手可能根本还没动。
+  if (!fromSession) {
     try {
       const ec = await recordAwait(getJSON('/api/envcheck'), __recordScope);
       envStale = !!ec.stale || (!!S.commitReq && !ecIsFresh(ec));
@@ -7343,26 +7336,17 @@ async function renderIdentify() {
         env = ec.result || null;
       }
     } catch (e) {
-      if (!recordCurrent(__recordScope)) return;
-    }
-  })();
-  const decP = (async () => {
-    if (S.needsRemote) return;
-    try {
-      dec = (await recordAwait(getJSON('/api/decision'), __recordScope)).result || null;
-    } catch (e) {
-      if (!recordCurrent(__recordScope)) return;
-    }
-  })();
-  const libP = (async () => {
-    try {
-      lib = await recordAwait(getJSON('/api/library'), __recordScope);
-    } catch (e) {
-      if (!recordCurrent(__recordScope)) return;
-    }
-  })();
-  await Promise.all([envP, decP, libP]);
-  if (!recordCurrent(__recordScope)) return;
+    if (!recordCurrent(__recordScope)) return;
+}
+  }
+  if (!S.needsRemote) {
+    try { dec = (await recordAwait(getJSON('/api/decision'), __recordScope)).result || null; } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+}
+  }
+  try { lib = await recordAwait(getJSON('/api/library'), __recordScope); } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+}
   S.envCheck = env; S.decision = dec;
   S.envStale = envStale; S.staleEnv = staleEnv;
   // 本机模式下没拿到体检/判定结果就没什么可说的；
@@ -7610,6 +7594,7 @@ async function renderIdentify() {
    ===================================================================== */
 
 /* ---------------- 术语：鼠标停上去就有解释 ---------------- */
+
 const GLOSS = {
   guard: '脚本开头的一把锁。不是从唯一入口启动的，它就拒绝运行 —— 保证每次运行都被记录在案。',
   md5: '一串由文件内容算出来的字符。内容改一个字，它就完全不同。用来判断文件有没有被改过。',
