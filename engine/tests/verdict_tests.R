@@ -255,7 +255,7 @@ ok("身份拿不到时 owner_require 抛错",
 
 cat("\n=== 13. 依赖顺序只认 flow_spec ===\n")
 ord <- flow_run_order_engine(TMP)
-ok("顺序里有 12 环", length(ord) == 12L, paste(length(ord)))
+ok("顺序里有 11 环", length(ord) == 11L, paste(length(ord)))
 ok("含 ppt 与 pack", all(c("ppt", "pack") %in% ord))
 
 DBI::dbDisconnect(con)

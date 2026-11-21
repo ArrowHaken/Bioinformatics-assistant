@@ -44,6 +44,35 @@ if (!exists("%||%", mode = "function")) {
 #    目录约定（相对 work_root）：1.doublet → 3.merge → 5.markers →
 #                                7.after_drop → 8.final → 9.full → 10.figs
 # ---------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# 只读：历史阶段映射
+#
+#   2026-11-21 按 A 方案从 SERVER_STAGES 摘除了 fullmark 与 diff。
+#   这两步从来没有可执行体（声明的 full_marker.R / full_diff.R 在服务器
+#   和脚本库里都不存在），声明的产物其实是 final_run.R 产的，属于"有壳无体"。
+#   摘除后新 run 不再出现它们。
+#
+#   但旧 run 的 step_attempts 里存着 fullmark / diff 的 step_id，
+#   历史回放时仍要能显示出人能看懂的名字。所以留这一份只读映射。
+#
+#   约束：任何写路径、依赖检查、阶段计数都不许引用这张表。
+#   它只用于"把旧 step_id 翻译成标题"。
+# ---------------------------------------------------------------------
+HISTORICAL_STAGES <- list(
+  fullmark = list(id = "fullmark", title = "全量 marker",
+                  note = "历史步骤。已由终版（final）覆盖，不再执行。",
+                  cover_by = "final"),
+  diff = list(id = "diff", title = "组间差异",
+              note = "历史步骤。已由终版（final）覆盖，不再执行。",
+              cover_by = "final")
+)
+
+# 按 step_id 查历史阶段（只读；查不到返回 NULL）
+historical_stage <- function(id) {
+  if (is.null(id) || !nzchar(as.character(id))) return(NULL)
+  HISTORICAL_STAGES[[as.character(id)]]
+}
+
 SERVER_STAGES <- list(
   list(
     id = "doublet", title = "逐样本去双与质控", skill = "liny-doublet",
@@ -166,72 +195,6 @@ SERVER_STAGES <- list(
       list(id = "ratio", title = "簇比例"),
       list(id = "count", title = "样本细胞数"),
       list(id = "save", title = "存最终对象")
-    )
-  ),
-  list(
-    id = "fullmark", title = "全量 marker", skill = "liny-markers",
-    note = "对终版对象算全量 marker 与 top15。",
-    script = "{work_root}/full_marker.R",
-    args = character(0),
-    # 与 FLOW_REVIEW$fullmark 保持一致：真实产出在 8.final。
-    #   两处写不同的路径，页面和判定就会各说各话。
-    artifacts = c("8.final/all_markers.xls", "8.final/top15_markers.xls"),
-    deps = c("8.final"),
-    # ---- 已由终版覆盖：保留流程位置，但不再重算 ----
-    #   为什么保留而不是删掉：
-    #     下游 figs / enrich 的 deps 还指着 9.full，删掉会让依赖链断成一截，
-    #     也会让历史记录里少一步、事后对不上"本来该有几步"。
-    #   为什么不再重算：
-    #     final_run.R 里已经跑过 FindAllMarkers，产物落在
-    #     8.final/all_markers.xls 与 8.final/top15_markers.xls。
-    #   2026-11-03 更正：上面这句「和这一步要的东西是同一份」当时没核过，现在核了，
-    #     并不完全成立。三点实测事实：
-    #     ① full_marker.R 在服务器上不存在、在脚本库里也没有 —— 也就是说这一步
-    #        「原本要产什么」从来没有被定义过，cover_by 是事后追认的，不是比对结论。
-    #     ② 8.final/all_markers.xls 实测 20,544 个(簇,基因)对；而注释环节
-    #        02_annotate.R 内部又跑了一次 FindAllMarkers，产 9.annot/all_markgene.xls
-    #        24,169 个(簇,基因)对。两份共有 20,490、只在注释那份里多 3,679、
-    #        只在终版那份里多 54 —— 阈值痕迹也对不上（终版最小 pct.1=0.046 /
-    #        pct.2=0.001，注释那份 pct.1=0.02 / pct.2=0）。差一个数量级的
-    #        过滤强度，说明两次调用不是同一组参数。
-    #     ③ 所以现在真实在用的是两份表，不是一份：终版的给报告用，注释的给分型用。
-    #        这本身是可接受的（用途不同），但不能再写成「就是同一份」。
-    #   结论：cover_by 保留（真的不必再算第三遍），但措辞改成「终版已产出可用的
-    #     marker 表」，不再声称与 9.full 的同名产物口径一致。要真正对齐口径，
-    #     得先把 full_marker.R 写出来并定参，那是另一件事，不在本轮。
-    cover_by = "final",
-    covered_artifacts = c("8.final/all_markers.xls", "8.final/top15_markers.xls"),
-    subs = list(
-      list(id = "all", title = "全量 marker"),
-      list(id = "top", title = "top15")
-    )
-  ),
-  list(
-    id = "diff", title = "组间差异", skill = "liny-diff",
-    note = "Microplastics vs Mock 的全量差异表。",
-    script = "{work_root}/full_diff.R",
-    args = character(0),
-    artifacts = c("8.final/diff_MP_vs_Mock_by_cluster.xls"),
-    deps = c("8.final"),
-    # 同上：终版已按簇逐个做过组间差异（8.final/diff_MP_vs_Mock_by_cluster.xls），
-    #   而且比这里定义的"一张全量表"更细。不再重算。
-    # 2026-11-03 核对后要补一句更要紧的：这里的「覆盖」是口径不同，不是同一份。
-    #   ① full_diff.R 同样在服务器上不存在、库里也没有登记 —— 这一步原本要产什么，
-    #      从来没有被定义过。cover_by 是事后追认，不是比对结果。
-    #   ② 实测 8.final/diff_MP_vs_Mock_by_cluster.xls：72,347 行，24 个簇，每簇一份，
-    #      是按「簇 × 组别」的 FindMarkers，不是一张总表。
-    #   ③ 出图与富集真正消费的是另一批：10.figs/4.diff_enrich/diff/ 下 6 份
-    #      *_{群}_MicroplasticsvsMock_diffgene.xls（按细胞类型 × 组别重算的）。
-    #      也就是说「按簇的两组差异」（8.final）与「按细胞类型的组间差异」（10.figs）
-    #      是两套不同粒度的东西，都在用，互不替代。
-    #   结论：07 不重算可以保留（那张 9.full 总表没人真正需要），但必须承认
-    #     「组间差异」这件事在这条流程里被做成了两份、粒度不同，而不是"一份已覆盖"。
-    #     要统一口径，得等注释稳定后按细胞类型重跑一次，那是后续的事。
-    cover_by = "final",
-    covered_artifacts = c("8.final/diff_MP_vs_Mock_by_cluster.xls"),
-    subs = list(
-      list(id = "diff", title = "FindAllMarkers 组间"),
-      list(id = "write", title = "写差异表")
     )
   ),
   list(

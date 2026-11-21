@@ -77,7 +77,7 @@ ok("参考表就位后 ok=TRUE", isTRUE(p2$ok))
 cat("\n=== F4 依赖自检 ===\n")
 d1 <- flow_deps_status("server")
 ok("正常流程依赖链完整", isTRUE(d1$ok), d1$message %||% "")
-ok("12 环都在", identical(as.integer(d1$stages), 12L))
+ok("11 环都在", identical(as.integer(d1$stages), 11L))
 
 # 造一条断链：临时改一份 flow_spec，指向不存在的上游产物
 bad <- readLines(file.path(TMP, "engine", "flow_spec.R"), warn = FALSE, encoding = "UTF-8")

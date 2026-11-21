@@ -39,7 +39,7 @@ cat("测试会话：", sid, "\n应用目录：", app, "\n\n")
 # ---- 1. 规格读取：阶段表来自 flow_spec，不是本文件自带的 ----
 cat("[1] 规格\n")
 order <- sr_order(app, "server")
-ok(length(order) == 12L, "server 档读到 12 环", paste("实际", length(order)))
+ok(length(order) == 11L, "server 档读到 11 环", paste("实际", length(order)))
 st <- sr_stage(app, "annotate", "server")
 ok(!is.null(st) && identical(as.character(st$review$skill), "sc-pipeline"),
    "annotate 的规定 skill 从 flow_spec 取到")
@@ -175,7 +175,7 @@ ok(identical(p7$verdict, "block"), "上游改判 block 后，merge 立即被拦"
 # ---- 13. 看板：逐环给出结论，且不写盘 ----
 cat("\n[13] 看板\n")
 ch <- sr_chain_all(app, sid)
-ok(length(ch$stages) == 12L, "看板覆盖 12 环", paste("实际", length(ch$stages)))
+ok(length(ch$stages) == 11L, "看板覆盖 11 环", paste("实际", length(ch$stages)))
 ok(all(vapply(ch$stages, function(s) nzchar(as.character(s$pre_verdict)), TRUE)),
    "每一环都有前置审结论")
 
