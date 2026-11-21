@@ -666,7 +666,6 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
 }
 
 /* 当前这份记录的一行摘要。刷新后它还在，用户一眼知道自己在哪。 */
-
 function renderSessionsBar() {
   const host = $('#sessbar'); if (!host) return;
   const cur = S.sessions.find(s => s.id === S.sessionId) || null;
@@ -1177,7 +1176,6 @@ async function loadRun() {
    两个开关的含义写死在文案里，因为"关闭隔离"这件事必须让人看清楚
    代价是什么，不然点一下就会把所有人的记录变成互相可见。
    页面只负责显示和提交；判定全在后端（/api/admin/policy）。 */
-
 async function loadAdmin() {
   const __recordScope = recordContext();
   try {
@@ -2085,7 +2083,6 @@ async function answerDecision(id, useSuggested) {
 /* 状态行只写「分析名称：X」这一件事。
    单独拆出来是因为启动阶段要提前写它一次（那时主体还没画完），
    而失败原因又不能被这一句盖掉 —— 两处调同一段代码，格式才不会漂。 */
-
 function renderHeadSubline() {
   const sub = $('#subline');
   if (!sub) return;
@@ -6051,7 +6048,6 @@ async function renderLib() {
    反而要花力气判断"这堆是不是都得改"。示例句给个方向就够，
    真正要发出去的固定部分（只读、回写接口、参数）由代码在后面补，
    不占她的注意力。 */
-
 const L1_PROBE = {
   seurat: {
     name: 'Seurat 官方脚本',
@@ -7594,7 +7590,6 @@ async function renderIdentify() {
    ===================================================================== */
 
 /* ---------------- 术语：鼠标停上去就有解释 ---------------- */
-
 const GLOSS = {
   guard: '脚本开头的一把锁。不是从唯一入口启动的，它就拒绝运行 —— 保证每次运行都被记录在案。',
   md5: '一串由文件内容算出来的字符。内容改一个字，它就完全不同。用来判断文件有没有被改过。',
