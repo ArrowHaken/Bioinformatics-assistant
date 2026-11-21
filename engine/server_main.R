@@ -2975,6 +2975,21 @@ MIME <- list(".html" = "text/html; charset=utf-8", ".js" = "text/javascript; cha
              ".svg" = "image/svg+xml", ".png" = "image/png", ".jpg" = "image/jpeg",
              ".ico" = "image/x-icon", ".txt" = "text/plain; charset=utf-8")
 
+# 前端构建指纹：取 public/app.js 与 index.html 的大小与修改时间。
+#   为什么要它：页面靠 index.html 里的 ?v= 手动改版本号来破缓存，
+#   改一次代码忘了改版本号、或者浏览器把旧 app.js 留在内存里，
+#   人看到的就是上一版界面 —— 实际发生过：后端已经改成 11 环，
+#   页面上仍然列着第 6、7 环和它们的脚本。
+#   现在 index.html 里的版本号由这里现算现填，改完代码刷新就是新的。
+app_build <- function() {
+  fs <- c(file.path(PUBLIC_DIR, "app.js"), file.path(PUBLIC_DIR, "index.html"))
+  info <- lapply(fs, function(f) {
+    if (!file.exists(f)) return("0")
+    paste0(as.integer(file.info(f)$size), ".", as.integer(as.numeric(file.info(f)$mtime)))
+  })
+  sub("[^0-9a-z]", "", paste0("b", paste(unlist(info), collapse = "")))
+}
+
 static_file <- function(rel) {
   rel <- gsub("^/+", "", rel)
   if (!nzchar(rel)) rel <- "index.html"
@@ -3013,6 +3028,16 @@ serve_request <- function(con, req) {
     if (!is.null(f)) {
       ext <- paste0(".", tolower(tools::file_ext(f)))
       ctype <- MIME[[ext]] %||% "application/octet-stream"
+      # 下发 index.html 时把资源版本号换成实时构建指纹。
+      #   原先是手写 ?v=，改代码忘了改它就等于没改：浏览器拿旧 app.js，
+      #   界面上仍是被删掉的那几环。现算现填后，改完刷新就是新的。
+      if (identical(ext, ".html")) {
+        raw0 <- readBin(f, "raw", file.info(f)$size + 1024L)
+        txt <- rawToChar(raw0)
+        txt <- gsub("app\\.js\\?v=[0-9A-Za-z._-]*",
+                    paste0("app.js?v=", app_build()), txt)
+        return(send_text(con, 200, ctype, txt))
+      }
       return(http_send_static(con, req, f, ctype))
     }
   }
@@ -3386,7 +3411,8 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/ping")
-    return(send_json(con, 200, c(list(ok = TRUE, platform = .Platform$OS.type, port = PORT),
+    return(send_json(con, 200, c(list(ok = TRUE, platform = .Platform$OS.type, port = PORT,
+                                      build = app_build()),
                                  server_worker_status())))
 
   # ---- 管理员与两个隔离开关（app.admin.v1）--------------------------
@@ -8278,11 +8304,18 @@ serve_request <- function(con, req) {
             ok0 <- FALSE
             sid0 <- if (is.null(sid)) cur_sid() else sid
             if (isTRUE(DB_READY) && nzchar(sid0)) {
+              # 必须同时限定版本：step_attempts 里同一 session 会跨多个
+              #   version_id 累积行，只按 session 查会让旧版本的一次
+              #   verified 把新版本的同一步也照成「已完成」。
+              #   版本取自 sessions.version_id；该列为空时（老记录）才退回
+              #   只按 session 判，保持历史记录显示不变。
               q0 <- tryCatch(DBI::dbGetQuery(DB_CON,
                 paste0("SELECT COUNT(*) AS n FROM step_attempts ",
                        "WHERE step_id = ? AND status = 'verified' ",
-                       "AND json_extract(payload, '$.session_id') = ?"),
-                list(id, sid0)), error = function(e) NULL)
+                       "AND json_extract(payload, '$.session_id') = ? ",
+                       "AND (version_id IS NULL OR version_id = ",
+                       "     (SELECT version_id FROM sessions WHERE session_id = ?))"),
+                list(id, sid0, sid0)), error = function(e) NULL)
               ok0 <- !is.null(q0) && nrow(q0) == 1L && isTRUE(as.integer(q0$n[[1]]) > 0L)
             }
             ok0
