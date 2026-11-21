@@ -713,8 +713,18 @@ def build_plan(spec, args, dir_index, report):
     deck = spec["deck"]
     stats_json = {}
     if args.stats_json:
-        with open(args.stats_json, "r", encoding="utf-8") as fh:
-            stats_json = json.load(fh)
+        # 缺失不致命：提取阶段没跑或没产出时，退回从表格推导。
+        #   原来直接 open()，文件不在就整个 PPT 阶段崩掉 ——
+        #   一个可选的数据增强项，不该有阻断交付的能力。
+        if os.path.isfile(args.stats_json):
+            try:
+                with open(args.stats_json, "r", encoding="utf-8") as fh:
+                    stats_json = json.load(fh)
+            except (ValueError, OSError) as e:
+                report.append("WARN stats-json 读取失败，改用表格推导：%s" % e)
+                stats_json = {}
+        else:
+            report.append("WARN stats-json 不存在，改用表格推导：%s" % args.stats_json)
 
     table_spec = spec.get("table_spec", {})
     table_rows = None

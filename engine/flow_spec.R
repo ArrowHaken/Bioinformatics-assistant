@@ -101,7 +101,7 @@ SERVER_STAGES <- list(
     )
   ),
   list(
-    id = "filter", title = "筛群与剔样本后重聚类", skill = "liny-filter", source = "app",
+    id = "filter", title = "筛群与剔样本后重聚类", skill = "sc-pipeline", source = "app",
     note = "按人定的筛群与剔样本结果重跑，产出 7.after_drop。dims / resolution 从参数文件读。",
     # ---- 2026-11-03 改：这一步改由应用下发 ----
     #   原来指向服务器上的 {work_root}/drop_and_recluster.R，里面写着
@@ -375,13 +375,36 @@ SERVER_STAGES <- list(
 # ---------------------------------------------------------------------
 SERVER_STAGES <- c(SERVER_STAGES, list(
   list(
+    id = "extract", title = "提取报告关键指标", skill = "sc-report-extract", source = "app",
+    note = "从注释后的对象与去双表抽出 PPT 第 3 页的六行指标，落 11.report/report_stats.json。",
+    # 为什么要有这一步：
+    #   出图阶段落的 cell_number_stat.xls 只有 sample / cell_number 两列，
+    #   而 PPT 的 table_spec 定义了六行指标。两列撑不起六行，交付稿第 3 页
+    #   就只剩一行数据、其余五行空着 —— 这是「PPT 少了文字」的根因。
+    script = "{engine}/sc-report-extract/scripts/extract.R",
+    args = c("{work_root}/9.annot/annotated.rds",
+             "--outdir", "{work_root}/11.report",
+             "--raw-table", "{work_root}/1.doublet/sample_raw_cellnumber.xls",
+             "--stats-json", "report_stats.json"),
+    outdir = "11.report",
+    artifacts = c("11.report/report_stats.json"),
+    deps = c("9.annot/annotated.rds"),
+    subs = list(
+      list(id = "read", title = "读对象与去双表"),
+      list(id = "calc", title = "算六行指标"),
+      list(id = "write", title = "写 report_stats.json")
+    )
+  ),
+  list(
     id = "ppt", title = "生成交付 PPT", skill = "sc-ppt-kit", source = "app",
     note = "把 10.figs 的图排成交付 PPT，落 11.report/analysis_report.pptx。",
     script = "{engine}/sc-ppt-kit/scripts/make_ppt.py",
     args = c("--result-dir", "{work_root}/10.figs",
              "--template", "{engine}/sc-ppt-kit/templates/template.pptx",
              "--out", "{work_root}/11.report/analysis_report.pptx",
-             "--title", "单细胞转录组个性化分析"),
+             "--title", "单细胞转录组个性化分析",
+             # 统计数字从 extract 阶段落的 json 读；缺了就退回表格推导。
+             "--stats-json", "{work_root}/11.report/report_stats.json"),
     outdir = "11.report",
     artifacts = c("11.report/analysis_report.pptx"),
     # 输入是出图这一步的产物，不是 9.annot 的对象：

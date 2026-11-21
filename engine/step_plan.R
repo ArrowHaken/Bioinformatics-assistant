@@ -153,8 +153,20 @@ resolve_scripts_dir <- function(engineDir, cfg, runDir = NULL) {
                            res$set_id)
         res$fallback <- TRUE
       } else {
-        res$dir <- cand
-        res$why <- sprintf("按环境判定取用 %s（%s）", res$set_id, envid)
+        # 必需脚本清单：缺任何一个就降级。
+        #   库里的适配套可能只覆盖上半段，选中它之后流程会在中途缺脚本停下。
+        #   实测 library 那套就缺 04_filter.R —— 只看到「目录里有 .R」是不够的。
+        required <- c("00_run_all.R", "01_preprocess.R", "02_annotate.R",
+                      "03_verify.R", "04_filter.R")
+        missing <- required[!file.exists(file.path(cand, required))]
+        if (length(missing)) {
+          res$why <- sprintf("判定指向 %s，但缺必需脚本（%s），退回随应用带的脚本",
+                             res$set_id, paste(missing, collapse = "、"))
+          res$fallback <- TRUE
+        } else {
+          res$dir <- cand
+          res$why <- sprintf("按环境判定取用 %s（%s）", res$set_id, envid)
+        }
       }
     }
   }
@@ -172,6 +184,55 @@ resolve_scripts_dir <- function(engineDir, cfg, runDir = NULL) {
   res
 }
 
+# ---------------------------------------------------------------------
+# 脚本解析：按 skill 名定位，不再拼死路径
+#
+#   以前这里写死 engine/sc-plot-kit/scripts/plot_all_v2.R。
+#   后果：外部 skills 目录那份永远读不到，两边各自演化；AI 按 skill 名字
+#   调用时读到的可能是另一份，结果与运行时不一致。
+#
+#   现在：engine 自带优先（唯一真源），外部 skills 目录兜底，
+#   并把「用了哪份、md5、两份是否一致」写进 status/skill_resolve/。
+# ---------------------------------------------------------------------
+resolve_skill_script <- function(engineDir, skill, rel, runDir = NULL) {
+  bundled <- pjoin(engineDir, skill, "scripts", rel)
+  ext_root <- Sys.getenv("XIAOBA_SKILLS_DIR", "")
+  if (!nzchar(ext_root)) ext_root <- file.path(dirname(engineDir), "..", "skills")
+  external <- pjoin(ext_root, skill, "scripts", rel)
+
+  md5_of <- function(f) tryCatch(unname(tools::md5sum(f)), error = function(e) NA_character_)
+  cands <- c(bundled, external)
+  hit <- cands[file.exists(cands)]
+
+  if (!length(hit)) {
+    res <- list(path = bundled, source = "missing", md5 = NA_character_, drift = "",
+                why = sprintf("找不到脚本 %s/scripts/%s；找过：%s",
+                              skill, rel, paste(cands, collapse = " ; ")))
+  } else {
+    chosen <- hit[1]
+    src <- if (identical(chosen, bundled)) "engine" else "skills"
+    drift <- ""
+    if (file.exists(bundled) && file.exists(external)) {
+      m1 <- md5_of(bundled); m2 <- md5_of(external)
+      if (!is.na(m1) && !is.na(m2) && !identical(m1, m2))
+        drift <- sprintf("副本不一致：engine=%s skills=%s", substr(m1, 1, 8), substr(m2, 1, 8))
+    }
+    res <- list(path = chosen, source = src, md5 = md5_of(chosen), drift = drift, why = "")
+  }
+
+  if (!is.null(runDir) && nzchar(runDir)) {
+    sf <- pjoin(runDir, "status", "skill_resolve",
+                paste0(skill, "__", gsub("[/.]+", "_", rel), ".json"))
+    try({
+      dir.create(dirname(sf), showWarnings = FALSE, recursive = TRUE)
+      write_json_file(sf, list(skill = skill, rel = rel, path = res$path,
+                               source = res$source, md5 = res$md5, drift = res$drift,
+                               why = res$why, at = format(Sys.time(), "%Y-%m-%dT%H:%M:%S")))
+    }, silent = TRUE)
+  }
+  res
+}
+
 build_steps <- function(cfg, runDir, engineDir) {
   outdir <- cfg_val(cfg, "io", "outdir", NULL)
   if (is.null(outdir) || !nzchar(as.character(outdir))) outdir <- pjoin(runDir, "results")
@@ -183,10 +244,14 @@ build_steps <- function(cfg, runDir, engineDir) {
   # 脚本目录由判定给出；取不到才退回随应用带的那一份（原因写进状态文件）
   .pick  <- resolve_scripts_dir(engineDir, cfg, runDir)
   sp     <- .pick$dir
-  envchk <- pjoin(engineDir, "env_check.R")
-  plotR  <- pjoin(engineDir, "sc-plot-kit", "scripts", "plot_all_v2.R")
-  pptPy  <- pjoin(engineDir, "sc-ppt-kit", "scripts", "make_ppt.py")
-  tpl    <- pjoin(engineDir, "sc-ppt-kit", "templates", "template.pptx")
+  # 按 skill 名解析，不再拼死路径（见 resolve_skill_script 注释）。
+  #   env_check.R 在 engine 根下，不属于任何 skill，单独指明。
+  .sc_env <- resolve_skill_script(engineDir, "sc-plot-kit", "plot_all_v2.R", runDir)
+  .sc_ppt <- resolve_skill_script(engineDir, "sc-ppt-kit", "make_ppt.py", runDir)
+  envchk  <- pjoin(engineDir, "env_check.R")
+  plotR   <- .sc_env$path
+  pptPy   <- .sc_ppt$path
+  tpl     <- pjoin(engineDir, "sc-ppt-kit", "templates", "template.pptx")
 
   list(
     list(id = "env", title = "环境体检", needGate = FALSE,
