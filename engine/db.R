@@ -878,9 +878,21 @@ db_project_status <- function(con, version_id, owner_key = NULL) {
     "SELECT snapshot_id, step_id, verdict FROM reviews WHERE version_id = ?", list(version_id))
 
   steps <- unique(att$step_id)
+  # 状态取「最新终态」，没有终态才取最新 active。
+  #   为什么（2026-11-21）：attempt_no 是派发顺序，不是事件时间。
+  #   实测 p46899a8a-V1 的 annotate：attempt 1 已 verified，
+  #   attempt 2 是第一次还在跑时又派发的重叠请求，永远停在 delegated 没回写。
+  #   只按 attempt_no 取最新，会让一次卡死的重试永久盖掉已验收的绿色。
+  #   这不是"忽略非终态"：active 仍单独留在 active_status / active_attempt_no。
+  closed <- c("verified", "released", "rejected", "escalated")
   out <- lapply(steps, function(s) {
     a <- att[att$step_id == s, , drop = FALSE]
-    last <- a[which.max(a$attempt_no), , drop = FALSE]
+    ac <- a[a$status %in% closed, , drop = FALSE]
+    last <- if (nrow(ac)) ac[which.max(ac$attempt_no), , drop = FALSE]
+            else a[which.max(a$attempt_no), , drop = FALSE]
+    act <- a[which.max(a$attempt_no), , drop = FALSE]
+    act_st <- if (identical(as.integer(act$attempt_no), as.integer(last$attempt_no)))
+                NA_character_ else as.character(act$status)
     sub <- if (identical(last$status, "reported")) "sent"
            else if (identical(last$status, "delegated")) "sent"
            else if (identical(last$status, "verified")) "confirmed"
@@ -898,7 +910,9 @@ db_project_status <- function(con, version_id, owner_key = NULL) {
     qc <- if (!length(qv)) "missing" else as.character(qv[1])
     list(step_id = s, attempt_no = as.integer(last$attempt_no),
          submit = sub, exec = ex, sync = sy, qc = qc,
-         status = as.character(last$status), ticket_id = as.character(last$ticket_id %||% NA))
+         status = as.character(last$status), ticket_id = as.character(last$ticket_id %||% NA),
+         active_status = act_st,
+         active_attempt_no = if (is.na(act_st)) NA_integer_ else as.integer(act$attempt_no))
   })
 
   list(version_id = version_id,
@@ -917,8 +931,11 @@ db_deliverable <- function(con, version_id) {
   steps <- tryCatch(flow_run_order_engine(), error = function(e) character(0))
   reasons <- list(); unverified <- list()
   for (s in steps) {
-    a <- db_rows(con, "SELECT status FROM step_attempts WHERE version_id=? AND step_id=?
-                       ORDER BY attempt_no DESC LIMIT 1", list(version_id, s))
+    # 取最新终态，没有终态才看最新 active（与 db_project_status 同一口径）。
+    a <- db_rows(con, paste0(
+      "SELECT status FROM step_attempts WHERE version_id=? AND step_id=? ",
+      "ORDER BY CASE WHEN status IN ('verified','released','rejected','escalated') ",
+      "THEN 0 ELSE 1 END, attempt_no DESC LIMIT 1"), list(version_id, s))
     rv <- db_rows(con, "SELECT verdict FROM reviews WHERE version_id=? AND step_id=?
                         ORDER BY at DESC LIMIT 1", list(version_id, s))
     st <- if (nrow(a)) as.character(a$status[1]) else "missing"

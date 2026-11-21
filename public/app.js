@@ -300,9 +300,10 @@ const plabel = k => PARAM_LABEL[k] || [k, ''];
 const ART_STAGES = [
   ['doublet', '逐样本去双与质控'], ['merge', '合并与批次校正'],
   ['markers', '一次聚类 marker'], ['filter', '筛群与剔样本后重聚类'],
-  ['final', '终版比例统计'], ['fullmark', '全量 marker'],
-  ['diff', '组间差异'], ['annotate', '细胞类型注释'],
+  ['final', '终版比例统计'],
+  ['annotate', '细胞类型注释'],
   ['figs', '出图'], ['enrich', 'GO 富集'],
+  ['extract', '提取报告关键指标'],
   ['ppt', '生成交付 PPT'], ['pack', '打包产物']
 ];
 
@@ -3002,8 +3003,14 @@ function renderRun() {
     // 卡片底色跟着阶段真实状态走，不只跟本机运行状态走。
     //   服务器模式本机从来不会 running，只看本机状态的话，跑完的卡片也不会变色。
     let cls = b.cls;
+    // 已验收优先于 remote_steps 的残留状态。
+    //   实测 p46899a8a-V1：annotate 在库里已 verified，但 remote_steps 还挂着
+    //   一次没回写的 delegated，卡片就一直显示黄色。真失败（failed/stopped）
+    //   仍然优先，不能因为更早有 verified 就把后续失败盖掉。
+    const flowDone = !!(sg && sg.status === 'done');
     if (remote && rs && ['done', 'failed', 'running', 'delegated', 'stopped'].includes(rs.status)) {
-      cls = rs.status === 'done' ? 'done' : (rs.status === 'failed' || rs.status === 'stopped' ? 'failed' : 'running');
+      if (flowDone && rs.status !== 'failed' && rs.status !== 'stopped') cls = 'done';
+      else cls = rs.status === 'done' ? 'done' : (rs.status === 'failed' || rs.status === 'stopped' ? 'failed' : 'running');
     } else if (!cls && sg) {
       if (sg.status === 'done') cls = 'done';
       else if (sg.status === 'running' || sg.status === 'delegated') cls = 'running';
@@ -5589,21 +5596,25 @@ async function renderLib() {
   // 环节中文名（L2/L3 都用它当标题）
   const STEP_CN = {
     env: '环境体检', doublet: '逐样本去双与质控', merge: '合并与批次校正',
-    markers: '一次聚类 marker', fullmark: '全量 marker', filter: '筛群与剔样本后重聚类',
-    final: '终版比例统计', annotate: '细胞类型注释', diff: '组间差异',
-    enrich: 'GO 富集', figs: '出图', ppt: '生成交付 PPT', pack: '打包交付物'
+    markers: '一次聚类 marker', filter: '筛群与剔样本后重聚类',
+    final: '终版比例统计', annotate: '细胞类型注释',
+    enrich: 'GO 富集', figs: '出图', extract: '提取报告关键指标',
+    ppt: '生成交付 PPT', pack: '打包交付物',
+    // 历史步骤：仅用于回放旧记录时显示标题，不参与流程顺序与计数
+    fullmark: '全量 marker（历史）', diff: '组间差异（历史）'
   };
   const stepName = id => STEP_CN[id] || id || '未归类';
 
   // 环节顺序跟流程走，没登记的排后面
   const ORDER = ['env', 'doublet', 'merge', 'markers', 'filter', 'final', 'fullmark',
-                 'annotate', 'diff', 'figs', 'enrich', 'ppt', 'pack'];
+                 'annotate', 'diff', 'figs', 'enrich', 'extract', 'ppt', 'pack'];
   // 「按记录」只列从环境体检起的正式环节（gina 2026-11-19）。
   //   她的原话：「只需要留下从环境体检开始的脚本内容」。
   //   未归类的、以及不属于流程的条目（例如只在索引里留了个名字的）
   //   不再铺进来 —— 那些既不构成一次处理的流程，也读不到正文。
   const STAGE_ORDER_FROM_ENV = ['env', 'doublet', 'merge', 'markers', 'filter', 'final',
-                                'fullmark', 'annotate', 'diff', 'figs', 'enrich', 'ppt', 'pack'];
+                                'fullmark', 'annotate', 'diff', 'figs', 'enrich',
+                                'extract', 'ppt', 'pack'];
   const stepRank = id => {
     const k = ORDER.indexOf(id);
     return k < 0 ? 99 : k;
