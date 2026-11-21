@@ -2180,6 +2180,16 @@ function stepBadge(id) {
     if (rs && ['done', 'failed', 'running', 'delegated', 'stopped'].includes(rs.status)) {
       const labels = { done: ['done', '已完成'], failed: ['failed', '服务器上没跑通'],
         running: ['running', '服务器上运行中'], delegated: ['running', '已交给助手'], stopped: ['failed', '已停止'] };
+      // 已验收优先：库里这一环已经有 verified，就别再让一次没回写的
+      //   delegated 把卡片挂成黄色。实测 p46899a8a-V1：annotate 与 enrich
+      //   都已有 verified 行，remote_steps 里却还留着 delegated，
+      //   卡片一直是黄的，人以为这步没跑完。
+      //   真失败（failed/stopped）仍然优先，不能被更早的验收盖掉。
+      const sgB = stageOf(id);
+      const flowDoneB = !!(sgB && sgB.status === 'done');
+      if (flowDoneB && rs.status !== 'failed' && rs.status !== 'stopped') {
+        return { cls: 'done', txt: '已完成' };
+      }
       return { cls: labels[rs.status][0], txt: labels[rs.status][1] };
     }
   }
