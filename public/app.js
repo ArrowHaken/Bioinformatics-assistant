@@ -319,11 +319,103 @@ const STEP_ICON = {
 
 /* =====================================================================
    启动
+   ---------------------------------------------------------------------
+   首屏（2026-11-21 改）：
+   实测打开应用要停 5-6 秒「正在连接本地服务…」，期间主体全白。
+   根因：boot() 先等 /api/env，再串行等 /api/place、/api/whoami、
+   /api/sessions/state —— 每个接口在服务端都要过一次网关身份查询（超时 4 秒）；
+   而 #main 要等 /api/env 回来才 display:block，状态行文案又只有 renderHead()
+   会替换，renderHead 要等 boot() 全走完。
+   所以这里做三件事：进来先画一屏；每推进一步就把状态行改成真实的那一步；
+   哪一步失败就写清是哪一步、什么原因，不再用「连接失败」一句话糊过去。
    ===================================================================== */
+const BOOT_STEP_CN = {
+  connect: '连接本机服务',
+  identity: '校验身份',
+  place: '读取运行位置',
+  records: '读取分析记录',
+  run: '读取运行目录',
+};
+
+// 首屏失败停在哪个环节。renderHeadSubline() 会一直把它带出来 ——
+//   否则 renderHead 一跑，失败原因就被「分析名称：X」盖掉，人再也看不到是哪儿出的问题。
+//   后续真的把运行目录读回来时由 loadRun() 清掉。
+let bootFail = null;
+
+const bootReason = err => {
+  const t = String((err && err.message) || err || '未知原因').replace(/\s+/g, ' ').trim();
+  return t.length > 80 ? (t.slice(0, 80) + '…') : t;
+};
+
+/* 进度：正在做哪一步。 */
+function setBootStatus(key) {
+  const sub = $('#subline');
+  if (sub) sub.textContent = '正在' + (BOOT_STEP_CN[key] || key) + '…';
+}
+
+/* 失败：哪一步、什么原因。 */
+function setBootFail(key, err) {
+  bootFail = (BOOT_STEP_CN[key] || key) + '失败：' + bootReason(err);
+  const sub = $('#subline');
+  if (sub) sub.textContent = bootFail;
+}
+
+/* 进来先画一屏：顶栏本来就是静态 DOM，这里只把几处空着的位置填上，
+   不新造一套骨架 HTML。主体先给一行占位，等各块真正渲染时被覆盖
+   （renderPlace() 会重写 #placeHost）。 */
+function bootSkeleton() {
+  bootFail = null;
+  const main = $('#main');
+  if (main) main.style.display = 'block';
+  setBootStatus('connect');
+  const tally = $('#tally');
+  if (tally) tally.innerHTML = '<span class="pill plain">正在加载</span>';
+  const hint = $('#whoamiHint');
+  if (hint) hint.textContent = '正在确认身份…';
+  const ph = $('#placeHost');
+  if (ph && !ph.innerHTML.trim()) {
+    ph.innerHTML = '<div class="card card-pad"><div class="small">正在连接本机服务，读取运行环境…</div></div>';
+  }
+}
+
+/* 没有运行目录时的主体：先把外壳画出来，再明说缺什么、去哪补。
+   这里刻意不调 renderRun() 整块重画 —— 那一趟会连带调 renderFlow、
+   renderVarPanels 等一串依赖运行目录的东西，没有目录时它们只会输出
+   "进度读取失败"这类吓人的话，而且会把别处的状态一起改写。
+   只改这几处最直接的地方，其余保持原样。 */
+function renderNoRunDir() {
+  const rs = $('#runState');
+  if (rs) { rs.className = 'runstate'; rs.textContent = '还没定运行目录'; }
+  const hint = $('#runHint');
+  if (hint) hint.textContent = '未设运行目录：先在「运行环境配置」里保存并识别，再回来跑。';
+  const flow = $('#flowHost');
+  if (flow) flow.textContent = '未设运行目录，还没有进度可读。';
+  const steps = $('#stepsHost');
+  if (steps && !arr(S.steps).length) {
+    steps.innerHTML = '<div class="card card-pad"><b>未设运行目录</b>'
+      + '<div class="small" style="margin-top:6px">这份分析还没定结果写到哪。'
+      + '先在「运行环境配置」里保存并识别，再回来跑。</div></div>';
+  }
+  // 一键全流程没有目录时不能点：这一条 renderRun 里也有，但那条路这里没走。
+  const runAll = $('#btnRunAll');
+  if (runAll) runAll.disabled = true;
+}
+
 async function boot() {
   const __recordScope = recordContext();
+  // 首屏这几步里第一步失败的原因要留住：后面的成功不该把它抹掉。
+  //   只在全部走通时才清空，否则「校验身份失败」会被后来的「就绪」盖成正常。
+  let firstFail = null;
+  const fail = (key, err) => {
+    if (!firstFail) firstFail = true;
+    setBootFail(key, err);
+  };
   try {
 
+  // 任何 await 之前先画一屏，别让人对着白屏等。
+  bootSkeleton();
+
+  setBootStatus('connect');
   try {
     S.env = await recordAwait(getJSON('/api/env'), __recordScope);
   } catch (e) {
@@ -331,7 +423,12 @@ async function boot() {
 
     $('#bootErr').style.display = 'block';
     $('#bootErrMsg').textContent = String(e.message || e);
-    $('#subline').textContent = '本地服务没连上';
+    fail('connect', e);
+    // 占位还写着"正在连接"，会跟下面的报错自相矛盾，一并收掉。
+    const ph = $('#placeHost');
+    if (ph) ph.innerHTML = '<div class="card card-pad"><div class="small">本机服务没连上，原因见上方提示。</div></div>';
+    const tl = $('#tally');
+    if (tl) tl.innerHTML = '<span class="pill err">没连上</span>';
     return;
   }
   bindEvents();
@@ -339,12 +436,45 @@ async function boot() {
   //   以前没选目录就先给一页引导，选完才进主界面；现在第一步本身就
   //   是「选机器 + 选路径」，所以直接进主界面，由第一块负责这件事。
   $('#main').style.display = 'block';
-  await recordAwait(Promise.all([loadPlace(), loadIdentity()]), __recordScope);
-  // 先认清"我在哪个会话里"。拿不到也不阻塞页面，只是不显示会话号。
+  // 顺序保持原样（先 place 再 identity）：这两个函数自己就把网络错误收进了
+  //   返回值、不抛异常，改成并行只会多一个失败点，换不来时间 ——
+  //   本机服务是单进程事件循环，两个请求并行到服务端照样排队。
+  setBootStatus('place');
+  try {
+    await recordAwait(loadPlace(), __recordScope);
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    fail('place', e);
+  }
+  // loadPlace 读失败不抛，只把原因放在 S.place.ok === false 里，这里照样说出来。
+  if (S.place && S.place.ok === false) fail('place', S.place.error || '读不到运行位置设置');
+  setBootStatus('identity');
+  try {
+    // 先认清"我在哪个会话里"。拿不到也不阻塞页面，只是不显示会话号。
+    await recordAwait(loadIdentity(), __recordScope);
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    fail('identity', e);
+  }
+  // 身份读不到不上报成失败：本机模式、未登录时 /api/whoami 本来就会回 ok=false，
+  //   那是正常形态（renderIdentity 会写「未登录 / 无凭据」），
+  //   把它算成启动失败会让人以为页面坏了。
   // 先恢复「我在哪一份分析里」。
   //   这一条是需求的根：刷新之后页面必须停在原处，而不是回到空白。
   //   所以顺序是：拿到服务端的记录 -> 决定看哪一份 -> 再按它设置各项状态。
-  await recordAwait(loadSessionsState(), __recordScope);
+  setBootStatus('records');
+  try {
+    await recordAwait(loadSessionsState(), __recordScope);
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    fail('records', e);
+  }
+  // 记录读失败时 loadSessionsState 不抛，只把原因记在 sessionsError 里，这里照样说出来。
+  if (S.sessionsError) fail('records', S.sessionsError);
+  // 前面都过了才清掉失败标记；任何一步没过，状态行就一直停在那个原因上。
+  if (!firstFail) bootFail = null;
+  // 就绪：状态行换成「分析名称：X」，格式与原来完全一致（同一段代码）。
+  renderHeadSubline();
   setStageVisible(S.identified);
   renderPlace();
   renderSessionsBar();
@@ -353,11 +483,24 @@ async function boot() {
   await recordAwait(renderIdentify(), __recordScope);
   // 有识别结果就把闸门与运行区也画出来，让整页回到上次的样子。
   //   以前这里无条件清空，于是刷新后「需要你决定的事」和「跑分析」全消失。
-  if (S.runDir) { try { await recordAwait(loadRun(), __recordScope); } catch (e) {
-    if (!recordCurrent(__recordScope)) return;
-} }
+  // 没有可用的运行目录（本来就没有，或者读失败）时，下面补一次主体说明。
+  let needNoRunChrome = false;
+  if (S.runDir) {
+    setBootStatus('run');
+    try { await recordAwait(loadRun(), __recordScope); } catch (e) {
+      if (!recordCurrent(__recordScope)) return;
+      fail('run', e);
+      needNoRunChrome = true;
+    }
+  } else {
+    needNoRunChrome = true;
+  }
 
   switchTab('cur');
+  // 补说明必须放在 switchTab 之后：switchTab 会走 renderAll -> renderRun，
+  //   把提示改回「未设运行目录」一句话、把步骤格子清空。先写后写顺序反了，
+  //   这段说明就白写了。
+  if (needNoRunChrome) { renderHead(); renderSessionsBar(); renderNoRunDir(); }
 
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -978,7 +1121,21 @@ async function loadRun() {
   try {
 
   const r = await recordAwait(getJSON('/api/run-dir'), __recordScope);
-  if (!r.runDir) return;   // 还没确认位置：由 boot() 决定显示什么，不在这里切页面
+  if (!r.runDir) {
+    // 没有运行目录不等于"什么都不用画"。
+    //   以前这里直接 return，调用方后面那些渲染全不执行 —— 刷新后顶栏名字、
+    //   会话栏都停在上一次的样子，主体一片空白，看起来像页面没加载完。
+    //   现在先把外壳画出来，主体明说「未设运行目录」。
+    if (!recordCurrent(__recordScope)) return;
+    // 这里不清 bootFail：读成功只是"确实没有目录"，
+    //   不该顺手把启动时记下的失败原因（比如身份没校验成）抹成正常。
+    renderHead();
+    renderSessionsBar();
+    renderNoRunDir();
+    return;
+  }
+  // 真的读到了运行目录，说明启动那一路是通的，清掉首屏失败标记。
+  bootFail = null;
   S.runDir = r.runDir;
   S.pipeline = r.pipeline || null;
   S.gates = r.gates || null;
@@ -1927,15 +2084,22 @@ async function answerDecision(id, useSuggested) {
    以前会显示「还没设置文件」「已答复 N」「未保存的改动 N 处」——
    前两个是过程噪音（配置在保存选择时自动生成、答复进度在闸门区看得到），
    第三个暴露的是实现细节而不是用户要关心的事，都删掉了。 */
+function renderHeadSubline() {
+  const sub = $('#subline');
+  if (!sub) return;
+  // 启动失败的原因要一直带在状态行上：renderHead 会重刷这一行，
+  //   不挡一下，「身份没校验成」就会被「分析名称：X」盖成正常。
+  //   后续真的把运行目录读回来时由 loadRun() 清掉。
+  if (bootFail) { sub.textContent = bootFail; return; }
+  const cur = (S.sessions || []).find(x => x.id === S.sessionId) || null;
+  const nm = cur && cur.name ? cur.name : (S.sessionId ? S.sessionId : '');
+  sub.innerHTML = '分析名称：<b>' + esc(nm || '还没选') + '</b>';
+}
+
 function renderHead() {
   // 状态行区分分析归属与回复路由。
   //   工作路径删掉了 —— 那条路径又长又没人看，还把这行撑成两行。
-  const sub = $('#subline');
-  if (sub) {
-    const cur = (S.sessions || []).find(x => x.id === S.sessionId) || null;
-    const nm = cur && cur.name ? cur.name : (S.sessionId ? S.sessionId : '');
-    sub.innerHTML = '分析名称：<b>' + esc(nm || '还没选') + '</b>';
-  }
+  renderHeadSubline();
   const pA = pendingDecisions().length;
   let h = '';
   if (!S.runDir) h += '<span class="pill plain">未设运行目录，运行状态未知</span>';
