@@ -144,10 +144,26 @@ attempt 指针，保留 `NULL`，不会凭空编造；新写入必须满足完�
 在同一秒领取多条时返回错行。`poller_finish()` 清空租约；租约到期后可被其他 worker
 重新领取。
 
-服务主循环使用 `socketSelect()` 每秒唤醒一次，再对已经可读的服务端 socket 调用
-`socketAccept()`。这样绕开了 Windows 不支持 `socketAccept(timeout=)` 的问题；页面
-关闭时主循环仍会定期调用 `poller_drain()`，轮询、取回与返工不再依赖浏览器请求。
-调度心跳最多每 30 秒写一次；有作业推进时立即刷新，避免空闲时每秒写 SQLite。
+服务主循环**阻塞**在 `socketAccept()`，请求路径上不再调用 `socketSelect()`。
+Windows 上 `select` 的超时唤醒有约 200 ms 的固定粒度；让 accept 直接等待连接，
+浏览器请求和 worker 回传都以毫秒级进入主循环。所有入站连接按首行分流：
+
+- `PA-WORKER <token>`：worker 注册常驻作业 socket；token 不匹配就拒绝。
+- worker 与 poller 的 token 只通过环境变量传入，不出现在进程命令行里。
+- `PA-DELIVERY <token> <job_id>`：worker 完成一条请求后，用新连接送回完整 HTTP
+  响应；主循环在此唤醒并把字节写给原客户端。
+- `PA-POLLER <token>`：独立 poller 检查父进程是否还在；顺便作为主循环的低频时钟，
+  让排队超时能被检查。
+- 其他首行按 HTTP 请求处理。`/api/ping` 始终由主进程直接回答；静态资源有空闲
+  worker 时交给 worker 并行处理，worker 全忙时回退到主进程，避免慢 API 拖住首屏。
+
+poller 由 `serve.R` 启动为独立子进程（`engine/poller.R`），不再占用请求循环。
+页面关闭时轮询、取回与返工仍会继续；父进程退出后，token 健康检查会让子进程自行
+退出，不会在重启后留下第二个调度器。调度心跳仍按轮询间隔写入。
+
+2026-11-21 在本机 Windows / R 4.6.2 实测：1 个 worker、3 个各 3 秒的慢请求在途时，
+`/api/ping` 为 13 ms，`/app.js` 为 17 ms；10 个并行 `/app.js` 总耗时 213 ms；
+2 个 worker 时 6 个并行 `/app.js` 为 112 ms。
 
 ## 6. 首屏与静态资源
 
@@ -172,7 +188,7 @@ attempt 指针，保留 `NULL`，不会凭空编造；新写入必须满足完�
 
 服务启动失败时：
 
-1. 先请求 `http://127.0.0.1:<n>/api/env`。
+1. 先请求 `http://127.0.0.1:<n>/api/ping`。
 2. 若返回 200，说明已有健康实例：记录日志并以状态 0 退出，避免 systemd 反复重启。
 3. 若端口被未知进程占用：以状态 1 退出，并明确提示换端口或排查占用者。
 

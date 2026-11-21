@@ -89,7 +89,8 @@ if (!requireNamespace("jsonlite", quietly = TRUE)) {
 # instance already held the port. Exit immediately in that case.
 STARTUP_GUARD_FILE <- file.path(ENGINE_DIR, "startup_guard.R")
 if (file.exists(STARTUP_GUARD_FILE)) source(STARTUP_GUARD_FILE, local = TRUE)
-if (exists("startup_probe_existing", mode = "function") &&
+if (!isTRUE(getOption("pa.serve.definitions_only", FALSE)) &&
+    exists("startup_probe_existing", mode = "function") &&
     isTRUE(startup_probe_existing(PORT))) {
   say("[init] Healthy instance already listening on port ", PORT, "; exiting 0.")
   quit(save = "no", status = 0)
@@ -336,6 +337,8 @@ if (file.exists(MIGRATE_HISTORY_FILE)) source(MIGRATE_HISTORY_FILE, local = TRUE
 if (file.exists(WRITEBACK_FILE)) source(WRITEBACK_FILE, local = TRUE)
 if (file.exists(HTTP_STATIC_FILE)) source(HTTP_STATIC_FILE, local = TRUE)
 if (file.exists(STARTUP_GUARD_FILE)) source(STARTUP_GUARD_FILE, local = TRUE)
+SERVER_POOL_FILE <- file.path(ENGINE_DIR, "server_pool.R")
+if (file.exists(SERVER_POOL_FILE)) source(SERVER_POOL_FILE, local = TRUE)
 if (HAS_VERDICT) source(VERDICT_FILE, local = TRUE)
 if (file.exists(REWORK_FILE)) source(REWORK_FILE, local = TRUE)
 if (file.exists(POLLER_FILE)) source(POLLER_FILE, local = TRUE)
@@ -2850,27 +2853,23 @@ worker_route_auth <- function(req, claimed_worker_id = "", claimed_pool_id = "",
                                     error = conditionMessage(e)))
 }
 
-read_request <- function(con) {
-  buf <- raw(0)
-  repeat {
-    b <- tryCatch(readBin(con, "raw", 1L), error = function(e) raw(0))
-    if (!length(b)) break
-    buf <- c(buf, b)
-    n <- length(buf)
-    if (n >= 4L) {
-      t4 <- as.integer(buf[(n - 3L):n])
-      if (identical(t4, c(13L, 10L, 13L, 10L))) break
-    }
-    if (n > 131072L) break
-  }
-  if (!length(buf)) return(NULL)
-  txt <- rawToChar(buf)
+http_header_end <- function(buf) {
+  if (length(buf) < 4L) return(0L)
+  hit <- grepRaw(charToRaw("\r\n\r\n"), buf, fixed = TRUE)
+  if (length(hit)) as.integer(hit[[1]]) else 0L
+}
+
+http_decode_text <- function(raw) {
+  if (!length(raw)) return("")
+  txt <- rawToChar(raw)
   if (!validUTF8(txt)) txt <- iconv(txt, from = "GBK", to = "UTF-8", sub = "?")
-  parts <- strsplit(txt, "\r\n")[[1]]
-  if (!length(parts)) return(NULL)
-  first <- strsplit(parts[1], " ")[[1]]
-  method <- first[1]
-  target <- if (length(first) >= 2L) first[2] else "/"
+  txt
+}
+
+http_parse_head <- function(head_txt) {
+  parts <- strsplit(head_txt, "\r\n", fixed = TRUE)[[1]]
+  if (!length(parts) || !nzchar(parts[[1]])) return(NULL)
+  first <- strsplit(parts[[1]], " ", fixed = TRUE)[[1]]
   headers <- list()
   if (length(parts) > 1L) {
     for (h in parts[-1]) {
@@ -2880,25 +2879,51 @@ read_request <- function(con) {
       headers[[tolower(trimws(substr(h, 1, i - 1)))]] <- trimws(substr(h, i + 1, nchar(h)))
     }
   }
-  body_raw <- raw(0)
-  clen <- 0L
-  ch <- headers[["content-length"]]
-  if (!is.null(ch) && length(ch) == 1L && !grepl(",", ch)) {
-    v <- suppressWarnings(as.integer(ch))
-    if (length(v) == 1L && !is.na(v) && v > 0L) clen <- v
+  list(method = first[1], target = if (length(first) >= 2L) first[2] else "/",
+       headers = headers)
+}
+
+http_content_length <- function(headers) {
+  ch <- (headers %||% list())[["content-length"]]
+  if (is.null(ch) || length(ch) != 1L || grepl(",", ch, fixed = TRUE)) return(0L)
+  v <- suppressWarnings(as.integer(ch))
+  if (length(v) != 1L || is.na(v) || v <= 0L) 0L else v
+}
+
+http_request_complete <- function(buf) {
+  h <- http_header_end(buf)
+  if (!h) return(FALSE)
+  head <- http_parse_head(http_decode_text(buf[seq_len(h - 1L)]))
+  if (is.null(head)) return(TRUE)
+  length(buf) >= h + 3L + http_content_length(head$headers)
+}
+
+parse_http_request <- function(buf) {
+  h <- http_header_end(buf)
+  if (!h) return(NULL)
+  head <- http_parse_head(http_decode_text(buf[seq_len(h - 1L)]))
+  if (is.null(head)) return(NULL)
+  body_start <- h + 4L
+  body_raw <- if (length(buf) >= body_start) buf[body_start:length(buf)] else raw(0)
+  clen <- http_content_length(head$headers)
+  if (clen > 0L && length(body_raw) > clen) body_raw <- body_raw[seq_len(clen)]
+  list(method = head$method, target = head$target, headers = head$headers,
+       body = http_decode_text(body_raw))
+}
+
+read_request <- function(con) {
+  buf <- raw(0)
+  repeat {
+    b <- tryCatch(readBin(con, "raw", 65536L), error = function(e) raw(0))
+    if (!length(b)) break
+    buf <- c(buf, b)
+    if (http_request_complete(buf)) break
+    # Keep the old header ceiling, but allow a complete header to keep reading
+    # its declared body. This is the same contract callers already had.
+    if (!http_header_end(buf) && length(buf) > 131072L) break
   }
-  if (clen > 0L) {
-    got <- raw(0)
-    while (length(got) < clen) {
-      chunk <- tryCatch(readBin(con, "raw", clen - length(got)), error = function(e) raw(0))
-      if (!length(chunk)) break
-      got <- c(got, chunk)
-    }
-    body_raw <- got
-  }
-  body <- if (length(body_raw)) rawToChar(body_raw) else ""
-  if (nzchar(body) && !validUTF8(body)) body <- iconv(body, from = "GBK", to = "UTF-8", sub = "?")
-  list(method = method, target = target, headers = headers, body = body)
+  if (!length(buf)) return(NULL)
+  parse_http_request(buf)
 }
 
 parse_query <- function(target) {
@@ -2958,9 +2983,27 @@ static_file <- function(rel) {
   if (file.exists(p) && !dir.exists(p)) p else NULL
 }
 
+SERVER_WORKER_POOL <- NULL
+
+server_worker_status <- function() {
+  p <- SERVER_WORKER_POOL
+  if (is.null(p)) return(list(workers = 0L, workers_target = 0L))
+  list(workers = length(p$conns), workers_target = as.integer(p$target))
+}
+
 serve_request <- function(con, req) {
   pr <- parse_query(req$target)
   p <- pr$path; q <- pr$q
+
+  # Deterministic slow-handler seam for the concurrency contract test. It is
+  # inactive unless the test process explicitly sets PA_SERVE_TEST_SLOW_MS.
+  if (identical(p, "/__test_slow")) {
+    ms <- suppressWarnings(as.integer(Sys.getenv("PA_SERVE_TEST_SLOW_MS", "0")))
+    if (length(ms) == 1L && !is.na(ms) && ms > 0L) {
+      Sys.sleep(ms / 1000)
+      return(send_json(con, 200, list(ok = TRUE, slept_ms = ms)))
+    }
+  }
 
   # Public app-shell assets must not pay identity-gateway, database-owner or
   # record-permission costs. A page load asks for a dozen files; routing each
@@ -3343,7 +3386,8 @@ serve_request <- function(con, req) {
   }
 
   if (p == "/api/ping")
-    return(send_json(con, 200, list(ok = TRUE, platform = .Platform$OS.type, port = PORT)))
+    return(send_json(con, 200, c(list(ok = TRUE, platform = .Platform$OS.type, port = PORT),
+                                 server_worker_status())))
 
   # ---- 管理员与两个隔离开关（app.admin.v1）--------------------------
   #   GET  看当前开关 + 我是不是管理员
@@ -10219,29 +10263,6 @@ if (!isTRUE(getOption("pa.serve.definitions_only", FALSE)) && HAS_DB) {
 # =====================================================================
 # 主循环
 # =====================================================================
-server_accept_with_timeout <- function(srv, timeout = 1) {
-  # Windows 的 socketAccept(timeout=) 不可用，但 socketSelect 在两个平台都支持
-  # 服务端 socket。先等“可读”再 accept，主循环就不会无限阻塞；空闲时也正好
-  # 能推进一次持久调度器。
-  ready <- tryCatch(socketSelect(list(srv), write = FALSE, timeout = timeout),
-                    error = function(e) NULL)
-  if (is.null(ready) || !length(ready) || !isTRUE(ready[[1]])) return(NULL)
-  socketAccept(srv, blocking = TRUE, open = "r+b")
-}
-
-poller_sweep <- function(limit = 10L) {
-  if (!exists("poller_drain", mode = "function")) {
-    n <- 0L
-    repeat {
-      r <- poller_step(DB_CON, APP_DIR)
-      if (is.null(r)) break
-      n <- n + 1L
-      if (n >= as.integer(limit)) break
-    }
-    n
-  } else poller_drain(DB_CON, APP_DIR, limit = limit)
-}
-
 main <- function() {
   srv <- tryCatch(serverSocket(PORT), error = function(e) {
     say("")
@@ -10251,7 +10272,7 @@ main <- function() {
     say("")
     if (exists("startup_probe_existing", mode = "function") &&
         isTRUE(startup_probe_existing(PORT))) {
-      say("[init] A healthy instance is already serving /api/env on port ", PORT, ".")
+      say("[init] A healthy instance is already serving /api/ping on port ", PORT, ".")
       say("[init] This process exits 0 so systemd does not enter a restart loop.")
       say("")
       quit(save = "no", status = 0)
@@ -10262,6 +10283,11 @@ main <- function() {
     quit(save = "no", status = 1)
   })
   st <- read_state()
+  pid_file <- Sys.getenv('PA_SERVE_PID_FILE', unset = '')
+  if (nzchar(pid_file)) {
+    try(dir.create(dirname(pid_file), showWarnings = FALSE, recursive = TRUE), silent = TRUE)
+    try(writeLines(as.character(Sys.getpid()), pid_file), silent = TRUE)
+  }
 
   say("")
   say("===========================================================")
@@ -10291,46 +10317,10 @@ main <- function() {
 
   if (AUTOOPEN) try(browseURL(paste0("http://127.0.0.1:", PORT, "/")), silent = TRUE)
 
-  poll_meta_every <- as.numeric(get0("POLL_INTERVAL_SECS", ifnotfound = 30L))
-  last_poll_write <- 0
-  repeat {
-    # socketSelect 让主循环每秒醒一次：有连接就处理，没有连接就推进
-    # 持久调度器。页面关掉后轮询/取回/返工仍会继续，也不再依赖 Windows
-    # 不支持的 socketAccept(timeout=)。
-    con <- tryCatch(server_accept_with_timeout(srv, timeout = 1),
-                    error = function(e) NULL)
-    if (!is.null(con)) {
-      ok <- tryCatch({
-        req <- read_request(con)
-        if (!is.null(req)) serve_request(con, req)
-        TRUE
-      }, error = function(e) {
-        # 记下出错的那一行调用：只回一句 "subscript out of bounds" 无法定位。
-        say("[err] ", conditionMessage(e), " <- ",
-            paste(utils::head(deparse(conditionCall(e)), 3), collapse = " "))
-        try(send_json(con, 500, list(ok = FALSE, error = enc2utf8(conditionMessage(e)))), silent = TRUE)
-        FALSE
-      })
-      try(close(con), silent = TRUE)
-      if (!ok) say("[warn] 这次请求没处理成：", format(Sys.time(), "%H:%M:%S"))
-    }
-
-    if (DB_READY) {
-      sweep <- tryCatch(poller_sweep(10L),
-                        error = function(e) { say("[warn] 调度没跑成：", conditionMessage(e)); -1L })
-      if (!is.na(sweep) && sweep >= 0L) {
-        tick <- as.numeric(Sys.time())
-        if (sweep > 0L || tick - last_poll_write >= poll_meta_every) {
-          stamp <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
-          tryCatch({
-            db_meta_set(DB_CON, "poller_last_run", stamp)
-            db_meta_set(DB_CON, "poller_last_count", as.character(sweep))
-            if (sweep > 0L) db_meta_set(DB_CON, "last_sweep_at", stamp)
-          }, error = function(e) NULL)
-          last_poll_write <- tick
-        }
-      }
-    }
+  if (exists("server_serve_loop", mode = "function")) {
+    server_serve_loop(srv, APP_DIR, PORT)
+  } else {
+    stop("engine/server_pool.R missing: request loop unavailable")
   }
 }
 

@@ -11,7 +11,7 @@ startup_probe_existing <- function(port, host = "127.0.0.1", timeout = 2) {
     con <- socketConnection(host, as.integer(port), open = "r+b",
                             blocking = TRUE, timeout = timeout)
     writeBin(charToRaw(paste0(
-      "GET /api/env HTTP/1.1\r\nHost: ", host, ":", as.integer(port),
+      "GET /api/ping HTTP/1.1\r\nHost: ", host, ":", as.integer(port),
       "\r\nConnection: close\r\n\r\n")), con)
     flush(con)
     line <- readLines(con, n = 1L, warn = FALSE)

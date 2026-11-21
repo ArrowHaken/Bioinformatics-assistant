@@ -5,6 +5,20 @@ if (!exists("%||%", mode = "function"))
   `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
 if (!exists("STATUS_TEXT")) STATUS_TEXT <- c(`200` = "OK", `304` = "Not Modified")
 
+# Compression is deterministic for a given file identity. Cache the gzip body
+# so concurrent page loads do not each compress the same 400 KB app.js.
+HTTP_STATIC_CACHE <- new.env(parent = emptyenv())
+
+http_static_gzip <- function(path, info, etag) {
+  key <- paste0(normalizePath(path, winslash = "/", mustWork = TRUE), "|", etag)
+  if (exists(key, envir = HTTP_STATIC_CACHE, inherits = FALSE))
+    return(get(key, envir = HTTP_STATIC_CACHE, inherits = FALSE))
+  raw <- readBin(path, "raw", as.integer(info$size))
+  gz <- memCompress(raw, type = "gzip")
+  assign(key, gz, envir = HTTP_STATIC_CACHE)
+  gz
+}
+
 http_static_etag <- function(path, info = NULL) {
   if (is.null(info)) info <- file.info(path)
   paste0('W/"', format(as.numeric(info$size), scientific = FALSE, trim = TRUE),
@@ -64,8 +78,7 @@ http_send_static <- function(con, req, f, ctype) {
     isTRUE(http_static_compressible(ctype)) && as.numeric(info$size) >= 1024
 
   if (use_gzip) {
-    raw <- readBin(f, "raw", as.integer(info$size))
-    gz <- memCompress(raw, type = "gzip")
+    gz <- http_static_gzip(f, info, etag)
     hdr <- http_static_headers(200L, ctype, length(gz), etag, cache, "gzip")
     writeBin(c(charToRaw(hdr), gz), con)
     flush(con)

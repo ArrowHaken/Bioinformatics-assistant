@@ -346,10 +346,12 @@ dp_resolve_params <- function(profile, template, gates = list()) {
   # 物种：画像有就写进去，没有就停在闸门
   if (!is.na(profile$species %||% NA) && nzchar(profile$species)) {
     # 模板里写的是 "Mouse" / "Human" / "Rat"，画像里可能来自参考表的中文
-    norm <- c(mouse = "Mouse", 小鼠 = "Mouse", human = "Human", 人 = "Human",
-              rat = "Rat", 大鼠 = "Rat")
-    v <- norm[[tolower(as.character(profile$species))]]
-    if (is.null(v)) v <- as.character(profile$species)
+    # Keep the lookup keys as strings, not names: R 4.6 rejects non-ASCII
+    # symbols when the parser runs under a C locale.
+    norm_keys <- c("mouse", "小鼠", "human", "人", "rat", "大鼠")
+    norm_values <- c("Mouse", "Mouse", "Human", "Human", "Rat", "Rat")
+    hit <- match(tolower(as.character(profile$species)), norm_keys)
+    v <- if (is.na(hit)) as.character(profile$species) else norm_values[[hit]]
     setp("params.species", v, "dataset_profile",
          paste0("来自画像：", profile$species_why %||% ""))
   } else {

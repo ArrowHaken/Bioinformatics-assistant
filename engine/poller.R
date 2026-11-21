@@ -33,6 +33,30 @@ POLL_BACKOFF_SECS <- c(120L, 300L)
 
 poller_jitter <- function(secs) secs + sample(0:15, 1)
 
+# A poller is a child of the serving process. It exits as soon as the master
+# no longer answers with the start-time token, so a restart cannot leave two
+# live schedulers behind. The probe is also the master's low-frequency clock:
+# it wakes the blocking accept loop without a select timeout on the request
+# path.
+poller_parent_alive <- function(port, token) {
+  port <- suppressWarnings(as.integer(port))
+  if (length(port) != 1L || is.na(port) || port <= 0L || !nzchar(token))
+    return(TRUE)
+  con <- tryCatch(socketConnection("127.0.0.1", port, open = "r+b",
+                                   blocking = TRUE, timeout = 2,
+                                   options = "no-delay"),
+                  error = function(e) NULL)
+  if (is.null(con)) return(FALSE)
+  ok <- tryCatch({
+    writeBin(charToRaw(paste0("PA-POLLER ", token, "\r\n")), con)
+    flush(con)
+    line <- readLines(con, n = 1L, warn = FALSE)
+    length(line) == 1L && identical(line[[1L]], "PA-POLLER-OK")
+  }, error = function(e) FALSE)
+  try(close(con), silent = TRUE)
+  isTRUE(ok)
+}
+
 # ---- 原子领取 --------------------------------------------------------
 
 poller_lease_until <- function(now) {
@@ -209,10 +233,16 @@ poller_drain <- function(con, app_dir, worker = "poller", limit = 10L) {
   n
 }
 
-poller_loop <- function(app_dir, once = FALSE, interval = POLL_INTERVAL_SECS) {
+poller_loop <- function(app_dir, once = FALSE, interval = POLL_INTERVAL_SECS,
+                        health_port = NULL, health_token = "",
+                        health_interval = 1) {
   con <- db_connect(app_dir)
   on.exit(DBI::dbDisconnect(con))
   repeat {
+    if (!poller_parent_alive(health_port, health_token)) {
+      cat("poller parent is gone; exiting\n")
+      return(invisible(0L))
+    }
     n <- poller_drain(con, app_dir, limit = if (once) 20L else 10L)
     # 每轮都盖一次时间戳，哪怕这一轮什么都没领到。
     #   为什么：原来看"调度在不在动"只有一个信号 —— 有作业被处理。
@@ -227,7 +257,16 @@ poller_loop <- function(app_dir, once = FALSE, interval = POLL_INTERVAL_SECS) {
       cat("polled:", n, "\n")
       return(invisible(n))
     }
-    Sys.sleep(interval)
+    deadline <- Sys.time() + interval
+    repeat {
+      if (!poller_parent_alive(health_port, health_token)) {
+        cat("poller parent is gone; exiting\n")
+        return(invisible(n))
+      }
+      remaining <- as.numeric(difftime(deadline, Sys.time(), units = "secs"))
+      if (remaining <= 0) break
+      Sys.sleep(min(max(0.05, as.numeric(health_interval)), remaining))
+    }
   }
 }
 
@@ -236,10 +275,18 @@ poller_cli <- function() {
   get <- function(k, d = NULL) { i <- match(k, a); if (is.na(i) || i == length(a)) return(d); a[i + 1] }
   app <- get("--app", getwd())
   once <- "--once" %in% a
-  interval <- as.integer(get("--interval", POLL_INTERVAL_SECS))
+  interval <- suppressWarnings(as.integer(get("--interval", POLL_INTERVAL_SECS)))
+  if (is.na(interval) || interval <= 0L) interval <- POLL_INTERVAL_SECS
+  health_port <- suppressWarnings(as.integer(get("--health-port", "")))
+  health_token <- Sys.getenv("PA_POLLER_TOKEN", unset = "")
+  if (!nzchar(health_token)) health_token <- get("--health-token", "")
+  health_interval <- suppressWarnings(as.numeric(get("--health-interval", "1")))
+  if (is.na(health_interval) || health_interval <= 0) health_interval <- 1
   source(file.path(app, "engine", "db.R"))
   source(file.path(app, "engine", "rework.R"))
-  poller_loop(app, once = once, interval = interval)
+  poller_loop(app, once = once, interval = interval,
+              health_port = health_port, health_token = health_token,
+              health_interval = health_interval)
 }
 
 if (sys.nframe() == 0L && !interactive()) poller_cli()
