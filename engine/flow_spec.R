@@ -372,7 +372,8 @@ SERVER_STAGES <- c(SERVER_STAGES, list(
     artifacts = c("11.report/analysis_report.pptx"),
     # 输入是出图这一步的产物，不是 9.annot 的对象：
     #    PPT 要的是图，不是表达矩阵。
-    deps = c("10.figs/1.cluster", "10.figs/3.cell_ratio", "10.figs/4.diff_enrich"),
+    deps = c("10.figs/1.cluster", "10.figs/3.cell_ratio", "10.figs/4.diff_enrich",
+             "11.report/report_stats.json"),
     subs = list(
       list(id = "plan", title = "读图清单与页序"),
       list(id = "layout", title = "套模板排版"),
