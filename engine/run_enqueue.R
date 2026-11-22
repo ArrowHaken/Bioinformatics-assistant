@@ -768,6 +768,48 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
         exec_ref$ref_path <- record_trim(exec_srv$ref_path)
       bindWarn <- ""
       enq <- NULL
+      # ---- 没有执行端在线，就不派活 ----------------------------------
+      #   为什么（2026-11-22，gina 报「它的回复报错」）：
+      #     原来照样入队，只在正文前加一句"执行端未就位"。这条任务在队列里
+      #     停到超时，被回收成 failed，页面就显示"这一步失败过"；
+      #     而会话里那条通知要求助手"只看不跑"，助手照做后只能回一段
+      #     "什么都没跑、任务失败、同一环节已提交过三次、产物都是空的" ——
+      #     人看到的是一次报错，真实原因只是没人接活。
+      #   现在直接拒绝：不入队、不生成任务号、不改步骤状态。
+      #   判据是心跳新鲜度，不是"历史上有没有过心跳"。
+      if (is.null(exReuse)) {
+        hb0 <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+        online0 <- Filter(function(h) isTRUE(exec_heartbeat_online(h)), hb0)
+        if (length(online0) == 0L) {
+          last_at <- ""
+          if (length(hb0)) {
+            hts <- vapply(hb0, function(h) as.character(h$at %||% ""), "")
+            hts <- hts[nzchar(hts)]
+            if (length(hts)) last_at <- max(hts)
+          }
+          # 检测不到，就主动发起启动：把"在哪台电脑装、装完怎么起"写出去。
+          #   为什么不只是报错（gina 2026-11-22 要求：执行端要被应用检测并启动，
+          #   检测不到就启动安装）：报错等于把这件事交回给人去猜。应用虽然起不了
+          #   对方电脑上的进程，但能定位到该在哪台机器装、并留下一条可执行的待办。
+          boot <- tryCatch(exec_bootstrap_request(reason = paste0("dispatch:", stepId)),
+                           error = function(e) list(ok = FALSE, code = "bootstrap_error"))
+          return(send_json(con, 409, list(
+            ok = FALSE, code = "exec_worker_offline", step = stepId,
+            exec_online_count = 0L,
+            last_heartbeat_at = if (nzchar(last_at)) last_at else NULL,
+            wrote_queue = FALSE, wrote_step_state = FALSE,
+            bootstrap = boot,
+            exec_pc = as.character((boot %||% list())$exec_pc %||% ""),
+            error = "没有执行端在线，这条作业没有派出去，也没有入队。",
+            hint = paste0(
+              "已把「在哪台电脑装、装完怎么起」写成一条待办（见队列看板）。",
+              if (nzchar(as.character((boot %||% list())$exec_pc %||% "")))
+                paste0("要装的是 ", as.character(boot$exec_pc), "。"),
+              if (nzchar(last_at)) paste0("它最后一次报信是 ", last_at, "。")
+              else "它从来没有报过信。",
+              "启动后 60 秒内心跳可见，队列会自己开始走；现在重复点只会堆空任务。"))))
+        }
+      }
       if (!is.null(exReuse)) {
         # 复用既有任务：只回报它的真实状态，不生成号、不登记 attempt、
         #   不改 pending、不写 remote_step、不碰 ledger。

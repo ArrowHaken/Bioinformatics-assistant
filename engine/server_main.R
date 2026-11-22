@@ -46,7 +46,9 @@ inject_with_origin <- function(text, origin) {
   pre <- inject_origin_prefix(origin)
   if (!nzchar(pre)) return(t0)
   if (startsWith(t0, pre)) return(t0)
-  paste0(pre, t0)
+  # 换行而不是直接接上：按钮名独占第一行。
+  #   接在一起时，第一行会被后半句的长路径占满，读起来看不出这次是什么操作。
+  paste0(pre, "\n", t0)
 }
 
 # 进会话那段短指针。抽成函数有两个原因：
@@ -54,12 +56,23 @@ inject_with_origin <- function(text, origin) {
 #   二是它要能被直接跑正反例，埋在几千行的处理器里只能靠人读。
 instruction_pointer_text <- function(path, context_path, session_id, req_id,
                                      origin = "", query_only = FALSE) {
-  paste0(inject_origin_prefix(origin),
-         if (isTRUE(query_only)) "只读提问，不授权执行或回写。" else "",
-         "请先完整读取交接说明：", context_path,
-         "；再完整读取正文TXT：", path,
-         "。session_id=", session_id, "；req_id=", req_id,
-         "。两文件属于应用运行主机；严格依交接说明定位主机及回写URL，不截断正文，不猜测localhost。不可读取时明确报错。")
+  # ---- 第一行只放按钮名，后面才是指针 ------------------------------
+  #   为什么改成独立一行（2026-11-22，gina 报「标题很奇怪」）：
+  #     原来把【按钮名】和"请先完整读取交接说明：/srv/..."拼在同一行，
+  #     会话里第一屏看到的就是一大串绝对路径，按钮名被淹没在路径里。
+  #     她的要求是"第一行要标明这个按钮的信息"，那就让它独占一行。
+  #   为什么路径要分行：三个路径挤在一行时，气泡里几乎全是 /srv/...，
+  #     人分不清哪个是交接说明、哪个是正文。
+  pre <- inject_origin_prefix(origin)
+  body <- paste0(
+    if (isTRUE(query_only)) "只读提问，不授权执行或回写。\n" else "",
+    "请先完整读取交接说明：", context_path, "\n",
+    "再完整读取正文TXT：", path, "\n",
+    "session_id=", session_id, "；req_id=", req_id, "\n",
+    "两文件属于应用运行主机；严格依交接说明定位主机及回写URL，",
+    "不截断正文，不猜测localhost。不可读取时明确报错。")
+  if (!nzchar(pre)) return(body)
+  paste0(pre, "\n", body)
 }
 
 # 一条记录现在的识别状态。只看记录本身，不看任何页面的内存。
@@ -641,6 +654,29 @@ exec_heartbeat_online <- function(hb, now = Sys.time(), fresh = EXEC_HB_FRESH_SE
   is.finite(age) && age < as.numeric(fresh)
 }
 
+# ---- 心跳在线 ≠ 真的会干活 -------------------------------------------
+#   为什么必须分开判（2026-11-22 实测）：
+#     pc-worker 的心跳每 60 秒准时到，页面就一直显示"执行端在线"，
+#     但队列里最后一次真领活的 claimed_at 停在 11-20 09:37，
+#     之后两天里它一次 claim 都没发过 —— 只是空转报活。
+#   于是预检回答"一切正常"，任务永远 queued，人只能一个个报错才发现。
+#   这里补一个独立事实：最后一次真的领活是什么时候、隔了多久。
+#   判据只用队列里的 claimed_at，不猜进程、不看心跳，因为心跳已经证明会骗人。
+exec_claim_last <- function(d = NULL) {
+  if (is.null(d)) d <- tryCatch(exec_read(), error = function(e) list(items = list()))
+  best_at <- ""; best_ts <- as.POSIXct(NA); best_id <- ""
+  for (it in (d$items %||% list())) {
+    v <- trimws(as.character(it$claimed_at %||% ""))
+    if (!nzchar(v)) next
+    ts <- exec_parse_ts(v)
+    if (is.na(ts)) next
+    if (is.na(best_ts) || ts > best_ts) { best_ts <- ts; best_at <- v; best_id <- as.character(it$id %||% "") }
+  }
+  list(at = best_at, id = best_id, ts = best_ts,
+       age_secs = if (is.na(best_ts)) NA_real_ else
+         as.numeric(difftime(Sys.time(), best_ts, units = "secs")))
+}
+
 exec_task_pool <- function(it) {
   p <- trimws(as.character(it$pool_id %||% ""))
   if (nzchar(p)) p else exec_default_pool_id()
@@ -752,6 +788,57 @@ exec_reaper_status <- function(now = Sys.time(), expect_secs = 300L) {
     last_scanned = if (!is.null(lastScan)) as.integer(lastScan$scanned %||% 0L) else NULL,
     last_reaped = if (!is.null(lastScan)) as.integer(lastScan$reaped %||% 0L) else NULL,
     recent = reapedRecent)
+}
+
+# ---- 检测不到执行端时，主动发起"启动执行端"请求 -------------------
+#   为什么要有（gina 2026-11-22 明确要求：执行端要被应用检测并启动，
+#   检测不到就启动安装）：
+#     应用自己跑在 Linux 运行体里，看不到也起不了工作电脑上的进程 ——
+#     这是硬边界，不假装能直接 spawn。但它能做三件比报错有用的事：
+#       ① 检测：心跳新鲜度就是唯一判据；
+#       ② 定位：从 server_profile 取出该在哪台电脑上装；
+#       ③ 主动交代：把"装什么、在哪装、装完怎么起"写成一条待办交出去，
+#          而不是让人对着"没有执行端在线"这六个字自己猜。
+#   为什么必须节流：一次点击触发一次请求，连点十下就是十条重复指令。
+#     十分钟内只发一条，重复请求只回上一次的时间。
+exec_bootstrap_request <- function(reason = "dispatch", now = Sys.time(),
+                                   throttle_secs = 600L) {
+  f <- file.path(STATE_DIR, "exec_bootstrap.json")
+  prev <- tryCatch(jsonlite::fromJSON(read_text_any(f), simplifyVector = FALSE),
+                   error = function(e) NULL)
+  prev_count <- if (is.list(prev)) as.integer(prev$count %||% 0L) else 0L
+  if (is.list(prev)) {
+    t0 <- exec_parse_ts(prev$requested_at %||% "")
+    if (!is.na(t0) && as.numeric(difftime(now, t0, units = "secs")) < throttle_secs)
+      return(list(ok = FALSE, code = "throttled",
+                  requested_at = as.character(prev$requested_at %||% ""),
+                  exec_pc = as.character(prev$exec_pc %||% ""),
+                  count = prev_count))
+  }
+  prof <- tryCatch(jsonlite::fromJSON(read_text_any(
+    file.path(APP_DIR, "config", "server_profile.json")), simplifyVector = FALSE),
+    error = function(e) NULL)
+  pc <- as.character(((prof %||% list())$server %||% list())$exec_pc %||% "")
+  txt <- paste0(
+    "【启动执行端】应用检测到没有任何执行端在线，队列里的任务不会被领取。\n",
+    if (nzchar(pc)) paste0("执行电脑：", pc, "\n") else "",
+    "在那台电脑上执行一次（已装过会自动跳过，可以重复执行）：\n",
+    "  python pa_exec_worker.py --install\n",
+    "再运行固定位置里的启动脚本：\n",
+    "  Windows：%LOCALAPPDATA%\\CatsCo\\pa-exec\\run-worker.cmd\n",
+    "  Linux/macOS：~/.local/share/catsco/pa-exec/run-worker.sh\n",
+    "启动后 60 秒内这里会变成在线，队列会自动开始走；不要重复点派工。")
+  sid <- if (exists("sess_current_id", mode = "function"))
+    tryCatch(sess_current_id(APP_DIR), error = function(e) "") else ""
+  q <- tryCatch(inject_enqueue(text = txt, session = sid,
+                               reason = "exec_bootstrap", origin = "启动执行端"),
+                error = function(e) NULL)
+  rec <- list(requested_at = exec_ts(now), reason = as.character(reason %||% ""),
+              exec_pc = pc, count = prev_count + 1L,
+              queue_id = if (is.null(q)) NULL else as.character(q$id %||% ""))
+  tryCatch(write_json_file(f, rec), error = function(e) NULL)
+  list(ok = TRUE, requested_at = rec$requested_at, exec_pc = pc,
+       count = rec$count, queue_id = rec$queue_id)
 }
 
 exec_reap_ts <- function(it) {
@@ -7320,12 +7407,8 @@ serve_request <- function(con, req) {
         #   也不注册 on.exit 删除 —— 那个包可能正被助手读着。
         path <- as.character(reuse$path)
         context_path <- as.character(reuse$context_path)
-        message <- paste0(origin_prefix,
-          if (query_only) "只读提问，不授权执行或回写。" else "",
-          "请先完整读取交接说明：", context_path,
-          "；再完整读取正文TXT：", path,
-          "。session_id=", b$session_id, "；req_id=", b$req_id,
-          "。两文件属于应用运行主机；严格依交接说明定位主机及回写URL，不截断正文，不猜测localhost。不可读取时明确报错。")
+        message <- instruction_pointer_text(path, context_path, b$session_id, b$req_id,
+                                           origin_lab, query_only)
         if (nchar(message, type = "chars") >= 950L) stop("instruction pointer too long")
         prepared <- list(ok = TRUE, path = path, context_path = context_path, message = message,
               instruction_id = instruction_id, context_verified = TRUE, instruction_verified = TRUE,
@@ -7392,12 +7475,8 @@ serve_request <- function(con, req) {
       if (!identical(readBin(context_path, "raw", n = length(context_bytes) + 1L), context_bytes))
         stop("context persistence mismatch")
       context_path <- normalizePath(context_path, winslash = "/", mustWork = TRUE)
-      message <- paste0(origin_prefix,
-        if (query_only) "只读提问，不授权执行或回写。" else "",
-        "请先完整读取交接说明：", context_path,
-        "；再完整读取正文TXT：", path,
-        "。session_id=", b$session_id, "；req_id=", b$req_id,
-        "。两文件属于应用运行主机；严格依交接说明定位主机及回写URL，不截断正文，不猜测localhost。不可读取时明确报错。")
+      message <- instruction_pointer_text(path, context_path, b$session_id, b$req_id,
+                                         origin_lab, query_only)
       if (nchar(message, type = "chars") >= 950L) stop("instruction pointer too long")
       manifest <- list(instruction_id=instruction_id, owner_key=owner_ctx_key(owner_ctx),
         session_id=b$session_id, req_id=b$req_id %||% "", purpose=b$purpose %||% "execute", text=b$text)
@@ -8264,6 +8343,28 @@ serve_request <- function(con, req) {
     hb <- exec_latest_heartbeat(hbs = hbs_ev)
     hbAt <- as.character((hb %||% list())$at %||% "")
     online <- online_ev
+    # 心跳在动不等于会干活：把"最后一次真领活"一起报出去，
+    #   否则看板只会说"执行端在线"，而队列其实两天没人碰（2026-11-22 实测）。
+    clq <- tryCatch(exec_claim_last(d), error = function(e)
+      list(at = "", id = "", age_secs = NA_real_))
+    # 空转只有在"真有活没人领"时才成立。
+    #   队列本来就空、它两天没领活是正常的（没东西可领），
+    #   这种时候报"空转"就是诬告，人会被叫去重装一台没毛病的机器。
+    #   判据：有 queued 任务没人认领，且最久那条已经超过判定线。
+    q_unclaimed <- Filter(function(it)
+      identical(as.character(it$status %||% ""), "queued") &&
+        !nzchar(trimws(as.character(it$claimed_at %||% ""))),
+      (d$items %||% list()))
+    q_oldest_secs <- NA_real_
+    for (it in q_unclaimed) {
+      t0 <- exec_parse_ts(it$created_at)
+      if (is.na(t0)) next
+      a0 <- as.numeric(difftime(now_ev, t0, units = "secs"))
+      if (!is.finite(q_oldest_secs) || a0 > q_oldest_secs) q_oldest_secs <- a0
+    }
+    spin <- isTRUE(online) && length(q_unclaimed) > 0L &&
+      is.finite(q_oldest_secs) &&
+      q_oldest_secs >= as.numeric(EXEC_QUEUE_UNCLAIMED_SECS)
     # 队列计数按状态一次给全：页面要回答"现在到底排着几条、跑着几条"，
     #   不能让人从明细里自己数。
     cnt <- function(st) sum(vapply((d$items %||% list()), function(it)
@@ -8281,7 +8382,24 @@ serve_request <- function(con, req) {
                     at = if (nzchar(hbAt)) hbAt else NULL,
                     by = as.character((hb %||% list())$worker_id %||% ""),
                     pool_id = as.character((hb %||% list())$pool_id %||% ""),
-                    workers = length(hbs_ev)))))
+                    workers = length(hbs_ev),
+                    # 在报活 ≠ 会干活。这两项让看板能说清"在线但空转"。
+                    serving = isTRUE(online) && !isTRUE(spin),
+                    spin_idle = isTRUE(spin),
+                    last_claim_at = if (nzchar(as.character(clq$at %||% "")))
+                      as.character(clq$at) else NULL,
+                    last_claim_id = as.character(clq$id %||% ""),
+                    last_claim_age_secs = if (is.finite(as.numeric(clq$age_secs %||% NA_real_)))
+                      round(as.numeric(clq$age_secs)) else NULL,
+                    # 已经发过几次启动/安装请求、什么时候发的、发给哪台电脑。
+                    bootstrap = tryCatch({
+                      b0 <- jsonlite::fromJSON(read_text_any(
+                        file.path(STATE_DIR, "exec_bootstrap.json")),
+                        simplifyVector = FALSE)
+                      list(requested_at = as.character(b0$requested_at %||% ""),
+                           exec_pc = as.character(b0$exec_pc %||% ""),
+                           count = as.integer(b0$count %||% 0L))
+                    }, error = function(e) NULL)))))
   }
 
   # ---- 执行端预检：派工前先回答「有没有人接活」-----------------------
@@ -8304,20 +8422,53 @@ serve_request <- function(con, req) {
     # 队列积压：可领取的任务数。有人在线却一直不动，和没人来领是两回事。
     dq <- tryCatch(exec_due(), error = function(e) list())
     backlog <- length(dq %||% list())
+    # 心跳会骗人：它准时到，任务却两天没人领。所以再答一句"最后一次真的领活"。
+    #   serving = 心跳新鲜 且 真的领过活（或有活可领且在正常时限内领过）。
+    #   只要最后一次领活早于"没人领活"的判定线，就判成空转，按没有执行端处理。
+    cl <- tryCatch(exec_claim_last(), error = function(e)
+      list(at = "", id = "", age_secs = NA_real_))
+    age_cl <- as.numeric(cl$age_secs %||% NA_real_)
+    # 空转必须是"真有活没人领"。队列空着的时候它不领活是正常的，
+    #   那种情况报空转就是把没毛病的机器叫去重装（这条在 2026-11-22 自己踩过）。
+    #   所以先看 backlog：没有可领取的任务，就不算空转。
+    spin_idle <- length(online) > 0L && backlog > 0L &&
+      (!is.finite(age_cl) || age_cl > as.numeric(EXEC_QUEUE_UNCLAIMED_SECS))
+    serving <- length(online) > 0L && !isTRUE(spin_idle)
     actions <- character(0)
     if (!length(online)) {
       actions <- c(actions,
         "没有任何执行端在线：在要用的电脑上执行 pa_exec_worker.py --install，再运行 run-worker 启动脚本。",
         "若已安装但没启动，直接运行固定位置里的 run-worker；心跳 60 秒一次，启动后这里就会变成在线。")
+    } else if (isTRUE(spin_idle)) {
+      # 这一条是本次核心：不把"在报活"当成"能用"。
+      actions <- c(actions, paste0(
+        "执行端在报心跳但已经 ",
+        if (is.finite(age_cl)) paste0(round(age_cl / 3600), " 小时") else "从未",
+        "没有领过任务：它是空转的，队列不会动。",
+        if (nzchar(cl$at %||% "")) paste0("最后一次领活：", cl$at) else "",
+        "请在那台电脑上重装并重启执行端（pa_exec_worker.py --install 后跑 run-worker）。"))
     } else if (backlog > 0L) {
       actions <- c(actions, paste0("执行端在线但队列还有 ", backlog,
         " 条未领：检查它是否卡在上一条任务上，或 pool_id 与任务不一致。"))
     }
+    # 检测不到能用的执行端，就主动发起一次启动/安装请求（十分钟内只发一条）。
+    boot <- NULL
+    if (!isTRUE(serving)) {
+      boot <- tryCatch(exec_bootstrap_request(
+        reason = if (length(online)) "spin_idle" else "offline"),
+        error = function(e) list(ok = FALSE, code = "bootstrap_failed",
+                                 error = conditionMessage(e)))
+    }
     return(send_json(con, 200, list(ok = TRUE,
       online_count = length(online), total_workers = length(workers),
       workers = workers, pools = as.list(pools), backlog = backlog,
+      serving = isTRUE(serving), spin_idle = isTRUE(spin_idle),
+      last_claim_at = as.character(cl$at %||% ""),
+      last_claim_id = as.character(cl$id %||% ""),
+      last_claim_age_secs = if (is.finite(age_cl)) round(age_cl) else NULL,
+      bootstrap = boot,
       heartbeat_fresh_secs = EXEC_HB_FRESH_SECS,
-      actions = as.list(actions))))
+      actions = as.list(Filter(function(s) nzchar(s), actions)))))
   }
 
   # ---- 误报纠正（窄入口，候选）----------------------------------------

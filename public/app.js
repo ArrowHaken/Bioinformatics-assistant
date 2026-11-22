@@ -966,6 +966,11 @@ function busyOf(stepId) {
 
 let busyForce = null;
 
+// 上一次点下去那个按钮自己写的字。
+//   注入会话的标题必须等于她看到的那行字，不能是另一套内部说法。
+//   取不到就退回空串，由调用点给一个中性名字。
+let lastInvokeLabel = '';
+
 function showBusySheet(stepId, t, onForce) {
   const title = stepTitleCN(stepId) || stepId;
   const isRun = String(t.status) === 'running';
@@ -4031,19 +4036,31 @@ function renderRunCtl() {
   //   三个事实必须同时成立才叫"能跑"：执行端在线、队列里没有卡住的、回收器在跑。
   //   缺任何一个都要直接说出来，不能让人从下面几行自己去拼。
   const workerOk = !!w.online;
+  // 心跳会骗人：进程每分钟报活，却两天没领过一件活。
+  //   所以"能干活"要看 serving（服务端已按最后领活时间算过），不能只看 online。
+  const servingOk = w.serving === undefined ? workerOk : !!w.serving;
+  const spinIdle = !!w.spin_idle;
   const reclaimOk = !!(r && r.alive);
   const blockOk = stuck.length === 0;
-  const headline = (workerOk && reclaimOk && blockOk)
+  const headline = (servingOk && reclaimOk && blockOk)
     ? { cls: 'ok', mk: '✓', t: '队列正常',
         d: n('running') + ' 条在跑、' + n('queued') + ' 条在排。' }
     : (!workerOk
       ? { cls: 'fail', mk: '×', t: '没有执行端在线',
           d: '排队的任务不会有人领取。要先在工作电脑上启动执行端。' }
-      : (!reclaimOk
-        ? { cls: 'warn', mk: '!', t: '回收器没在跑',
-            d: '失联任务不会被自动收尾，队列里的状态可能停在旧样子。' }
-        : { cls: 'warn', mk: '!', t: '有 ' + stuck.length + ' 条排队任务没人认领',
-            d: '它们会一直挡住后续环节。确认不会再跑了就作废掉。' }));
+      : (spinIdle
+        ? { cls: 'fail', mk: '×', t: '执行端在报心跳，但它不领活',
+            d: '它在空转：心跳每分钟到，队列却没人取。'
+              + (w.last_claim_at
+                ? ('最后一次领活 ' + String(w.last_claim_at).replace('T', ' ').slice(0, 16)
+                   + '，' + (agoText(w.last_claim_age_secs) || '很久以前') + '。')
+                : '从来没有领过任何任务。')
+              + ' 应用已发出启动/安装请求，需要在那台电脑上重装并重启执行端。' }
+        : (!reclaimOk
+          ? { cls: 'warn', mk: '!', t: '回收器没在跑',
+              d: '失联任务不会被自动收尾，队列里的状态可能停在旧样子。' }
+          : { cls: 'warn', mk: '!', t: '有 ' + stuck.length + ' 条排队任务没人认领',
+              d: '它们会一直挡住后续环节。确认不会再跑了就作废掉。' })));
   h += '<div class="rz ' + headline.cls + '"><span class="mk">' + headline.mk + '</span>'
     + '<span><b>' + esc(headline.t) + '</b> <span class="dt">' + esc(headline.d) + '</span></span></div>';
 
@@ -4079,6 +4096,20 @@ function renderRunCtl() {
       + '从来没有报过信。这台应用还没有任何执行端连过。</span>';
   }
   h += '<div class="qline">' + workerHtml + '</div>';
+
+  // ---- 启动/安装请求 ------------------------------------------------
+  //   检测不到能用的执行端时，应用会主动发一条"去那台电脑装并启动"的请求。
+  //   这一行回答两件事：有没有发过、发给了哪台电脑。
+  //   没有这一行，"我已经发过请求了"这句话在页面上找不到凭据。
+  const boot = (w && w.bootstrap) || null;
+  if (boot && Number(boot.count || 0) > 0) {
+    h += '<div class="qline"><span class="qk">启动请求</span>'
+      + '<span class="qv' + (servingOk ? ' ok' : ' bad') + '">已发 ' + Number(boot.count) + ' 次</span>'
+      + '<span class="qd">最近一次 ' + esc(atText(boot.requested_at) || '—')
+      + (boot.exec_pc ? ('，目标电脑 ' + esc(boot.exec_pc)) : '')
+      + (servingOk ? '。执行端已在正常领活。' : '。等那台电脑把执行端装好并启动，这里会自动变成正常。')
+      + '</span></div>';
+  }
 
   // 心跳在、却从不领活：这是最难自己发现的一种。
   //   实测形态：心跳每分钟一次、claim 动作全量为 0。
@@ -4634,7 +4665,8 @@ async function runPickedSteps() {
         // 已入队时服务端回 mode=observe，进会话的那条只是"看着"。
         //   把 purpose 一起带过去，队列与回执里都留得下这个标记。
         await recordAwait(injectToSession(sendTxt, function () {},
-          r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''}, '一键全流程'), __recordScope);
+          r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''},
+          lastInvokeLabel || '一键全流程'), __recordScope);
       }
     } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -4709,7 +4741,7 @@ async function runStep(id, reqNote, force, extra = {}) {
       //   已入队时那段是"只观察"的，purpose 一起带过去，队列里也留得下标记。
       const sendTxt = r.session_text || r.instruction || '';
       const purpose = r.mode === 'observe' ? 'observe' : 'execute';
-      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}, '跑这一步'), __recordScope);
+      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}, lastInvokeLabel || stepTitleCN(id) || '跑这一步'), __recordScope);
       // 这一步的作业在服务端就已经排进执行队列了（r.delegated 本身就是"已入队"）。
       //   注入会话只是顺带通知助手，不是被执行的前提。
       //   以前把注入结果当成败判据：会话通道一断，页面就报"没送进"，人以为活没派出去，
@@ -5642,6 +5674,12 @@ document.addEventListener('click', e => {
   const rn = t.closest('[data-run]');
   if (rn) {
     const rid = rn.getAttribute('data-run');
+    // 记下这个按钮自己写的字，注入会话时原样当标题。
+    //   为什么不再用固定的"跑这一步"（2026-11-22，gina 报「明明我点的按钮不叫这个」）：
+    //     卡片按钮在不同状态下写的是"开始这一步 / 交给助手去跑 / 带新要求重跑 /
+    //     按原样重跑这一环"，而注入标题一直写死"跑这一步" —— 两边对不上，
+    //     人就会怀疑自己点错了。标题必须等于她看到的那行字。
+    lastInvokeLabel = (rn.textContent || '').trim();
     // 筛群这一步先弹参数：dims 与 resolution 决定分成多少簇，
     //   跑一次要花很久，参数定错了就是白跑。
     if (rid === 'filter') { openFilterParams(); return; }
@@ -5653,6 +5691,7 @@ document.addEventListener('click', e => {
   const rq = t.closest('[data-req]');
   if (rq) {
     const rqid = rq.getAttribute('data-req');
+    lastInvokeLabel = (rq.textContent || '').trim();
     // 已跑过的筛群，入口是「带新要求重跑」而不是「运行」——
     //   两条入口都要先弹参数卡，否则改参数这件事在重跑路径上就漏了。
     if (rqid === 'filter') { openFilterParams(); return; }
@@ -8803,7 +8842,9 @@ async function injectToSession(text, onState, purpose, binding, originLabel) {
   // 正文第一行写清是哪个按钮发起的。
   //   会话里只看到一大段指令时，人和助手都分不清这次是「一键全流程」还是「跑这一步」，
   //   也没法和页面对账；回写时更无法判断这条通知属于哪个动作。
-  if (originLabel) text = '【本次操作】' + String(originLabel) + '\n' + text;
+  //   格式与服务端生成的那段保持一致：【按钮名】独占第一行。
+  //   两边都写成"【本次操作】xxx / 【xxx】"会让同一条指令出现两种标题。
+  if (originLabel) text = '【' + String(originLabel) + '】\n' + text;
   // A step notification carries its own request; environment recognition is separate.
   const explicit = binding !== undefined;
   const reqId = explicit ? String(binding && binding.reqId || '') : (S.commitReq || '');
