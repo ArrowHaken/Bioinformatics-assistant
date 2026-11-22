@@ -6735,8 +6735,13 @@ async function commitPlace() {
     //   而其实什么都还没开始。
     const needDelegate = (d.mode === 'server') && !!r.needs_remote;
     S.identifyPhase = needDelegate ? 'waiting' : 'ready';
+    // 这里只报「已保存」。真正交没交出去，要等下面 autoInjectIdentify 的结果。
+    //   以前这里直接写「已保存并交给助手」，而注入是后面才发生的：
+    //   通道没回执、页面中途刷新、loadRun 抛错，人看到的都是一句成功的绿字，
+    //   于是「说交给助手了，可会话里什么都没有」。真实结果由 autoInjectIdentify
+    //   在 finally 里按 S.autoInject 报，成功失败分开说。
     if (needDelegate) {
-      toast('已保存并交给助手。', 'good');
+      toast('已保存，正在把识别请求交给助手…', 'good');
     } else if (S.warns.length) {
       toast('已保存，' + S.warns.length + ' 项没识别出来', 'bad');
     } else {

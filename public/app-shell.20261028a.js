@@ -294,8 +294,27 @@
       if (!p.ok) return p;
       if (!stillCurrent(meta)) return recordChanged();
       // Keep the routing topic distinct from the analysis record identity.
-      return attemptSend(p.text, Object.assign({}, meta, {analysisId:p.analysisId, reqId:p.reqId}))
-        .then(function (r) { r.preparedText = p.text; r.preparedMeta = Object.assign({}, meta, {analysisId:p.analysisId, reqId:p.reqId, instructionId:p.instructionId}); return r; });
+      var sendMeta = Object.assign({}, meta, {analysisId:p.analysisId, reqId:p.reqId, instructionId:p.instructionId});
+      // 先入队，再投递。
+      //   为什么顺序要反过来：投递这一步活在浏览器里，回执没回来之前页面一刷新、
+      //   面板一关，整个 Promise 就随文档销毁，队列那一步也一并没了 ——
+      //   人看到"已交给助手"，会话里却一条都没有，事后查不到任何投递尝试。
+      //   指令包在 prepare 阶段已经落在本机，入队是幂等的、不依赖通道；
+      //   先把它写进队列，即使这次投递半路夭折，retryDue 每小时还会补发。
+      //   补发这条路（meta.itemId 有值）不再入队：那条本来就在队列里，
+      //   再写一次只会多出一条重复条目，回写后要人工清两条。
+      var preQueue = meta.itemId
+        ? Promise.resolve({ ok: true, id: meta.itemId })
+        : queueIt(p.text, sendMeta);
+      return preQueue.then(function (q) {
+        return attemptSend(p.text, sendMeta).then(function (r) {
+          r.preparedText = p.text;
+          r.preparedMeta = sendMeta;
+          r.queuedFirst = !!(q && q.ok);
+          r.queueId = (q && q.id) || '';
+          return r;
+        });
+      });
     });
   }
 
@@ -427,30 +446,26 @@
       meta = r.preparedMeta || meta;
       body = r.preparedText;
       if (r.ok) {
-        // 发出去也要入队：真正的完成判据是"有没有回写"。
-        //   不入队的话，宿主收了消息但助手没动，就再没人提醒。
-        return queueIt(body, meta).then(function (q) {
-          return reportAttempt(q.id, true, r.code, '').then(function () {
-            refreshStatus();
-            return { ok: true, via: r.via, code: r.code, queued: true, queueId: q.id };
-          });
+        // 队列已在投递之前写好（见 prepareAndSend），这里只记这次投递的结果。
+        //   真正做成的判据仍然是"有没有回写"，所以队列条目保留到回写为止。
+        return reportAttempt(r.queueId, true, r.code, '').then(function () {
+          refreshStatus();
+          return { ok: true, via: r.via, code: r.code, queued: !!r.queuedFirst, queueId: r.queueId };
         });
       }
       // 失败必须留痕，否则下一次还是只能看同一句"没连上"。
       reportDiag(r.code || 'not_connected', r.why || '');
-      return queueIt(body, Object.assign({}, meta, { reason: r.code || 'not_connected' }))
-        .then(function (q) {
-          refreshStatus();
-          // 通道不通不等于这件事没交出去。
-          //   以前这里只回 ok:false，页面就画一个红色失败，人只能反复点同一个按钮。
-          //   实际指令已经落进本机队列了，助手能取走执行 —— 那是同一件事的另一条路。
-          //   所以把"已入信箱"单独标出来，让状态与事实一致。
-          return {
-            ok: false, via: r.via || '', code: r.code || 'not_connected',
-            why: r.why || '', queued: !!q.ok, queueId: q.id,
-            relayed: !!q.ok
-          };
-        });
+      return reportAttempt(r.queueId, false, r.code, r.why).then(function () {
+        refreshStatus();
+        // 通道不通不等于这件事没交出去。
+        //   指令已经在队列里（投递之前就写好了），助手能取走执行 —— 那是同一件事的另一条路。
+        //   所以把"已入信箱"单独标出来，让状态与事实一致。
+        return {
+          ok: false, via: r.via || '', code: r.code || 'not_connected',
+          why: r.why || '', queued: !!r.queuedFirst, queueId: r.queueId,
+          relayed: !!r.queuedFirst
+        };
+      });
     }).then(function (out) {
       inflight = null; inflightKey = null; inflightCurrent = null;
       return out;
