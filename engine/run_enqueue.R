@@ -1125,14 +1125,38 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
           "不用另外跑质检脚本：质检由应用按你的回写内容自己判。"
         ), collapse = "\n")
       }
+      # ---- 派工前确认执行端就位 --------------------------------------
+      #   为什么放在这里而不是等人报错：
+      #     任务能入队、页面也显示已交给助手，但如果没有任何执行端在线，
+      #     它就一直停在 queued、作业号永远空。这个状态在系统里此前没有任何
+      #     地方说过，于是每换一台电脑、每升一次服务端，都要人踩一次才被发现。
+      #   现在把结论直接写进这一次派工的内容里：缺执行端时，第一条要求就是
+      #     「先装好并启动执行端」，而不是让它安静地排在队列里。
+      hb_now <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+      online_now <- Filter(function(h) isTRUE(exec_heartbeat_online(h)), hb_now)
+      exec_offline <- length(online_now) == 0L
+      offline_note <- if (exec_offline) paste0(
+        "【执行端未就位】这台应用当前没有任何执行端在线，任务排队后不会有人领取。\n",
+        "先在工作电脑上装好并启动执行端（同一台机器重复执行不会重复安装）：\n",
+        "  python pa_exec_worker.py --install\n",
+        "  <固定位置>/run-worker.cmd   （Windows）或 <固定位置>/run-worker.sh（Linux/macOS）\n",
+        "启动后心跳 60 秒内可见，之后按下面正文执行；已经装好只是没启动的，直接运行启动脚本即可。\n\n") else ""
+      final_ins <- paste0(offline_note,
+        if (queuedOk) remote_step_observe_text(stepId, sid = as.character(sid %||% ""), ex = enq) else ins)
+      final_short <- paste0(
+        if (exec_offline) "【执行端未就位，先安装并启动执行端再跑】" else "", short)
+
       return(send_json(con, 200, list(
         ok = TRUE, delegated = TRUE, step = stepId,
         title = (STEP_TASK[[stepId]] %||% list(title = stepId))$title,
         # instruction 是长文，给页面留档与人工查看用；
         #   已入队时它同样不写"要你执行"，避免有人复制这段去手工跑。
-        instruction = if (queuedOk) remote_step_observe_text(stepId, sid = as.character(sid %||% ""), ex = enq) else ins,
+        instruction = final_ins,
         brief_path = briefPath,
-        session_text = short,
+        session_text = final_short,
+        # 执行端是否在线：前端据此提示，不必等人发现任务卡住。
+        exec_offline = exec_offline,
+        exec_online_count = length(online_now),
         # 观察模式下 brief 也要一致：带上 observe 标记，brief 端点照样给全文，
         #   但前端与助手都按"只观察"处理。两处说法必须同源，不能一个 observe 一个 execute。
         mode = if (queuedOk) "observe" else "execute",

@@ -19,6 +19,10 @@
   'use strict';
 
   var RETRY_MS = 3600 * 1000;   // 每小时复查一次（与后端 INJECT_RETRY_SECS 对齐）
+  // 补发冷却：页面加载、切标签、窗口获得焦点都会触发 retryDue，
+  //   冷却窗口内的重复触发直接忽略，避免"一刷新就注入一条"。
+  var RETRY_COOLDOWN_MS = 5 * 60 * 1000;
+  var lastRetryAt = 0;
   var MAX_ATTEMPTS = 6;         // 与后端 MAX_INJECT_ATTEMPTS 对齐
   var SEND_WAIT_MS = 8000;      // 单次投递最多等这么久
 
@@ -320,7 +324,8 @@
 
   function retryMeta(it) {
     return {itemId:it.id, session:it.session || '', analysisId:it.analysis_id || it.session_id || '',
-      reqId:it.req_id || '', purpose:it.purpose || 'execute', step:it.step || ''};
+      reqId:it.req_id || '', purpose:it.purpose || 'execute', step:it.step || '',
+      originLabel:it.origin || ''};
   }
 
   function queueIt(text, meta) {
@@ -333,7 +338,9 @@
       purpose: (meta && meta.purpose) || 'execute',
       req_id: (meta && meta.reqId) || '',
       step: (meta && meta.step) || '',
-      reason: (meta && meta.reason) || ''
+      reason: (meta && meta.reason) || '',
+      // 按钮名随队列一起存，补发时才有出处可写。
+      origin: (meta && meta.originLabel) || ''
     };
     if (meta && meta.instructionId) payload.instruction_id = meta.instructionId;
     return postJSON('api/inject', payload).then(function (r) {
@@ -481,6 +488,14 @@
 
   function retryDue() {
     if (inflight) return Promise.resolve(null);
+    // 冷却窗口：页面刷新、切标签、窗口重新获得焦点都会调到这里。
+    //   原来每次调用都直接补发，而补发走的 prepare 会生成新的指令包，
+    //   于是一刷新就往会话里注入一条（实测 8 分钟 6 条同一件事）。
+    //   现在同一进程内 5 分钟内只补发一次；而且是否真有该补发的，
+    //   由后端 inject_due 判定（已送达的条目不再自动重发）。
+    var nowMs = Date.now();
+    if (lastRetryAt && nowMs - lastRetryAt < RETRY_COOLDOWN_MS) return Promise.resolve(null);
+    lastRetryAt = nowMs;
     return getJSON('api/inject/due').then(function (r) {
       var items = (r && r.items) || [];
       if (!items.length) return null;

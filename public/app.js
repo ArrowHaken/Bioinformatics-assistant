@@ -2840,7 +2840,7 @@ async function chooseVariantInDetail(stage, id) {
         it && it.outdir ? ('产物目录：' + it.outdir) : '',
         '',
         '这里只同步已选参数，请只读确认；不要因此提交或重跑任何作业。其它候选保留不删。'].filter(Boolean).join('\n');
-      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}), __recordScope); } catch (e) {
+      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}, '同步已选参数（详情）'), __recordScope); } catch (e) {
     if (!recordCurrent(__recordScope)) return;
  /* 通道不通不影响选定 */ }
       toast('已选定：' + label, 'good');
@@ -2975,7 +2975,7 @@ async function askAboutArtifact(rel, question, msgEl) {
   const text = L.join('\n');
   if (msgEl) msgEl.textContent = '正在发进会话…';
   try {
-    const r = await recordAwait(injectToSession(text, function () {}, 'query'), __recordScope);
+    const r = await recordAwait(injectToSession(text, function () {}, 'query', undefined, '就这份产物提问'), __recordScope);
     if (msgEl) {
       msgEl.textContent = r.ok ? '已发进会话，等它回答。'
         : ('没发出去：' + (r.why || r.code || '原因不明') + (r.queued ? '（已转存队列）' : '（未发送、未入队）'));
@@ -3803,7 +3803,7 @@ async function pokeFlow(stageId) {
   //   以前传默认 execute，prepare 会按执行任务去重建正文、申请回写凭据、
   //   抢占输出目录 —— 只为问一句进度，却把执行条件全备齐了。
   //   而且它要求助手手工回写，正好和执行端争同一份记录。
-  const r = await recordAwait(injectToSession(txt, function () {}, 'observe', binding), __recordScope);
+  const r = await recordAwait(injectToSession(txt, function () {}, 'observe', binding, '查进度'), __recordScope);
   // 卡片上也留一句：toast 会消失，而人点完按钮还站在这一张卡上。
   const box = document.getElementById('stq-' + stageId);
   if (box) {
@@ -4346,7 +4346,7 @@ async function runPickedSteps() {
         // 已入队时服务端回 mode=observe，进会话的那条只是"看着"。
         //   把 purpose 一起带过去，队列与回执里都留得下这个标记。
         await recordAwait(injectToSession(sendTxt, function () {},
-          r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''}), __recordScope);
+          r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''}, '一键全流程'), __recordScope);
       }
     } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -4421,7 +4421,7 @@ async function runStep(id, reqNote, force, extra = {}) {
       //   已入队时那段是"只观察"的，purpose 一起带过去，队列里也留得下标记。
       const sendTxt = r.session_text || r.instruction || '';
       const purpose = r.mode === 'observe' ? 'observe' : 'execute';
-      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}), __recordScope);
+      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}, '跑这一步'), __recordScope);
       // 这一步的作业在服务端就已经排进执行队列了（r.delegated 本身就是"已入队"）。
       //   注入会话只是顺带通知助手，不是被执行的前提。
       //   以前把注入结果当成败判据：会话通道一断，页面就报"没送进"，人以为活没派出去，
@@ -4767,7 +4767,7 @@ async function saveAll() {
     if (r && r.delegated) {
       S.delegated = { sessionId: S.sessionId, step: 'config', title: '生成配置文件', at: Date.now(), ok: null, why: '', text: r.instruction || '' };
       renderRun();
-      const res = await recordAwait(injectToSession(r.instruction || '', function () {}), __recordScope);
+      const res = await recordAwait(injectToSession(r.instruction || '', function () {}, undefined, undefined, '保存我的设置'), __recordScope);
       S.delegated.ok = !!res.ok;
       S.delegated.why = res.ok ? '' : (res.why || res.code || '');
       renderRun();
@@ -5498,7 +5498,7 @@ async function chooseVariant(stage, id) {
         it && it.outdir ? ('产物目录：' + it.outdir) : '',
         '',
         '这里只同步已选参数，请只读确认；不要因此提交或重跑任何作业。其它候选保留不删。'].filter(Boolean).join('\n');
-      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}), __recordScope); } catch (e) {
+      try { await recordAwait(injectToSession(txt, function () {}, 'query', {step:stage, reqId:''}, '同步已选参数'), __recordScope); } catch (e) {
     if (!recordCurrent(__recordScope)) return;
  /* 通道不通不影响选定本身 */ }
       toast('已选定：' + label, 'good');
@@ -6111,7 +6111,7 @@ async function sendL1Probe(key) {
   const text = L.join('\n');
   if (msg) msg.textContent = '正在发进会话…';
   try {
-    const r = await recordAwait(injectToSession(text, function () {}, 'query'), __recordScope);
+    const r = await recordAwait(injectToSession(text, function () {}, 'query', undefined, '找脚本'), __recordScope);
     if (msg) msg.textContent = r.ok ? '已发进会话，等它回报。' : ('没发出去：' + (r.why || r.code || '原因不明') + (r.queued ? '（已转存队列）' : '（未发送、未入队）'));
     if (r.ok) {
       const old = document.getElementById('stSheet');
@@ -6394,6 +6394,14 @@ function placeDraftFromServer(place) {
     script_root: srv.script_root || '',
     work_root: srv.work_root || '',
     rscript: rt.rscript || '',
+    // R 包目录与动态库路径：以前这两个字段根本读不到页面里，
+    //   于是「保存并识别」提交时又把它们丢了（提交载荷里只有 rscript/queue/node），
+    //   配置里明明写着 /share/apps/R/R-4.1.2-4/lib64/R/library，
+    //   探针却用默认 Rscript + 默认库路径去 library()，
+    //   十个包全部报 dyn.load / "could not be loaded" —— 页面显示的就是这个。
+    //   现在原样读出来、原样提交、原样写进指令，三处都不许再丢。
+    r_lib_path: rt.lib_path || '',
+    ld_library_path: rt.ld_library_path || '',
     queue: rt.queue || '',
     node_constraint: rt.node_constraint || '',
     label: srv.label || '',
@@ -6541,10 +6549,19 @@ function renderPlace() {
       + '" placeholder="可选"></div>';
     h += '</div>';
     h += '<details class="stgfold" style="margin-top:14px"><summary>进阶（一般不用改）'
-      + '<span class="cnt">R 程序 / 队列 / 节点</span></summary>'
+      + '<span class="cnt">R 程序 / 库路径 / 队列 / 节点</span></summary>'
       + '<div style="padding:10px 16px 16px">'
       + '<div class="pl-field"><label>R 程序</label>'
       + '<input type="text" class="mono" data-plf="rscript" value="' + esc(d.rscript) + '" placeholder="/share/apps/R/.../Rscript"></div>'
+      // R 包目录 / 动态库路径：原来页面上根本没有这两栏，值是配置里写着的，
+      //   用户改不了、保存时还会被清空，于是每次识别都用默认库路径跑，
+      //   十个包全报加载失败。现在摆出来、可编辑、随提交一起存。
+      + '<div class="pl-field"><label>R 包目录</label>'
+      + '<input type="text" class="mono" data-plf="r_lib_path" value="' + esc(d.r_lib_path)
+      + '" placeholder="/share/apps/R/R-4.1.2-4/lib64/R/library"></div>'
+      + '<div class="pl-field"><label>动态库路径</label>'
+      + '<input type="text" class="mono" data-plf="ld_library_path" value="' + esc(d.ld_library_path)
+      + '" placeholder="有 Rcpp / hdf5 加载失败才需要填"></div>'
       + '<div class="pl-field"><label>队列</label>'
       + '<input type="text" class="mono" data-plf="queue" value="' + esc(d.queue) + '" placeholder="all.q"></div>'
       + '<div class="pl-field"><label>节点</label>'
@@ -6673,7 +6690,17 @@ async function commitPlace() {
       //   服务端仍然是空 —— 到注释环节又被问一次，或者干脆按"没定"处理。
       ref_mode: d.ref_mode || '', ref_path: d.ref_path || '',
       ref_note: d.ref_note || '', ref_archive: d.ref_archive || '',
-      runtime: { rscript: d.rscript, queue: d.queue, node_constraint: d.node_constraint },
+      // R 包目录与动态库路径必须跟着提交走。
+      //   原来这里只发 rscript/queue/node_constraint，服务端 place_clean_server
+      //   又把 runtime 收成五个字段，于是配置里已有的 lib_path、
+      //   ld_library_path 在这一步被清空 —— 之后无论谁去跑探针，
+      //   都只能拿到一个"用默认库路径"的 R，十个包全报加载失败。
+      runtime: {
+        rscript: d.rscript,
+        lib_path: d.r_lib_path || '',
+        ld_library_path: d.ld_library_path || '',
+        queue: d.queue, node_constraint: d.node_constraint,
+      },
     } : undefined,
   };
   try {
@@ -6808,7 +6835,7 @@ async function autoInjectIdentify() {
   S.autoInject = null;
   renderPlace();
   try {
-    const r = await recordAwait(injectToSession(text, function () {}), __recordScope);
+    const r = await recordAwait(injectToSession(text, function () {}, undefined, undefined, '保存并识别'), __recordScope);
     // relayed：通道没通，但指令已经落进本机队列 —— 助手能取走执行。
     //   这两种情况在页面上必须分开写：一个是"没发出去"，一个是"换条路交出去了"。
     S.autoInject = r.ok
@@ -8460,10 +8487,14 @@ function stepNotificationBinding(step) {
   return {step: step, reqId: rs && rs.req_id || ''};
 }
 
-async function injectToSession(text, onState, purpose, binding) {
+async function injectToSession(text, onState, purpose, binding, originLabel) {
   const record = recordContext();
   if (sessionChanging) return Promise.resolve({ok:false,code:"record_changing"});
   text = String(text || '');
+  // 正文第一行写清是哪个按钮发起的。
+  //   会话里只看到一大段指令时，人和助手都分不清这次是「一键全流程」还是「跑这一步」，
+  //   也没法和页面对账；回写时更无法判断这条通知属于哪个动作。
+  if (originLabel) text = '【本次操作】' + String(originLabel) + '\n' + text;
   // A step notification carries its own request; environment recognition is separate.
   const explicit = binding !== undefined;
   const reqId = explicit ? String(binding && binding.reqId || '') : (S.commitReq || '');
@@ -8477,6 +8508,10 @@ async function injectToSession(text, onState, purpose, binding) {
     step: explicit ? String(binding && binding.step || '') : ((S.delegated && S.delegated.step) || ''),
     mode: (S.placeDraft && S.placeDraft.mode) || 'server',
     intent: 'assistant.connect.v1',
+    // 按钮名要随请求一起传下去：入队时存进队列条目，
+    //   补发时靠它重建「【本次操作】」标题。只拼正文不传这个字段的话，
+    //   队列里那条仍然没有出处，补发出去还是看不出是谁发起的。
+    originLabel: originLabel || '',
     isCurrent: () => !sessionChanging && recordCurrent(record) &&
       meta.analysisId === (S.sessionId || '') && meta.session === (S.topicId || '') &&
       (explicit || meta.reqId === (S.commitReq || ''))
@@ -8546,6 +8581,24 @@ function buildInstructionText(ask) {
     if (d.script_root) L.push('脚本目录：' + d.script_root);
     if (d.work_root) L.push('结果目录：' + d.work_root);
     if (d.rscript) L.push('R 程序：' + d.rscript);
+    // R 包目录与动态库路径：这两行是这次识别能不能成的关键。
+    //   只给 R 程序、不给库路径时，探针会用 R 自己的默认 .libPaths()，
+    //   而分析包全装在这台机器指定的库里；结果就是十个包挨个报
+    //   dyn.load / "package 'Rcpp' could not be loaded" —— 看起来像"包没装"，
+    //   其实是"找错了库"。所以这里必须显式写出来，并直接给出探针参数，
+    //   让执行端不用自己推。
+    if (d.r_lib_path) {
+      L.push('R 包目录（必须用它，不要用 R 默认库路径）：' + d.r_lib_path);
+    } else {
+      L.push('R 包目录：未填。这时探针只能用 R 默认库路径，'
+        + '若包不装在默认库里，加载失败不代表包缺失 —— 先把库路径补上再判断。');
+      L.push('   库路径可从应用运行目录的 config/server_profile.json 读取 '
+        + 'server.runtime.lib_path 与 server.runtime.ld_library_path（只读，不修改该文件）。');
+    }
+    if (d.ld_library_path) {
+      L.push('动态库路径（LD_LIBRARY_PATH，缺了会报 Rcpp could not be loaded）：'
+        + d.ld_library_path);
+    }
     if (d.queue) L.push('队列：' + d.queue);
     if (d.node_constraint) L.push('节点约束：' + d.node_constraint);
     L.push('');
@@ -8569,6 +8622,15 @@ function buildInstructionText(ask) {
       + '可在已授权目标服务器shell用本地python运行，或经指定工作电脑SSH执行；取全下列各项：'
       + '内存 / CPU / /share 剩余 / R 版本 / 10 个必需 R 包 / 数据目录逐个符号链接'
       + ' / 脚本目录与每个脚本的作用 / 结果目录可写 / 队列与节点约束。');
+    if (d.r_lib_path || d.ld_library_path) {
+      L.push('3a. 探针必须显式带上库路径，不许省略、不许只给 R 程序：'
+        + (d.r_lib_path ? (' --libs ' + d.r_lib_path) : '')
+        + (d.ld_library_path ? (' --ldlib ' + d.ld_library_path) : '')
+        + '。探针会把它导出成 R_LIBS_USER / LD_LIBRARY_PATH 再跑 library()。');
+      L.push('   为什么这一条不能省：分析包装在指定库里，R 默认 .libPaths() 找不到它们，'
+        + '缺库路径时十个包会齐刷刷报 dyn.load / "package \'Rcpp\' could not be loaded"，'
+        + '读起来像"包没装"，实际是"找错了库"。所以先确认库路径进去了，再判断包在不在。');
+    }
     L.push('3. 参数按上面那几个目录与 R 程序填；脚本目录填上面「脚本目录」那一项。'
       + '探针在这一层没看到脚本时会自己下钻到 script 子目录，'
       + '所以你照给的路径填即可，不需要先去看目录结构。');

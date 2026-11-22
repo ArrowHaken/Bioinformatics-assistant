@@ -1199,7 +1199,7 @@ inject_norm_session <- function(s) {
   s
 }
 
-inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = "", analysis_id = "", purpose = "execute", instruction_id = "") {
+inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = "", analysis_id = "", purpose = "execute", instruction_id = "", origin = "") {
   d <- inject_read()
   now <- Sys.time()
   session <- inject_norm_session(session)
@@ -1226,6 +1226,7 @@ inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = 
     # 命中已有条目：只把会话号补正，不新增、不重置重试计数。
     d$items[[i]]$session <- if (nzchar(session)) session else as.character(it$session %||% "")
     if (nzchar(as.character(reason %||% ""))) d$items[[i]]$reason <- as.character(reason)
+    if (nzchar(as.character(origin %||% ""))) d$items[[i]]$origin <- as.character(origin)
     inject_write(d)
     return(d$items[[i]])
   }
@@ -1240,6 +1241,9 @@ inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = 
              req_id = as.character(req_id %||% ""),
              step = as.character(step %||% ""),
              reason = as.character(reason %||% ""),
+             # 按钮名。补发时靠它重建「【本次操作】」标题 ——
+             #   否则队列里存的正文是内部指针，人看到就是一段不知道在说什么的话。
+             origin = as.character(origin %||% ""),
              created_at = inject_ts(now),
              attempts = 0L,
              last_attempt_at = NULL,
@@ -1266,10 +1270,14 @@ inject_due <- function(now = Sys.time()) {
     #   于是"作废"的条目一小时后照样被自动补发，作业等于没生效。
     if (!is.null(it$dropped_at)) return(FALSE)
     # 已被助手取走的，不能再按小时自动重发。
-    #   踩过的坑：claim 只写了标记，due 里没排除它 —— 于是面板上一头写
-    #   "助手已取走，正在办"，一头还排着"下次 08:32"，每小时把同一件事
-    #   再塞一遍。取走之后要不要重发，只能由人点"重新试"决定。
     if (!is.null(it$claimed_at)) return(FALSE)
+    # 已经交给宿主的，不再自动重发。
+    #   原来是"投递成功也排下一次复查"，理由是判据要看回写。这在有人盯着的时候
+    #   说得通，但实测的形态是：页面刷新/切标签/窗口获得焦点都会触发一次补发，
+    #   而每条补发又会生成新的指令包 -> 新队列项，8 分钟在会话里注入了 6 条同一件事。
+    #   用户看到的就是"一刷新就往会话里灌"。
+    #   现在：送达过的不再自动重发，只保留在队列里等回写；要再催一次由人点重试。
+    if (!is.null(it$delivered_at)) return(FALSE)
     if (as.integer(it$attempts %||% 0L) >= MAX_INJECT_ATTEMPTS) return(FALSE)
     nxt <- as.character(it$next_attempt_at %||% "")
     nzchar(nxt) && nxt <= since
@@ -7104,8 +7112,53 @@ serve_request <- function(con, req) {
       link <- Sys.readlink(root)
       if (!is.na(link) && nzchar(link)) stop("unsafe instruction root")
       dir.create(root, recursive = TRUE, showWarnings = FALSE, mode = "0700")
-      instruction_id <- paste0("ins-", paste(sprintf("%02x", as.integer(openssl::rand_bytes(16))),collapse=""))
+
+      # 同一条指令只落一份包。
+      #   以前这里每次调用都新生成一个 instruction_id，而 id 写在指针正文里，
+      #   于是"同一条指令"每次 prepare 都变成一段不同的正文 → 新的队列项。
+      #   补发（retryDue）走的也是 prepare，于是：投递失败 → 补发 → 新 id →
+      #   新队列项；页面一加载又 prepare 一次 → 又一条。实测 8 分钟 6 条，
+      #   req_id 全相同，会话里被反复注入同一件事。
+      #   现在先按「属主 + 分析记录 + 请求号 + 用途 + 正文哈希」找已有包，
+      #   找到就复用它的文件和正文，队列项因此命中合并，条数不再自增。
+      reuse <- if (exists("instruction_existing"))
+        tryCatch(instruction_existing(APP_DIR, owner_ctx_key(owner_ctx),
+                                     as.character(b$session_id), as.character(b$req_id),
+                                     as.character(b$purpose %||% "execute"),
+                                     as.character(b$text)),
+                 error = function(e) NULL) else NULL
+      instruction_id <- if (!is.null(reuse)) as.character(reuse$instruction_id)
+                        else paste0("ins-", paste(sprintf("%02x", as.integer(openssl::rand_bytes(16))),collapse=""))
       private <- file.path(root, instruction_id)
+
+      if (!is.null(reuse)) {
+        # 复用已有包：文件已经在位且内容哈希已核对过，这里不再重写，
+        #   也不注册 on.exit 删除 —— 那个包可能正被助手读着。
+        path <- as.character(reuse$path)
+        context_path <- as.character(reuse$context_path)
+        message <- paste0(if (query_only) "只读提问，不授权执行或回写。" else "",
+          "请先完整读取交接说明：", context_path,
+          "；再完整读取正文TXT：", path,
+          "。session_id=", b$session_id, "；req_id=", b$req_id,
+          "。两文件属于应用运行主机；严格依交接说明定位主机及回写URL，不截断正文，不猜测localhost。不可读取时明确报错。")
+        if (nchar(message, type = "chars") >= 950L) stop("instruction pointer too long")
+        prepared <- list(ok = TRUE, path = path, context_path = context_path, message = message,
+              instruction_id = instruction_id, context_verified = TRUE, instruction_verified = TRUE,
+              stage = "ready", http_status = 200, reused = TRUE,
+              session_id = b$session_id, req_id = b$req_id)
+        prepared$queue_item <- tryCatch(
+          inject_enqueue(text = message,
+                         session = as.character(b$session %||% ""),
+                         req_id = as.character(b$req_id %||% ""),
+                         reason = "prepared",
+                         step = as.character(b$step %||% ""),
+                         analysis_id = as.character(b$session_id %||% ""),
+                         purpose = as.character(b$purpose %||% "execute"),
+                         instruction_id = instruction_id),
+          error = function(e) NULL)
+        return(send_json(con, 200, prepared))
+      }
+
       if (!dir.create(private, mode = "0700")) stop("private directory unavailable")
       prepare_stage <- "instruction_write"
       fp <- file.path(private, "instruction.txt")
@@ -7166,9 +7219,27 @@ serve_request <- function(con, req) {
       sess_write_json(sf,manifest); Sys.chmod(sf,"0600")
       if (!isTRUE(all.equal(sess_read_json(sf),manifest,check.attributes=FALSE))) stop("manifest readback mismatch")
       complete <- TRUE
-      list(ok = TRUE, path = path, context_path = context_path, message = message,
+      prepared <- list(ok = TRUE, path = path, context_path = context_path, message = message,
             instruction_id = instruction_id, context_verified = TRUE, instruction_verified = TRUE, stage = "ready", http_status = 200,
            session_id = b$session_id, req_id = b$req_id)
+      # 入队放在服务端：浏览器可能在这一步之后就被刷新或关闭。
+      #   2026-11-22 实测：指令包 10:09:55 生成成功，9 秒后页面重载，
+      #   浏览器那次 queue 请求随文档一起销毁，队列里一条也没有，
+      #   retryDue 因此没有可补发的条目 —— 会话里永远看不到这条指令。
+      #   包已生成、owner/session/req/purpose 都已核验，这里入队不新增任何权限，
+      #   只是把"已经决定要发出去"这件事落到盘上。inject_enqueue 按
+      #   instruction_id 合并，浏览器之后再入队也不会产生重复条目。
+      prepared$queue_item <- tryCatch(
+        inject_enqueue(text = message,
+                       session = as.character(b$session %||% ""),
+                       req_id = as.character(b$req_id %||% ""),
+                       reason = "prepared",
+                       step = as.character(b$step %||% ""),
+                       analysis_id = as.character(b$session_id %||% ""),
+                       purpose = as.character(b$purpose %||% "execute"),
+                       instruction_id = instruction_id),
+        error = function(e) NULL)
+      prepared
     }, error = function(e) list(ok = FALSE, code = paste0("instruction_", prepare_stage, "_failed"),
       stage = prepare_stage, http_status = 500, error = conditionMessage(e)))
     return(send_json(con, if (isTRUE(out$ok)) 200 else 500, out))
@@ -7197,7 +7268,8 @@ serve_request <- function(con, req) {
                              step = as.character(b$step %||% ""),
                              analysis_id = as.character(b$analysis_id %||% ""),
                              purpose = as.character(b$purpose %||% "execute"),
-                             instruction_id = as.character(b$instruction_id %||% ""))
+                             instruction_id = as.character(b$instruction_id %||% ""),
+                             origin = as.character(b$origin %||% ""))
         return(send_json(con, 200, list(ok = TRUE, item = it,
                                         retry_secs = INJECT_RETRY_SECS)))
       }
@@ -7884,6 +7956,42 @@ serve_request <- function(con, req) {
                                                   by = as.character((hb %||% list())$worker_id %||% ""),
                                                   pool_id = as.character((hb %||% list())$pool_id %||% ""),
                                                   workers = length(hbs)))))
+  }
+
+  # ---- 执行端预检：派工前先回答「有没有人接活」-----------------------
+  #   为什么必须有这一步（2026-11-22）：
+  #     任务能入队、页面显示已交给助手、作业号空、状态一直 queued。
+  #     真正的原因是谁也没来接，但这句话系统里没有任何地方说过 ——
+  #     于是每换一台设备、每升一次服务端，都要人报错一次才被发现。
+  #     这里把「有没有在线执行端、版本对不对、令牌通不通、目标机器在不在线」
+  #     一次答完，缺什么就直接说缺什么、下一步做什么。
+  if (p == "/api/exec/preflight") {
+    hbs <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+    workers <- lapply(hbs, function(hb) list(
+      worker_id = as.character(hb$worker_id %||% ""),
+      pool_id = as.character(hb$pool_id %||% ""),
+      at = as.character(hb$at %||% ""),
+      version = as.character(hb$version %||% ""),
+      online = isTRUE(exec_heartbeat_online(hb))))
+    online <- Filter(function(w) isTRUE(w$online), workers)
+    pools <- unique(vapply(online, function(w) as.character(w$pool_id %||% ""), ""))
+    # 队列积压：可领取的任务数。有人在线却一直不动，和没人来领是两回事。
+    dq <- tryCatch(exec_due(), error = function(e) list())
+    backlog <- length(dq %||% list())
+    actions <- character(0)
+    if (!length(online)) {
+      actions <- c(actions,
+        "没有任何执行端在线：在要用的电脑上执行 pa_exec_worker.py --install，再运行 run-worker 启动脚本。",
+        "若已安装但没启动，直接运行固定位置里的 run-worker；心跳 60 秒一次，启动后这里就会变成在线。")
+    } else if (backlog > 0L) {
+      actions <- c(actions, paste0("执行端在线但队列还有 ", backlog,
+        " 条未领：检查它是否卡在上一条任务上，或 pool_id 与任务不一致。"))
+    }
+    return(send_json(con, 200, list(ok = TRUE,
+      online_count = length(online), total_workers = length(workers),
+      workers = workers, pools = as.list(pools), backlog = backlog,
+      heartbeat_fresh_secs = EXEC_HB_FRESH_SECS,
+      actions = as.list(actions))))
   }
 
   # ---- 误报纠正（窄入口，候选）----------------------------------------
