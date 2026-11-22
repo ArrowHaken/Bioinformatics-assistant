@@ -127,6 +127,10 @@ record_route_policy <- function(p, method = "GET") {
     "/api/notebook/replay/build", "/api/reference/upload",
     "/api/reference/meta", "/api/reference/choose",
     "/api/reference/scan-request", "/api/reference/scan",
+    # 作废排队中的执行任务：这是改记录状态的动作，必须走记录级写权限，
+    #   否则 preflight 会给一个不在记录作用域里的空 access —— 那个情况下
+    #   所有真实任务都会被判成"不属于当前记录"，接口等于永远不能用。
+    "/api/exec/cancel",
     "/api/reference/litdict", "/api/decisions/ask", "/api/decisions/answer",
     "/api/ledger/ack", "/api/session/share", "/api/task",
     "/api/run-dir", "/api/snapshot", "/api/rollback")

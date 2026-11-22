@@ -1717,3 +1717,48 @@ input.filein{font-size:var(--fs-4);font-family:var(--font-sans);margin:6px 0 8px
 .monitor-title { margin:0 0 10px; font-size:15px; }
 #flowHost .progmiss { overflow-wrap:anywhere; }
 #logBox { white-space:pre-wrap; overflow-wrap:anywhere; }
+
+/* ---- 队列看板（运行区顶部）--------------------------------------
+   为什么需要这一块：队列与回收都是后台的事，原来页面上只有每张步骤卡
+   一句"排队中"。执行端在不在、回收器有没有在跑、哪条卡住了，
+   全都看不出来 —— 而这些恰恰是"活派出去了没有"的唯一答案。
+   这一块只陈述来自服务端的事实，不做乐观估计。 */
+.qboard{display:flex;flex-direction:column;gap:10px;padding:14px 16px;
+  background:#fff;border:1px solid var(--line);border-radius:var(--r);margin-bottom:14px}
+.qcount{display:flex;flex-wrap:wrap;gap:18px;font-size:var(--fs-5);color:var(--ink2)}
+.qcount span{display:inline-flex;align-items:center;gap:6px}
+.qcount b{font-weight:var(--fw-strong);color:var(--ink)}
+.qc{width:8px;height:8px;border-radius:50%;display:inline-block;background:#c3cad6}
+.qc.q-run{background:var(--info)}
+.qc.q-que{background:var(--wait)}
+.qc.q-done{background:var(--done)}
+.qc.q-fail{background:var(--err)}
+.qline{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;
+  padding-top:8px;border-top:1px dashed var(--line)}
+.qk{flex:0 0 56px;color:var(--ink3);font-size:var(--fs-5)}
+.qv{font-weight:var(--fw-strong);font-size:var(--fs-5)}
+.qv.ok{color:var(--done)}
+.qv.bad{color:var(--err)}
+.qv.warn{color:var(--wait)}
+.qd{color:var(--ink3);font-size:var(--fs-5);overflow-wrap:anywhere}
+.qrecent{display:flex;flex-direction:column;gap:4px;padding:8px 10px;
+  background:#f7f9fb;border-radius:6px;font-size:var(--fs-5)}
+.qrecent .qz{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline}
+.qrecent .qt{color:var(--ink3);font-variant-numeric:tabular-nums}
+.qrecent .qn{color:var(--ink2);font-weight:var(--fw-5)}
+.qrecent .qi{color:var(--ink3);overflow-wrap:anywhere}
+.qlist{display:flex;flex-direction:column;gap:6px;padding-top:8px;border-top:1px dashed var(--line)}
+.qitem{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:7px 10px;
+  border:1px solid var(--line);border-radius:6px;font-size:var(--fs-5)}
+.qitem.stuck{border-color:#f0d9b5;background:#fffdf8}
+.qs{flex:0 0 auto;padding:1px 8px;border-radius:10px;font-size:12px;font-weight:var(--fw-5)}
+.qs.run{background:var(--info-soft);color:var(--info)}
+.qs.que{background:var(--wait-soft);color:var(--wait)}
+.qname{font-weight:var(--fw-5);color:var(--ink)}
+.qmeta{color:var(--ink3);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.qflag{color:var(--wait);font-weight:var(--fw-5)}
+.qcancel{margin-left:auto}
+.qmore,.qidle{color:var(--ink3);font-size:var(--fs-5)}
+.qfoot{display:flex;flex-wrap:wrap;align-items:center;gap:12px;
+  padding-top:8px;border-top:1px dashed var(--line)}
+.qother{color:var(--ink3);font-size:12px;padding:0 6px;border:1px solid var(--line);border-radius:9px}

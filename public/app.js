@@ -616,7 +616,20 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
   //   老服务端没有新字段时回退到 pending_req，语义与旧版一致。
   const pending = d.pending_identify_req !== undefined ? d.pending_identify_req : (d.pending_req || null);
   S.stepReq = d.pending_step_req || null;
-  const waiting = pending && !(ident && ident.result && ident.req_id === pending);
+  // ---- 识别状态一律以服务端结论为准 --------------------------------
+  //   为什么不能在这里自己算（2026-11-22，gina 报「会话 1 已回写、会话 2 仍显示识别中」）：
+  //     原来判据是「记录里的识别号 == 我手上这个页面的请求号」。
+  //     手上那个号只属于点过按钮的那一个标签页，换会话打开同一条记录时手上没有号，
+  //     同一个问题就被答成两种结论 —— 记录里明明有回写，另一个会话却显示"识别中"。
+  //   服务端现在只按记录本身给出四种结论（ready/waiting/stale/none），
+  //   任何会话看到的都一样。这里只负责把它翻译成页面状态，不再自行推断。
+  const identStatus = String(d.identify_status || '');
+  const ssWaiting = (identStatus === 'waiting');
+  const ssStale = (identStatus === 'stale');
+  const waiting = ssWaiting;
+  S.identifyStatus = identStatus || null;
+  S.identifyStaleHours = d.identify_stale_hours || null;
+  S.identifyResultAt = d.identify_result_at || null;
   if (ident && ident.result && !waiting) {
     S.envCheck = ident.result;
     S.identified = true;
@@ -643,12 +656,26 @@ async function loadSessionsState(targetId = null, bindCurrent = true) {
     S.runDirRemote = (s.mode === 'server');
   }
   // 有未回的识别请求：把等待恢复起来，让页面继续自己等。
+  //   超期的那种（服务端判 stale，请求挂着 24 小时仍没回来）不走"一直在等"：
+  //   页面继续显示"识别中"只会让人以为它还在跑。改成 timeout，说清等的是哪个号、
+  //   等了多久，并把重跑入口摆出来。
   if (waiting) {
     S.commitReq = pending;
     S.identified = true;
     S.needsRemote = (s && s.mode === 'server') || (ident && ident.mode === 'server');
     S.identifyPhase = 'waiting';
     startWaitWriteback();
+  } else if (ssStale) {
+    S.identified = true;
+    S.needsRemote = (s && s.mode === 'server') || (ident && ident.mode === 'server');
+    S.identifyPhase = 'timeout';
+    stopWaitWriteback();
+  }
+  // 会话切换后不能沿用上一份记录的识别号。
+  //   这条号只在"点过保存并识别的那一次"里有意义；换到另一份记录还留着它，
+  //   后面 fetchEnvcheck 就会拿别的记录的号去比新鲜度，结论永远是"不是这次的"。
+  if (!waiting && !ssStale && identStatus === 'ready') {
+    S.commitReq = d.identify_result_req || (ident && ident.req_id) || null;
   }
 
   // 顶部状态行在这里重画一次。
@@ -924,7 +951,16 @@ let retryStepId = null;
      这不是理论风险：当天就差点发生。
    拦截不等于禁止：把后果摊开说清楚，人要强行再来一次仍然可以。 */
 function busyOf(stepId) {
-  return arr(S.execTasks).find(t => t && String(t.step) === String(stepId)
+  // 必须比对分析记录。
+  //   /api/exec 是"执行端视角"的接口，返回的是整台应用的队列，不按记录过滤。
+  //   原来这里只比 step 和 status，于是另一条分析记录的同名步骤在排队时，
+  //   当前记录也会被判成"这一步正在跑"：点不动、建不了新的、还反复提示排队中。
+  //   两条记录的结果目录不同，同时跑根本不会写同一个文件，没有任何理由互斥。
+  const sid = String(S.sessionId || '');
+  if (!sid) return undefined;
+  return arr(S.execTasks).find(t => t
+    && String(t.session_id || '') === sid
+    && String(t.step) === String(stepId)
     && (String(t.status) === 'running' || String(t.status) === 'queued'));
 }
 
@@ -946,10 +982,61 @@ function showBusySheet(stepId, t, onForce) {
     + '<tr><th>最近报信</th><td>' + esc(String(t.last_seen || '').replace('T', ' ') || '还没报过') + '</td></tr>'
     + '</table>';
   h += '<div class="sh-p" style="margin-top:12px">建议等它跑完、结果写回之后再说。想看进度，点「查询结果」。</div>';
-  const foot = '<button class="btn" data-busy-go="' + esc(stepId) + '">仍然再交一次</button>';
+  // 无论排队中还是在跑，都要给一个人工作废的入口。
+  //   为什么（2026-11-22，gina 报"只能改代码才能继续"）：
+  //     最常见的死法不是"排着没人领"，而是"领取了、再没动静" ——
+  //     执行端死了，任务停在 running。原来 running 连按钮都不给，
+  //     界面上一个能点的东西都没有，人只能去改 state/exec_tasks.json。
+  //     现在服务端自己判断：执行端还活着且还在报信，才拒一次并告诉你可以强制作废。
+  if (!isRun) {
+    h += '<div class="sh-p" style="margin-top:10px;color:#8a5a00">'
+      + '如果它已经排了很久、执行端也没领走，可以把它作废，让后面的环节能派出去。'
+      + '作废不改产物、不删记录，只把这条标成失败并写清原因。</div>';
+  } else {
+    h += '<div class="sh-p" style="margin-top:10px;color:#8a5a00">'
+      + '如果执行端早就没了、这条只是停在"在跑"，可以强制结束它。'
+      + '强制结束只改状态、不删记录；如果那个作业其实还在跑，它的产物仍可能落地。</div>';
+  }
+  const foot = '<button class="btn" data-busy-go="' + esc(stepId) + '">仍然再交一次</button>'
+    + '<button class="btn" data-exec-cancel="' + esc(String(t.id || ''))
+    + '">' + (isRun ? '强制结束这条任务' : '作废这条排队任务') + '</button>';
   const __recordScope = recordContext();
   busyForce = onForce ? () => { if (recordCurrent(__recordScope) && !sessionChanging) onForce(); } : null;
   sheet('这一步正在跑：' + title, h, foot);
+}
+
+/* 作废一条排队中的执行任务。
+   判据由服务端给：只允许 queued、只允许本记录、还在报信的拒绝。
+   前端不自己判断"该不该允许"，只把服务端的拒绝原样说出来。 */
+async function cancelExecTask(execId, force) {
+  if (sessionChanging || !execId) return;
+  const __recordScope = recordContext();
+  try {
+    const r = await recordAwait(postJSON('/api/exec/cancel',
+      { id: String(execId), force: !!force }), __recordScope);
+    if (r && !r.ok) {
+      // 服务端说"可能真的还在跑，但你可以强制作废" —— 再问一次，别替人决定。
+      //   以前这种情形只回一句错误，人除了改文件没有别的路。
+      if (r.can_force || r.code === 'exec_task_still_alive') {
+        const ok = window.confirm(
+          String(r.error || '这条可能还在跑。') + '\n\n仍然要作废吗？\n'
+          + '作废只改状态、不删记录；如果那个作业其实还在跑，它的产物仍可能落地。');
+        if (ok) return cancelExecTask(execId, true);
+        return;
+      }
+      closeSheet();
+      toast('没作废成：' + (r.error || r.code || '未知原因'), 'bad');
+      return;
+    }
+    closeSheet();
+    toast('已作废 ' + String(execId) + '，后面的环节可以派了。', 'good');
+    await recordAwait(refreshExecTasks(), __recordScope);
+    await recordAwait(loadRun(), __recordScope);
+    renderAll();
+  } catch (e) {
+    if (!recordCurrent(__recordScope)) return;
+    toast('作废失败：' + String((e && e.message) || e), 'bad');
+  }
 }
 
 function openRetryDlg(id, force) {
@@ -3873,10 +3960,19 @@ async function refreshExecTasks() {
   try {
     const r = await recordAwait(getJSON('/api/exec'), __recordScope);
     S.execTasks = arr(r && r.items);
+    S.execCounts = (r && r.counts) || null;
+    S.execStuck = (r && r.stuck_count) || 0;
+    S.execWorker = (r && r.worker) || null;
+    S.execReclaim = (r && r.reclaim) || null;
+    S.execLoadErr = '';
     renderRunCtl();
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
- /* 读不到就保持原样，不遮住已有进度 */ }
+ /* 读不到就保持原样，不遮住已有进度 */
+    // 但必须记下这次失败：看板要能回答"队列到底读没读到"，
+    //   一直静默失败会让人以为队列真的空着。
+    S.execLoadErr = String((e && e.message) || e || '读取失败');
+    renderRunCtl(); }
 
   } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -3894,8 +3990,200 @@ async function refreshExecTasks() {
      · "产物 N 项" 已经进「任务完成详情」。
    留着它只会让人在两处读到同一件事，还要判断哪一处是准的。 */
 function renderRunCtl() {
-  const host = $('#runCtl'); if (!host) return;
-  host.innerHTML = '';
+  // 同一块看板要出现在两个地方：
+  //   #runCtl      「跑分析」区块顶部（点完按钮就在眼前）
+  //   #queueHost   「分析运行看板」区块顶部（没识别也能看，专门查队列用）
+  //   两处内容必须一模一样 —— 各写一份迟早会不一致，人就会在两处读到不同的结论。
+  const targets = ['#runCtl', '#queueHost'].map(sel => $(sel)).filter(Boolean);
+  if (!targets.length) return;
+  const paint = html => targets.forEach(el => { el.innerHTML = html; });
+
+  // 读不到队列时必须说出来。
+  //   以前是静默保留上一次的样子，于是"接口挂了"和"队列空着"长得一模一样，
+  //   人只会以为活没派出去，反复点按钮。
+  if (S.execLoadErr) {
+    paint('<div class="rz fail"><span class="mk">×</span><span>'
+      + '<b>队列读不到</b> <span class="dt">' + esc(S.execLoadErr) + '</span></span></div>');
+    return;
+  }
+
+  const w = S.execWorker || {};
+  const c = S.execCounts || {};
+  const r = S.execReclaim || null;
+  const items = arr(S.execTasks);
+  const live = items.filter(t => ['queued', 'running'].includes(String(t.status)));
+  const stuck = items.filter(t => t && t.stuck);
+  const n = k => (c[k] === undefined || c[k] === null ? 0 : c[k]);
+
+  const atText = v => v ? String(v).replace('T', ' ').slice(5, 16) : '';
+  const agoText = secs => {
+    if (secs === null || secs === undefined) return '';
+    const s = Number(secs);
+    if (!isFinite(s) || s < 0) return '';
+    if (s < 90) return Math.round(s) + ' 秒前';
+    if (s < 5400) return Math.round(s / 60) + ' 分钟前';
+    return (s / 3600).toFixed(1) + ' 小时前';
+  };
+
+  let h = '<div class="qboard">';
+
+  // ---- 一句话总述：现在这台机器到底能不能干活 --------------------
+  //   三个事实必须同时成立才叫"能跑"：执行端在线、队列里没有卡住的、回收器在跑。
+  //   缺任何一个都要直接说出来，不能让人从下面几行自己去拼。
+  const workerOk = !!w.online;
+  const reclaimOk = !!(r && r.alive);
+  const blockOk = stuck.length === 0;
+  const headline = (workerOk && reclaimOk && blockOk)
+    ? { cls: 'ok', mk: '✓', t: '队列正常',
+        d: n('running') + ' 条在跑、' + n('queued') + ' 条在排。' }
+    : (!workerOk
+      ? { cls: 'fail', mk: '×', t: '没有执行端在线',
+          d: '排队的任务不会有人领取。要先在工作电脑上启动执行端。' }
+      : (!reclaimOk
+        ? { cls: 'warn', mk: '!', t: '回收器没在跑',
+            d: '失联任务不会被自动收尾，队列里的状态可能停在旧样子。' }
+        : { cls: 'warn', mk: '!', t: '有 ' + stuck.length + ' 条排队任务没人认领',
+            d: '它们会一直挡住后续环节。确认不会再跑了就作废掉。' }));
+  h += '<div class="rz ' + headline.cls + '"><span class="mk">' + headline.mk + '</span>'
+    + '<span><b>' + esc(headline.t) + '</b> <span class="dt">' + esc(headline.d) + '</span></span></div>';
+
+  // ---- 计数条 ----------------------------------------------------
+  h += '<div class="qcount">'
+    + '<span><i class="qc q-run"></i>在跑 <b>' + n('running') + '</b></span>'
+    + '<span><i class="qc q-que"></i>排队 <b>' + n('queued') + '</b></span>'
+    + '<span><i class="qc q-done"></i>完成 <b>' + n('done') + '</b></span>'
+    + '<span><i class="qc q-fail"></i>失败 <b>' + n('failed') + '</b></span>'
+    + '</div>';
+
+  // ---- 执行端 ----------------------------------------------------
+  //   agoSecs：把服务端给的 "2026-11-22T20:17:05" 换成"多少秒之前"。
+  //   自己算而不是用服务端算，是因为这一栏是"现在"快照，页面停留久了也要准。
+  const agoSecs = v => {
+    if (!v) return null;
+    const ms = Date.parse(String(v).replace(' ', 'T'));
+    if (!isFinite(ms)) return null;
+    return Math.max(0, Math.round((Date.now() - ms) / 1000));
+  };
+  let workerHtml = '<span class="qk">执行端</span>';
+  if (workerOk) {
+    workerHtml += '<span class="qv ok">在线</span><span class="qd">'
+      + esc(w.by || '未知') + '　最近报信 '
+      + esc(agoText(agoSecs(w.at)) || '—')
+      + '（' + esc(atText(w.at) || '—') + '）</span>';
+  } else if (w.at) {
+    workerHtml += '<span class="qv bad">离线</span><span class="qd">最后一次报信 '
+      + esc(atText(w.at)) + '，' + esc(agoText(agoSecs(w.at)) || '时间不明')
+      + '。排队的任务不会有人领取。</span>';
+  } else {
+    workerHtml += '<span class="qv bad">离线</span><span class="qd">'
+      + '从来没有报过信。这台应用还没有任何执行端连过。</span>';
+  }
+  h += '<div class="qline">' + workerHtml + '</div>';
+
+  // 心跳在、却从不领活：这是最难自己发现的一种。
+  //   实测形态：心跳每分钟一次、claim 动作全量为 0。
+  //   心跳只能证明进程活着，证明不了它在看这个队列。
+  if (workerOk && n('queued') > 0 && n('running') === 0) {
+    const oldest = live.filter(t => String(t.status) === 'queued')
+      .map(t => Number(t.queued_minutes || 0)).sort((a, b) => b - a)[0];
+    if (oldest >= 10) {
+      h += '<div class="rz warn" style="margin-top:8px"><span class="mk">!</span><span>'
+        + '<b>执行端在线，但排队最久的那条已经等了 ' + Math.round(oldest) + ' 分钟没人领。</b> '
+        + '<span class="dt">心跳只证明进程活着，不证明它在轮询这个队列。'
+        + '前一步在跑时可以一直排；但若前面没有任何在跑的任务，就说明它没在取活。</span></span></div>';
+    }
+  }
+
+  // ---- 回收器 ----------------------------------------------------
+  //   为什么要显示它：它坏死时不会有任何报错冒到页面上，只表现成"那条一直不动"。
+  //   把最后一次扫描时间摆出来，"没人回收"和"没人接活"才分得开。
+  h += '<div class="qline">'
+    + '<span class="qk">回收器</span>'
+    + (r
+      ? ((r.alive
+        ? '<span class="qv ok">在跑</span>'
+        : '<span class="qv bad">没在跑</span>')
+        + '<span class="qd">'
+        + (r.last_scan_at
+          ? ('上次扫描 ' + esc(atText(r.last_scan_at)) + '，'
+             + esc(agoText(r.last_scan_age_secs)))
+          : '还没有扫描记录')
+        + (r.expect_secs ? ('　（每 ' + Math.round(Number(r.expect_secs) / 60) + ' 分钟一次）') : '')
+        + '</span>')
+      : '<span class="qv">未知</span><span class="qd">这次没拿到回收器状态</span>')
+    + '</div>';
+
+  // 最近回收了什么：这是"我做的动作有没有生效"的唯一凭据。
+  if (r && arr(r.recent).length) {
+    h += '<div class="qrecent">';
+    arr(r.recent).slice(0, 3).forEach(x => {
+      const kd = String(x.kind || '');
+      const label = kd === 'manual_cancel' ? '人工作废'
+        : (kd === 'scan_error' ? '扫描出错'
+          : ('自动回收 ' + (Number(x.reaped || 0)) + ' 条'));
+      const ids = arr(x.ids).map(String).filter(Boolean);
+      const when = String(x.at || '').replace('T', ' ').slice(5, 16);
+      h += '<div class="qz"><span class="qt">' + esc(when) + '</span>'
+        + '<span class="qn">' + esc(label) + '</span>'
+        + (ids.length ? '<span class="qi">' + esc(ids.slice(0, 3).join('、')) + '</span>' : '')
+        + (x.error ? '<span class="qi">' + esc(String(x.error)) + '</span>' : '')
+        + '</div>';
+    });
+    h += '</div>';
+  }
+
+  // ---- 未结束的任务明细 ------------------------------------------
+  //   只列 queued 和 running：完成和失败的历史没有"要不要动手"这个问题，
+  //   全列出来会把要判断的那两行淹掉。
+  if (live.length) {
+    h += '<div class="qlist">';
+    live.slice(0, 8).forEach(t => {
+      const st = String(t.status);
+      const isRun = st === 'running';
+      const title = stepTitleCN(t.step) || t.step || '—';
+      // 这条是不是当前记录的任务，必须标出来。
+      //   /api/exec 是执行端视角的接口，返回的是整台应用的队列，不按记录过滤。
+      //   不标的话，人会把别的分析记录的排队任务当成自己的，
+      //   然后对着一条不属于自己的任务反复找原因。
+      const mine = !!S.sessionId && String(t.session_id || '') === String(S.sessionId);
+      const mins = t.queued_minutes === null || t.queued_minutes === undefined ? null : Number(t.queued_minutes);
+      h += '<div class="qitem' + (t.stuck ? ' stuck' : '') + '">'
+        + '<span class="qs ' + (isRun ? 'run' : 'que') + '">' + (isRun ? '在跑' : '排队') + '</span>'
+        + '<span class="qname">' + esc(title) + '</span>'
+        + (mine ? '' : '<span class="qother">别的记录 ' + esc(String(t.session_id || '').slice(-9)) + '</span>')
+        + '<span class="qmeta">' + esc(String(t.id || '')) + '</span>'
+        + (isRun
+          ? (t.claimed_at ? '<span class="qmeta">领取于 ' + esc(atText(t.claimed_at)) + '</span>' : '')
+          : (mins !== null && mins !== undefined ? '<span class="qmeta">已等 ' + mins + ' 分钟</span>' : ''))
+        + (t.stuck ? '<span class="qflag">没人认领</span>' : '')
+        // 在跑的也要给作废入口。
+        //   为什么（2026-11-22，gina 报"只能改代码才能继续"）：
+        //     原来只给排队中的那条按钮，正在跑的连按钮都没有。
+        //     可最常见的死法恰恰是"领取了、再没动静"——执行端死了，任务停在 running。
+        //     那种情况下界面上一个能点的东西都没有，人只能去改 state/exec_tasks.json。
+        //   服务端会自己判断：执行端还活着、也还在报信，才拒一次并告诉你可以强制作废。
+        + '<button class="btn btn-sm qcancel" data-exec-cancel="' + esc(String(t.id || ''))
+        + '">' + (isRun ? '强制结束' : '作废') + '</button>'
+        + '</div>';
+    });
+    if (live.length > 8) {
+      h += '<div class="qmore">还有 ' + (live.length - 8) + ' 条未列出。</div>';
+    }
+    h += '</div>';
+  } else if (n('total') > 0) {
+    h += '<div class="qidle">队列里没有在跑或在排的任务。'
+      + '（历史 ' + n('done') + ' 条完成、' + n('failed') + ' 条失败）</div>';
+  } else {
+    h += '<div class="qidle">队列是空的，还没有派过任何任务。</div>';
+  }
+
+  h += '<div class="qfoot">'
+    + '<button class="btn btn-sm" data-exec-refresh="1">刷新队列</button>'
+    + '<span class="small">页面开着时每 5 秒自己更新一次；关掉页面后回收仍按上面那个频率照常跑。</span>'
+    + '</div>';
+
+  h += '</div>';
+  paint(h);
 }
 
 /* =====================================================================
@@ -4626,7 +4914,9 @@ async function pollStatus() {
   monitorFlight = scope;
   try {
     // Both panels refresh for every valid record, not just claimed running tasks.
-    await Promise.all([refreshStatusOnce(), loadFlow()]);
+    // 队列看板一起刷：执行端上下线、排队积压、卡住的任务都会在这 5 秒里变，
+    //   只是"点了才刷新"的话，人看到的永远是点下去那一刻的样子。
+    await Promise.all([refreshStatusOnce(), loadFlow(), refreshExecTasks()]);
   } finally {
     if (monitorFlight === scope) monitorFlight = null;
   }
@@ -5380,6 +5670,14 @@ document.addEventListener('click', e => {
     else runStep(sid2, null, true);
     return;
   }
+  // 作废一条排队中没人认领的执行任务。
+  //   它出现在两个地方：步骤卡上"这一步在跑"那张浮层里（和"仍然再交一次"并排），
+  //   以及队列看板每一行末尾（那里才是"卡住了"最常见的发现处）。
+  //   两处走同一个处理函数，判据由服务端给。
+  const xc = t.closest('[data-exec-cancel]');
+  if (xc) { cancelExecTask(xc.getAttribute('data-exec-cancel')); return; }
+  // 队列看板上手动刷新一次：人怀疑"是不是没更新"时，要给一个能自己确认的动作。
+  if (t.closest('[data-exec-refresh]')) { refreshExecTasks(); return; }
   // 参考表：上传 / 选用
   if (t.closest('[data-refup]')) { doRefUpload(); return; }
   if (t.closest('[data-reflit]')) { askLitDict(); return; }
@@ -7047,6 +7345,17 @@ function identifyWaitingHTML() {
       ? ('还没收到回写 —— 这一栏不下结论。')
       : ('正在等助手到 ' + where + ' 上跑一次环境体检和脚本库识别。'))
     + '</div>';
+  // 超期没回来：说清等的是哪一次、等了多久，并给一个重跑的口子。
+  //   以前这里只有"识别中"和"还没回来"两种说法，人分不出
+  //   "正在跑"和"早就没人管了"；而后者只会让这条记录一直停在识别中。
+  if (to && S.identifyStatus === 'stale') {
+    h += '<div class="rz warn" style="margin-top:8px"><span class="mk">!</span><span>'
+      + '<b>这次识别请求已经等了 ' + esc(String(S.identifyStaleHours || '')) + ' 小时，没有回写。</b> '
+      + '<span class="dt">请求号：' + esc(S.commitReq || '未取得')
+      + '。它不是还在跑，是没人回来交结果。'
+      + (S.identifyResultAt ? ('记录里最近一次成功识别是 ' + esc(String(S.identifyResultAt).replace('T', ' ')) + '。') : '')
+      + '可以重新点「保存并识别」再来一次。</span></span></div>';
+  }
   // 手上已有旧结果时把时间point出来：不说这句，人只会看到"识别中"不动，
   //   以为是卡住了，其实是这一次还没回写。
   if (oldAt) {

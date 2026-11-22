@@ -115,6 +115,10 @@
 
     <section class="sec" id="secMonitor" style="display:none" data-nav="分析运行看板" data-navgroup="跑">
       <div class="sec-h"><h2>分析运行看板</h2></div>
+      <!-- 队列看板：执行端在不在、排着几条、哪条卡住了、回收器上次扫描是几点。
+           放在这一块而不是只放在「跑分析」里，是因为后者要记录识别过才显示 ——
+           而"活派出去了没有"这个问题在没有识别结论时同样要能回答。 -->
+      <div id="queueHost"></div>
       <div class="card card-pad" id="progressPanel">
         <h3>运行进度与回写</h3>
         <!-- 这里原来有一行「尚未读取当前记录；任务状态未知。」。
@@ -344,8 +348,8 @@
      真实会话。它和上面那条 compose 通道是两条独立的路 —— 一条不通不代表
      另一条不通，所以两条都要在，谁先连上用谁。 -->
 <script src="catsco-artifact-bridge.js?v=20261025origin"></script>
-<script src="app-shell.20261028a.js?v=20261122-queue-first"></script>
-<script src="app.js?v=20261120-writeback-identity"></script>
+<script src="app-shell.20261028a.js?v=20261122-origin-firstline"></script>
+<script src="app.js?v=20261122-identify-state"></script>
 <script src="fetch-device.js?v=20261117-fetch-device"></script>
 <script src="analysis-controls.js?v=20261116-fixedsize"></script>
 <script src="app-handoff.js?v=20261110-parallel"></script>

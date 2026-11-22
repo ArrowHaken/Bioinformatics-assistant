@@ -89,9 +89,12 @@ instruction_source <- function(app_dir,b,items,owner,authorized) {
   #   为什么必须在这里补：直接注入走的是 app.js 的 injectToSession，那里已经加过标题；
   #   而补发走队列（item_id）恢复全文，正文是当初入队时的内部指针，
   #   人看到就是一段不知道在说什么的话。origin 在入队时已存下，这里重建标题。
+  #   标题格式统一成【按钮名】并与服务端生成的首行一致 ——
+  #   以前这里写「【本次操作】xxx」换行再跟正文，会话首行就变成了那句话本身，
+  #   看不出是哪个按钮发起的（gina 2026-11-22 的要求是首行即按钮名）。
   origin <- sess_chr(it$origin)
-  if (nzchar(origin) && !startsWith(as.character(text), "【本次操作】"))
-    text <- paste0("【本次操作】", origin, "\n", as.character(text))
+  if (nzchar(origin) && exists("inject_with_origin", mode = "function"))
+    text <- inject_with_origin(text, origin)
   b$text <- text
   b$instruction_id <- if(nzchar(id)) id else NULL
   list(ok=TRUE,body=b)

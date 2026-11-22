@@ -85,6 +85,14 @@ rc_step_guard <- function(active_chain, chain_dispatch = FALSE) {
   NULL
 }
 rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = FALSE) {
+  # ---- 先回收没人认领的排队任务，再判断"忙不忙" ----------------------
+  #   为什么必须在入口先做（2026-11-22，gina 报队列死锁）：
+  #     一条 queued 任务如果永远没人认领，下面的 session_execution_busy 会一直成立，
+  #     新环节派不出去；而页面又没有任何入口能把它清掉 —— 整条分析就此锁死。
+  #     回收规则本身在 exec_reap 里（看认领、不看心跳），这里只是保证在
+  #     做"能不能派"这个判断之前它已经跑过一次，而不是等某次页面刷新顺手带上。
+  if (exists("exec_reap", mode = "function"))
+    tryCatch(exec_reap(audit = TRUE), error = function(e) NULL)
   c <- rc_read(sid)
   if (!is.null(c)) {
     same <- !nzchar(req_id) || identical(req_id, c$req_id)
@@ -142,8 +150,41 @@ rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = 
     !is.null(st) && !nzchar(as.character(st$cover_by %||% ""))
   }, FLOW_ORDER("server"))
   if (!length(todo)) return(list(code = 409L, body = list(ok = FALSE, code = "empty_remote_chain")))
-  busy <- Filter(function(it) identical(it$session_id, sid) && it$status %in% c("queued", "running"), exec_read()$items %||% list())
-  if (length(busy)) return(list(code = 409L, body = list(ok = FALSE, code = "session_execution_busy")))
+  # ---- 互斥只针对"马上要派的那一步"，不是整条记录 ---------------------
+  #   为什么改成只查第一步（2026-11-22，gina 报"一条任务锁死一切"）：
+  #     这里原来查的是"这条记录还有没有 queued/running 的任务"，
+  #     查到任何一条就 409。而各环节写的是各自的子目录
+  #     （1.doublet / 3.merge / 5.markers / 7.after_drop / 8.final / 9.annot / 10.figs），
+  #     第 5 步在排队时去派第 1 步，根本不会写同一个文件。
+  #     用整条记录当锁，等于把"不同环节互不相干"这件事当成冲突处理，
+  #     后果就是一条没跑成的任务把后面的活全堵住，人只能去改文件。
+  #   真正需要防的只有一种：这条链即将派出的那一步已经有任务在管。
+  #     那时再派一份，两个作业才会写同一个输出目录。
+  #   其余环节的重复派工，exec_enqueue 那一层已经按 step+session 去重复用，
+  #   不会凭空产生第二条。
+  first_step <- as.character(todo[[1L]] %||% "")
+  busy <- Filter(function(it)
+    identical(as.character(it$session_id %||% ""), sid) &&
+      identical(as.character(it$step %||% ""), first_step) &&
+      as.character(it$status %||% "") %in% c("queued", "running"),
+    exec_read()$items %||% list())
+  if (length(busy)) {
+    # 拒绝的时候必须把"是哪一条卡住、该怎么办"说出来。
+    #   原来只回一个错误码，页面除了重复提示没有别的出路 —— 这就是
+    #   "只能改代码"的直接来源。
+    b1 <- busy[[1]]
+    return(list(code = 409L, body = list(
+      ok = FALSE, code = "session_execution_busy", step = first_step,
+      blocking_exec_id = as.character(b1$id %||% ""),
+      blocking_status = as.character(b1$status %||% ""),
+      error = paste0("「", first_step, "」这一步已经有任务在管（",
+                     as.character(b1$id %||% ""), "，",
+                     as.character(b1$status %||% ""), "）。",
+                     "同时派两份会写同一个输出目录，所以先停下。",
+                     "先看队列看板：确认真不会再跑了，就把它作废，然后重试；",
+                     "它确实在跑，就等它回写。"),
+      hint = "POST /api/exec/cancel 可以作废这条排队任务；作废后重试即可，不需要改代码。")))
+  }
   if (!nzchar(req_id)) req_id <- paste0("chain-", gsub("[^A-Za-z0-9]", "", exec_ts()), "-", paste(sample(c(letters, 0:9), 8, TRUE), collapse = ""))
   if (isTRUE(HAS_SESSIONS)) {
     saved <- sess_set_pending(APP_DIR, sid, req_id, slot = "step")

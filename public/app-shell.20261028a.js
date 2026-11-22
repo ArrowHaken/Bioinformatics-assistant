@@ -274,7 +274,10 @@
   function prepareText(text, meta) {
     meta = meta || {};
     var request = { session_id: meta.analysisId || '', req_id: meta.reqId || '',
-      text: meta.itemId ? '' : String(text || ''), purpose: meta.purpose || 'execute' };
+      text: meta.itemId ? '' : String(text || ''), purpose: meta.purpose || 'execute',
+      // 按钮名必须一起送上去：进会话的那段正文由服务端生成，
+      //   前端拼的标题只落进 instruction.txt，会话首行看不到。
+      origin: meta.originLabel || '' };
     if (meta.itemId) request.item_id = meta.itemId;
     return postJSON('api/instruction/prepare', request).then(function (r) {
       if (!r || !r.ok) return failure(r, 'prepare');

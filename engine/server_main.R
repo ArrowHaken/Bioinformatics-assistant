@@ -30,6 +30,72 @@
 suppressWarnings(options(stringsAsFactors = FALSE, scipen = 999, warn = -1))
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0L) b else a
+# 会话正文首行的按钮名。任何注入会话的入口都走它，只允许短中文标签。
+inject_origin_prefix <- function(origin) {
+  lab <- gsub("[【】\r\n\t]", "", trimws(as.character(origin %||% "")))
+  if (!nzchar(lab)) return("")
+  if (nchar(lab, type = "chars") > 24L) lab <- substr(lab, 1L, 24L)
+  paste0("【", lab, "】")
+}
+
+# 一句话把按钮名放到正文最前面，已经带过就不重复加。
+#   所有进会话的路径先过这里，前端直接发、补发、后端自动派三种情形
+#   才不会再各写一遍首行。
+inject_with_origin <- function(text, origin) {
+  t0 <- as.character(text %||% "")
+  pre <- inject_origin_prefix(origin)
+  if (!nzchar(pre)) return(t0)
+  if (startsWith(t0, pre)) return(t0)
+  paste0(pre, t0)
+}
+
+# 进会话那段短指针。抽成函数有两个原因：
+#   一是 reuse 与新建两条分支原来各抄一份字符串，改一处会漏另一处；
+#   二是它要能被直接跑正反例，埋在几千行的处理器里只能靠人读。
+instruction_pointer_text <- function(path, context_path, session_id, req_id,
+                                     origin = "", query_only = FALSE) {
+  paste0(inject_origin_prefix(origin),
+         if (isTRUE(query_only)) "只读提问，不授权执行或回写。" else "",
+         "请先完整读取交接说明：", context_path,
+         "；再完整读取正文TXT：", path,
+         "。session_id=", session_id, "；req_id=", req_id,
+         "。两文件属于应用运行主机；严格依交接说明定位主机及回写URL，不截断正文，不猜测localhost。不可读取时明确报错。")
+}
+
+# 一条记录现在的识别状态。只看记录本身，不看任何页面的内存。
+#   四种结论：none / waiting / ready / stale。
+#   为什么要把"有结论但请求没回来"判成 stale 而不是 waiting：
+#     请求挂着不回写时，页面继续写"识别中"等于替它保证还在跑。
+#     实测有几条记录挂了好几天（952j：结论 10-26、pending 停在 11-12），
+#     主人才会在另一个会话里看到"识别中"而实际早有结论。
+identify_state <- function(app_dir, sid, now = Sys.time()) {
+  s <- tryCatch(sess_find(app_dir, sid), error = function(e) NULL)
+  blk <- (s %||% list())$identify %||% list()
+  rr <- blk$result
+  has_res <- is.list(rr) && length(rr) > 0L
+  pend <- as.character(tryCatch(sess_get_pending(app_dir, sid, slot = "identify"),
+                                error = function(e) NULL) %||% "")
+  pend_at <- as.character(tryCatch(sess_get_pending_at(app_dir, sid, slot = "identify"),
+                                   error = function(e) NULL) %||% "")
+  res_req <- trimws(as.character(blk$req_id %||% ""))
+  res_at <- as.character((rr %||% list())$imported_at %||% "")
+  # 结论是否已经覆盖这条请求：号一致，或结论比请求更晚落盘。
+  covers <- nzchar(res_at) && nzchar(pend_at) && res_at >= pend_at
+  age_h <- if (nzchar(pend_at)) {
+    t0 <- exec_parse_ts(pend_at)
+    if (is.na(t0)) NA_real_ else as.numeric(difftime(now, t0, units = "hours"))
+  } else NA_real_
+  stale <- !nzchar(pend) || (is.finite(age_h) && age_h >= 24)
+  status <- if (!has_res && !nzchar(pend)) "none"
+    else if (has_res && (!nzchar(pend) || identical(pend, res_req) || covers)) "ready"
+    else if (!has_res) { if (stale) "stale" else "waiting" }
+    else { if (stale) "stale" else "waiting" }
+  list(status = status, pending_req = if (nzchar(pend)) pend else NULL,
+       pending_at = if (nzchar(pend_at)) pend_at else NULL,
+       result_req = if (nzchar(res_req)) res_req else NULL,
+       result_at = if (nzchar(res_at)) res_at else NULL,
+       stale_hours = if (identical(status, "stale") && is.finite(age_h)) round(age_h, 1) else NULL)
+}
 
 # ---- 找自己的位置 ----
 APP_DIR <- tryCatch({
@@ -623,15 +689,69 @@ EXEC_STALE_SECS <- 2L * 3600L
 # queued 的唯一过期规则是「执行端离线」。在线时排多久都保留；从未上线
 # 才退回任务创建时间。24 小时绝对期限已按 SPEC-V2 删除。
 EXEC_QUEUE_STALE_SECS <- EXEC_WORKER_OFFLINE_SECS
+# 排队多久没人认领就不再算"有人在管"—— 只用来标记 stuck，不自动回收。
+#   为什么只标记、不自动杀（2026-11-22，gina 报队列死锁）：
+#     现象是「一条 queued 任务没人认领，后续环节永远派不出去，界面也删不掉」。
+#     但直接按"排队超时即回收"去做会把正常排队的任务一起杀掉：
+#     队列是单执行端的，前一条 final 实测跑三小时，后面的任务本来就该一直 queued。
+#   所以这里只回答一个问题（这条是不是看起来没人管），
+#   处置交给两处：/api/exec 把它标成 stuck 显示出来，/api/exec/cancel 给人工作废。
+EXEC_QUEUE_UNCLAIMED_SECS <- 30L * 60L
 
 exec_reap_audit_path <- function() file.path(STATE_DIR, "exec_reaper_audit.jsonl")
-
 exec_reap_audit_append <- function(rec) {
   f <- exec_reap_audit_path()
   dir.create(dirname(f), showWarnings = FALSE, recursive = TRUE)
   tryCatch(cat(paste0(jsonlite::toJSON(rec, auto_unbox = TRUE), "\n"),
                file = f, append = TRUE), error = function(e) NULL)
   invisible(TRUE)
+}
+
+# 回收器本身的状态。
+#   为什么要单算一份：回收是个后台定时任务，它坏死时不会有任何报错冒到页面上 ——
+#   表现只是"队列里那条一直不动"。那种故障没法从队列本身看出来，
+#   因为队列看不见"谁在管它"。所以把回收器的最后一次扫描时间也摆出来，
+#   人一眼就能分辨"没人回收"和"没人接活"。
+exec_reaper_status <- function(now = Sys.time(), expect_secs = 300L) {
+  f <- exec_reap_audit_path()
+  lastScan <- NULL
+  reapedRecent <- list()
+  lines <- character(0)
+  if (file.exists(f)) {
+    lines <- tryCatch(readLines(f, warn = FALSE, encoding = "UTF-8"),
+                      error = function(e) character(0))
+    lines <- lines[nzchar(trimws(lines))]
+  }
+  if (length(lines)) {
+    # 只回看末尾若干行：审计是追加写的，越靠后越新。
+    for (x in rev(utils::tail(lines, 200L))) {
+      j <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE), error = function(e) NULL)
+      if (!is.list(j)) next
+      kd <- as.character(j$kind %||% "")
+      if (identical(kd, "scan") && is.null(lastScan)) { lastScan <- j; next }
+      if (kd %in% c("manual_cancel", "scan_error") ||
+          (is.numeric(j$reaped) && j$reaped > 0) ||
+          (is.list(j$ids) && length(j$ids) > 0)) {
+        reapedRecent[[length(reapedRecent) + 1L]] <- j
+        if (length(reapedRecent) >= 5L) break
+      }
+    }
+  }
+  at <- as.character((lastScan %||% list())$at %||% "")
+  age <- if (nzchar(at)) {
+    t0 <- exec_parse_ts(at)
+    if (is.na(t0)) Inf else as.numeric(difftime(now, t0, units = "secs"))
+  } else Inf
+  list(
+    last_scan_at = if (nzchar(at)) at else NULL,
+    last_scan_age_secs = if (is.finite(age)) round(age) else NULL,
+    # alive 的判据是"最近三倍期望间隔内扫过"。单次没扫到不等于坏了，
+    #   但连着三倍间隔没动静，就说明它没在跑，这时候队列里的 waiting 不该被相信。
+    alive = is.finite(age) && age < as.numeric(expect_secs) * 3,
+    expect_secs = as.numeric(expect_secs),
+    last_scanned = if (!is.null(lastScan)) as.integer(lastScan$scanned %||% 0L) else NULL,
+    last_reaped = if (!is.null(lastScan)) as.integer(lastScan$reaped %||% 0L) else NULL,
+    recent = reapedRecent)
 }
 
 exec_reap_ts <- function(it) {
@@ -670,8 +790,14 @@ exec_reap <- function(d = NULL, now = Sys.time(), audit = TRUE) {
         " 小时没有任何更新，任务未回写。这不是这一步本身跑失败 —— ",
         "它在服务器上的产物是否已生成，需要重新核一次。重跑这一步即可。")
     } else {
-      # queued: worker 在线（心跳 <180s）永不按时间过期。心跳存在但已离线
-      # 满 30 分钟才回收；从未出现过该 pool 的心跳，才使用 created_at。
+      # queued 的过期规则保持"只看执行端在不在线"，刻意不按排队时长回收。
+      #   为什么不能按时长杀（2026-11-22 二次确认）：
+      #     这个队列是单执行端的。一条 final 实测要跑三小时，它跑着的时候
+      #     后面的任务本来就应该一直 queued。按"没人认领满 N 分钟就回收"
+      #     去判，会把正常排队的任务误判成死任务，把好作业杀掉。
+      #   "执行端在、心跳新鲜、但根本不轮询队列"这种情况不在这里处理：
+      #     它靠 /api/exec 的 stuck 标记呈现，并给人工作废入口（/api/exec/cancel）。
+      #     自动杀与"不许杀正常排队任务"这两件事无法同时成立，只能选后者。
       if (!is.null(hb)) {
         if (!is.finite(hb_age) || hb_age < as.numeric(EXEC_WORKER_OFFLINE_SECS)) next
         code <- "worker_offline"
@@ -730,18 +856,42 @@ exec_enqueue <- function(step, session_id = "", note = "", script = "", script_a
   rq <- trimws(as.character(req_id %||% ""))
   if (nzchar(rq)) {
     for (it in (d$items %||% list())) {
-      if (identical(as.character(it$step %||% ""), step) &&
-          identical(as.character(it$session_id %||% ""), session_id) &&
-          identical(trimws(as.character(it$req_id %||% "")), rq)) return(it)
+      if (!identical(as.character(it$step %||% ""), step)) next
+      if (!identical(as.character(it$session_id %||% ""), session_id)) next
+      if (!identical(trimws(as.character(it$req_id %||% "")), rq)) next
+      # 作废过、被回收过的条目不算"原任务"，不能让同一请求号拿回它。
+      #   为什么必须跳过（2026-11-22 实测）：作废后重派，如果这里返回了那条
+      #   failed 的旧条目，调用方就以为活派出去了，实际队列里什么都没有。
+      #   链式派工尤其致命 —— 链的 req_id 是全链共用的，一旦拿回作废那条，
+      #   这条链就永远卡在同一个失败条目上，再点多少次都派不出去。
+      #   跳过它 = 允许同一个请求号在作废后重新入队，这才是"重派即可"的真实语义。
+      if (nzchar(as.character(it$cancelled_by %||% ""))) next
+      if (isTRUE(it$stale_reaped)) next
+      return(it)
     }
   }
-  # 同一环节同一分析已有排队中的就不再重复入队：连点两下不该跑两遍。
-  if (!nzchar(rq)) {
-    for (it in (d$items %||% list())) {
-      if (identical(as.character(it$step %||% ""), step) &&
-          identical(as.character(it$session_id %||% ""), session_id) &&
-          as.character(it$status %||% "") %in% c("queued", "running")) return(it)
+  # 同一环节同一分析已有排队/在跑的就不再重复入队：连点两下不该跑两遍。
+  #   这一段原来被 `if (!nzchar(rq))` 包着，而 run_enqueue 一定先生成 req_id
+  #   再入队，于是这道去重对主路径永久失效 —— 同一步在排队期间再点一次，
+  #   就生成第二个执行任务号，两个任务写同一个输出目录。
+  #   2026-11-22 实测到 ex-20261122151017-qugm 与 ex-20261122173829-nhlu
+  #   指向同一个 1.doublet 目录，就是这条的后果。
+  #   现在不论有没有 req_id，只要同 step+session 还有 queued/running 就复用那一条，
+  #   并把这次的请求号记进 attempted_req_ids 留痕（回写按实际执行的那条认账）。
+  for (it in (d$items %||% list())) {
+    if (!identical(as.character(it$step %||% ""), step)) next
+    if (!identical(as.character(it$session_id %||% ""), session_id)) next
+    if (!as.character(it$status %||% "") %in% c("queued", "running")) next
+    keep <- it
+    if (nzchar(rq)) {
+      seen <- as.character(unlist(it$attempted_req_ids %||% character(0)))
+      if (!rq %in% seen) {
+        exec_set(as.character(it$id %||% ""),
+                 list(attempted_req_ids = as.list(c(seen, rq))))
+        keep <- exec_by_id(as.character(it$id %||% "")) %||% it
+      }
     }
+    return(keep)
   }
   pool <- trimws(as.character(pool_id %||% ""))
   if (!nzchar(pool)) pool <- exec_default_pool_id()
@@ -1203,7 +1353,7 @@ inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = 
   d <- inject_read()
   now <- Sys.time()
   session <- inject_norm_session(session)
-  txt <- as.character(text %||% "")
+  txt <- inject_with_origin(text, origin)
 
   # ---- 合并同一条，不重复入队 ----
   #   为什么必须合并：一次没送出去，重试几次就会攒出好几条一模一样的记录。
@@ -3696,6 +3846,24 @@ serve_request <- function(con, req) {
                                          error = function(e) NULL)
     out$pending_step_req <- tryCatch(sess_get_pending(APP_DIR, .sid0, slot = "step"),
                                      error = function(e) NULL)
+    # ---- 识别到底处在哪一步：由服务端一次说清 ------------------------
+    #   为什么必须由服务端算（2026-11-22，gina 报「会话 1 已回写，会话 2 仍显示识别中」）：
+    #     原来这个判断只活在前端内存里，判据是「记录里的识别号 == 页面手上的请求号」。
+    #     而页面手上的号只属于点过按钮的那一个标签页 ——
+    #     换一个会话打开同一条记录，手上没有号，同一个问题就答成两种结论。
+    #     更糟的一种：识别请求发出去、回写却带着别的号回来（或干脆没回来），
+    #     那条 pending 就永远留着，于是这条记录在任何页面都显示"识别中"，
+    #     而记录里其实早就有一份成功的识别结论（实测 952j：结论 10-26，pending 停在 11-12）。
+    #   判据集中在 identify_state：none / waiting / ready / stale 四种，只看记录本身。
+    ident_st <- tryCatch(identify_state(APP_DIR, .sid0), error = function(e) NULL)
+    if (is.null(ident_st))
+      ident_st <- list(status = if (!is.null((out$session %||% list())$identify$result))
+        "ready" else "none")
+    out$identify_status <- as.character(ident_st$status %||% "none")
+    out$identify_result_req <- ident_st$result_req
+    out$identify_result_at <- ident_st$result_at
+    out$pending_identify_at <- ident_st$pending_at
+    out$identify_stale_hours <- ident_st$stale_hours
     # 旧字段保留指向识别槽：老页面读它判"还在等识别"，语义不变。
     out$pending_req <- out$pending_identify_req
     out$current <- sess_current_id(APP_DIR)
@@ -6707,8 +6875,11 @@ serve_request <- function(con, req) {
         text = "")))
     }
 
+    # 按钮名一起带上：这段是「核对注释依据路径」按钮点出来的自动派发。
+    #   不写的话，会话里看到的就是一大段指令，看不出是哪一次操作发起的。
     enq <- tryCatch(inject_enqueue(text = txt, session = qsid,
-                                   reason = "reference-scan", step = "annotate"),
+                                   reason = "reference-scan", step = "annotate",
+                                   origin = "核对注释依据"),
                     error = function(e) NULL)
     return(send_json(con, 200, list(ok = TRUE, session_id = qsid,
                                     queued = !is.null(enq), text = txt)))
@@ -6834,7 +7005,8 @@ serve_request <- function(con, req) {
       "只有上传、选择和读回核验全部成功后，才说明已准备好注释依据。"
     ), collapse = "\n")
     enq <- tryCatch(inject_enqueue(text = txt, session = qsid,
-                                   reason = "reference-litdict", step = "annotate"),
+                                   reason = "reference-litdict", step = "annotate",
+                                   origin = "查文献建注释依据"),
                     error = function(e) NULL)
     if (is.null(enq) || isFALSE(enq$ok))
       return(send_json(con, 500, list(ok = FALSE, code = "reference_lookup_not_queued",
@@ -6913,7 +7085,8 @@ serve_request <- function(con, req) {
         x <- flow_stage(stepId); if (is.null(x)) stepId else as.character(x$title)
       } else stepId)
       delivered <- tryCatch(inject_enqueue(text = txt, session = qsid,
-                                           reason = "decision", step = stepId),
+                                           reason = "decision", step = stepId,
+                                           origin = "需要你定一件事"),
                             error = function(e) NULL)
     }
     d <- dec_read(qsid)
@@ -7078,6 +7251,17 @@ serve_request <- function(con, req) {
     #   助手拿到手就可能真的再跑一遍。
     #   所以 observe 必须和 query 走同一条只读分支：不重建正文、不发凭据、不抢目录。
     query_only <- isTRUE(b$purpose %in% c("query", "observe"))
+    # ---- 进会话那段正文的第一行必须是按钮名 ---------------------------
+    #   为什么必须由服务端拼：会话里看到的那段不是前端发的，是这里生成的
+    #   短指针（只有 path/context_path/session_id/req_id）。前端把
+    #   「【保存并识别】」拼进正文，只落到 instruction.txt 第一行，
+    #   会话首行仍然没有出处 —— gina 2026-11-22 报的就是这个。
+    #   所以按钮名必须随请求传上来，并拼在这段指针的最前面。
+    #   只允许短中文标签；换行/括号一律剔掉，避免有人靠它往会话里插第二行指令。
+    origin_lab <- gsub("[【】\r\n\t]", "", trimws(as.character(b$origin %||% "")))
+    if (nchar(origin_lab, type = "chars") > 24L)
+      origin_lab <- substr(origin_lab, 1L, 24L)
+    origin_prefix <- if (nzchar(origin_lab)) paste0("【", origin_lab, "】") else ""
     if ((!is.null(b$purpose) && !b$purpose %in% c("query", "execute", "observe")) ||
         !scalar(b$session_id) || (!query_only && !scalar(b$req_id)) ||
         !grepl("^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$", b$session_id) ||
@@ -7136,7 +7320,8 @@ serve_request <- function(con, req) {
         #   也不注册 on.exit 删除 —— 那个包可能正被助手读着。
         path <- as.character(reuse$path)
         context_path <- as.character(reuse$context_path)
-        message <- paste0(if (query_only) "只读提问，不授权执行或回写。" else "",
+        message <- paste0(origin_prefix,
+          if (query_only) "只读提问，不授权执行或回写。" else "",
           "请先完整读取交接说明：", context_path,
           "；再完整读取正文TXT：", path,
           "。session_id=", b$session_id, "；req_id=", b$req_id,
@@ -7207,7 +7392,8 @@ serve_request <- function(con, req) {
       if (!identical(readBin(context_path, "raw", n = length(context_bytes) + 1L), context_bytes))
         stop("context persistence mismatch")
       context_path <- normalizePath(context_path, winslash = "/", mustWork = TRUE)
-      message <- paste0(if (query_only) "只读提问，不授权执行或回写。" else "",
+      message <- paste0(origin_prefix,
+        if (query_only) "只读提问，不授权执行或回写。" else "",
         "请先完整读取交接说明：", context_path,
         "；再完整读取正文TXT：", path,
         "。session_id=", b$session_id, "；req_id=", b$req_id,
@@ -7918,6 +8104,113 @@ serve_request <- function(con, req) {
     return(send_json(con, 200, list(ok = TRUE, present = TRUE, snapshot = sn)))
   }
 
+  # ---- 作废一条排队中的任务：人判断它不会有人接了 ---------------------
+  #   为什么必须有这个入口（2026-11-22，gina 报队列死锁）：
+  #     一条没人认领的 queued 任务会让 run_chain 的
+  #     「旧任务仍在执行或排队」409 一直成立，新的环节派不出去；
+  #     而页面上此前没有任何地方能把这条清掉 —— 只能等人去改文件。
+  #     于是整条分析锁死，且从界面上看不出是"卡在一条死任务上"。
+  #   边界：
+  #     · 只允许作废本记录、且仍是 queued 的任务。
+  #     · running 一律不许（那是在跑，作废等于骗自己它没跑）。
+  #     · requeue 过、worker 可能正在跑的那条（claimed_at 非空且最近有报信）也不许。
+  #     · 只改状态并写清原因，不删记录，回写时仍能对上号。
+  if (p == "/api/exec/cancel" && identical(req$method, "POST")) {
+    access <- record_preflight$access
+    sid_c <- as.character(record_preflight$target$sid %||% "")
+    b <- body_json()
+    want <- trimws(as.character(b$id %||% ""))
+    if (!nzchar(want))
+      return(send_json(con, 400, list(ok = FALSE, code = "exec_id_required",
+                                      error = "要作废哪一条？没有给任务号。")))
+    d <- exec_read()
+    hit <- NA_integer_
+    for (i in seq_along(d$items %||% list())) {
+      if (identical(as.character(d$items[[i]]$id %||% ""), want)) { hit <- i; break }
+    }
+    if (is.na(hit))
+      return(send_json(con, 404, c(list(ok = FALSE, code = "exec_task_missing",
+        error = "队列里没有这条任务。"), record_cap_fields(access$cap))))
+    it <- d$items[[hit]]
+    if (!identical(as.character(it$session_id %||% ""), sid_c))
+      return(send_json(con, 403, c(list(ok = FALSE, code = "exec_task_not_owned",
+        error = "这条任务不属于当前分析记录，不能在这里作废。"),
+        record_cap_fields(access$cap))))
+    st <- as.character(it$status %||% "")
+    if (!st %in% c("queued", "running"))
+      return(send_json(con, 409, c(list(ok = FALSE, code = "exec_task_terminal",
+        status = st,
+        error = paste0("这条已经是 ", st, "，不需要作废。")),
+        record_cap_fields(access$cap))))
+    # 强制作废：人已经确认"这个不该再等了"。
+    #   为什么必须有这条路（2026-11-22，gina 报"只能改代码才能继续"）：
+    #     原来只允许作废 queued，running 一律拒绝；而 queued 若 recently 报过信
+    #     也拒绝。于是一条执行端早已死掉、却停在 running 的任务，任何人、
+    #     任何界面都动不了它 —— 唯一出路是去改 state/exec_tasks.json。
+    #     这不是保护，是把人挡在系统外面。
+    #   强制作废仍然是"改状态、不删记录"，回写时照样能对上号；
+    #   唯一的代价是：如果它其实还在跑，那个作业的产物可能仍会落地。
+    #   这句话必须原样告诉调用方，不能悄悄放行。
+    force0 <- isTRUE(b$force)
+    claimed0 <- trimws(as.character(it$claimed_at %||% ""))
+    seen0 <- trimws(as.character(it$last_seen %||% ""))
+    # 判活：心跳新鲜 = 真的可能还在跑。
+    hbs_c <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+    pool_c <- exec_task_pool(it)
+    wid_c <- trimws(as.character(it$worker_id %||% it$claimed_by %||% ""))
+    hb_c <- if (nzchar(wid_c)) exec_latest_heartbeat(worker_id = wid_c, hbs = hbs_c) else NULL
+    if (is.null(hb_c)) hb_c <- exec_latest_heartbeat(pool_id = pool_c, hbs = hbs_c)
+    hb_age_c <- exec_heartbeat_age(hb_c)
+    worker_dead <- !is.finite(hb_age_c) || hb_age_c >= as.numeric(EXEC_WORKER_OFFLINE_SECS)
+    if (!force0) {
+      # 执行端确实还活着、这条任务也确实还在报信 —— 只有这种才拦。
+      if (!worker_dead) {
+        seen_ts <- exec_parse_ts(seen0)
+        seen_age <- if (is.na(seen_ts)) Inf else
+          as.numeric(difftime(Sys.time(), seen_ts, units = "secs"))
+        if (is.finite(seen_age) && seen_age < as.numeric(EXEC_QUEUE_UNCLAIMED_SECS))
+          return(send_json(con, 409, c(list(ok = FALSE, code = "exec_task_still_alive",
+            status = st, claimed_at = claimed0, last_seen = seen0,
+            worker_heartbeat_at = as.character((hb_c %||% list())$at %||% ""),
+            can_force = TRUE,
+            error = paste0("这条在 ", round(seen_age / 60, 0),
+                           " 分钟前还有执行端报信，执行端也还在线，可能真的在跑。",
+                           "如果你确定它不该再等了，再点一次「强制作废」。")),
+            record_cap_fields(access$cap))))
+      }
+    }
+    why <- trimws(as.character(b$reason %||% ""))
+    if (!nzchar(why)) why <- "人工作废：排队期间无人认领，为解除后续环节的阻塞"
+    d$items[[hit]]$status <- "failed"
+    d$items[[hit]]$finished_at <- exec_ts()
+    d$items[[hit]]$error <- paste0("已由人工作废（", why, "）。这不是这一步本身跑失败：",
+                                   "它在服务器上没有产出，重派即可。")
+    d$items[[hit]]$cancelled_by <- "user"
+    d$items[[hit]]$cancelled_at <- exec_ts()
+    d$items[[hit]]$cancel_previous_status <- st
+    exec_write(d)
+    # 作废链上的任务，必须同时告诉链"这一步失败了"。
+    #   为什么（2026-11-22 实测）：链的 req_id 全链共用，作废后如果只改任务状态、
+    #   不通知链，链会永远停在 running；此后同一条链再点，rc_begin 走的是
+    #   "same && status in (running, starting)" 那条分支，直接回 duplicate=TRUE ——
+    #   页面显示"已交接"，队列里一条新任务都没有。实测确认：作废后链仍是 running，
+    #   再派返回 200 且不带任何新任务。
+    #   回收器早就是这么做的（stale_reaped 会调 rc_callback），作废这条路漏了。
+    cancel_chain <- as.character(d$items[[hit]]$chain_id %||% "")
+    if (nzchar(cancel_chain) && exists("rc_callback", mode = "function")) {
+      tryCatch(rc_callback(list(session_id = as.character(it$session_id %||% ""),
+                                req_id = cancel_chain,
+                                step = as.character(it$step %||% ""),
+                                status = "failed", code = 1L), FALSE),
+               error = function(e) NULL)
+    }
+    exec_reap_audit_append(list(at = exec_ts(), kind = "manual_cancel", id = want,
+                                step = as.character(it$step %||% ""),
+                                previous_status = st, reason = why))
+    return(send_json(con, 200, c(list(ok = TRUE, id = want, status = "failed",
+                                      reason = why), record_cap_fields(access$cap))))
+  }
+
   if (p == "/api/exec/view") {
     access <- record_preflight$access
     sid_view <- as.character(record_preflight$target$sid %||% "")
@@ -7942,20 +8235,53 @@ serve_request <- function(con, req) {
     # 页面看队列时同样先回收：一条 10-28 起就挂着、执行端早就没了的任务，
     #   不该继续显示成"正在跑"。
     d <- tryCatch(exec_reap(), error = function(e) exec_read())
-    its <- lapply((d$items %||% list()), function(it) list(
-      id = it$id, step = it$step, session_id = it$session_id, status = it$status,
-      created_at = it$created_at, claimed_at = it$claimed_at,
-      finished_at = it$finished_at, error = it$error))
-    hbs <- tryCatch(exec_worker_hb_all(), error = function(e) list())
-    hb <- exec_latest_heartbeat(hbs = hbs)
+    now_ev <- Sys.time()
+    # 排队久、没人认领、执行端却在线的，单独标出来。
+    #   为什么需要这个标记（2026-11-22，gina 报队列死锁）：
+    #     这种任务自动回收不了 —— 队列是单执行端的，前一条 final 跑三小时，
+    #     后面的本来就该排队。可它又确实会让后续环节永远派不出去。
+    #     系统能做的是把它指出来，让人工作废（/api/exec/cancel），
+    #     而不是自己判断谁该死。
+    #   online 只是"有进程在报心跳"，不等于"这个队列有人轮询"，
+    #     所以这里把两件事分开报，不合并成一个结论。
+    hbs_ev <- tryCatch(exec_worker_hb_all(), error = function(e) list())
+    online_ev <- exec_heartbeat_online(exec_latest_heartbeat(hbs = hbs_ev), now_ev)
+    its <- lapply((d$items %||% list()), function(it) {
+      created0 <- exec_parse_ts(it$created_at)
+      q_age <- if (is.na(created0)) NA_real_ else
+        as.numeric(difftime(now_ev, created0, units = "secs"))
+      claimed0 <- trimws(as.character(it$claimed_at %||% ""))
+      stuck <- identical(as.character(it$status %||% ""), "queued") &&
+        !nzchar(claimed0) && isTRUE(online_ev) &&
+        is.finite(q_age) && q_age >= as.numeric(EXEC_QUEUE_UNCLAIMED_SECS)
+      list(id = it$id, step = it$step, session_id = it$session_id, status = it$status,
+           created_at = it$created_at, claimed_at = it$claimed_at,
+           finished_at = it$finished_at, error = it$error,
+           queued_minutes = if (identical(as.character(it$status %||% ""), "queued") &&
+                                is.finite(q_age)) round(q_age / 60) else NULL,
+           stuck = stuck)
+    })
+    hb <- exec_latest_heartbeat(hbs = hbs_ev)
     hbAt <- as.character((hb %||% list())$at %||% "")
-    online <- exec_heartbeat_online(hb)
-    return(send_json(con, 200, list(ok = TRUE, items = its,
-                                    worker = list(online = online,
-                                                  at = if (nzchar(hbAt)) hbAt else NULL,
-                                                  by = as.character((hb %||% list())$worker_id %||% ""),
-                                                  pool_id = as.character((hb %||% list())$pool_id %||% ""),
-                                                  workers = length(hbs)))))
+    online <- online_ev
+    # 队列计数按状态一次给全：页面要回答"现在到底排着几条、跑着几条"，
+    #   不能让人从明细里自己数。
+    cnt <- function(st) sum(vapply((d$items %||% list()), function(it)
+      identical(as.character(it$status %||% ""), st), TRUE))
+    # 回收器状态：它坏死时不会有报错冒到页面上，只表现成"那条一直不动"。
+    #   所以把它的最后一次扫描一起报出来，让"没人回收"和"没人接活"能分开看。
+    return(send_json(con, 200, list(
+      ok = TRUE, items = its,
+      stuck_count = sum(vapply(its, function(x) isTRUE(x$stuck), TRUE)),
+      counts = list(queued = cnt("queued"), running = cnt("running"),
+                    done = cnt("done"), failed = cnt("failed"),
+                    total = length(d$items %||% list())),
+      reclaim = tryCatch(exec_reaper_status(now = now_ev), error = function(e) NULL),
+      worker = list(online = online,
+                    at = if (nzchar(hbAt)) hbAt else NULL,
+                    by = as.character((hb %||% list())$worker_id %||% ""),
+                    pool_id = as.character((hb %||% list())$pool_id %||% ""),
+                    workers = length(hbs_ev)))))
   }
 
   # ---- 执行端预检：派工前先回答「有没有人接活」-----------------------
@@ -10068,7 +10394,8 @@ serve_request <- function(con, req) {
                    error = function(e) "")
           if (nzchar(instr))
             tryCatch(inject_enqueue(text = instr, session = sid_b,
-                                    reason = "ppt_autofix", step = sd),
+                                    reason = "ppt_autofix", step = sd,
+                                    origin = "补图后重出 PPT"),
                      error = function(e) NULL)
           queued[[length(queued) + 1L]] <- sd
         }
