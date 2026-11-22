@@ -42,7 +42,20 @@ ok("304 says Not Modified", grepl("304 Not Modified", h304, fixed = TRUE))
 Sys.setFileTime(f, Sys.time() + 2)
 i2 <- file.info(f)
 ok("ETag changes with file metadata", !identical(e1, http_static_etag(f, i2)))
-gz <- memCompress(readBin(f, "raw", file.info(f)$size), type = "gzip")
+src <- readBin(f, "raw", file.info(f)$size)
+gz <- http_static_gzip_raw(src)
+# memCompress(type = "gzip") returns a zlib stream (78 9c). Declaring
+# "Content-Encoding: gzip" over those bytes made every browser reject the body,
+# so assert the container magic, not just that the body got smaller.
+ok("gzip body starts with the gzip magic",
+   length(gz) >= 2L && identical(as.integer(gz[1:2]), c(0x1fL, 0x8bL)),
+   detail = paste(sprintf("%02x", as.integer(utils::head(gz, 2L))), collapse = " "))
+back <- local({
+  con <- gzcon(rawConnection(gz, "rb"))
+  on.exit(close(con), add = TRUE)
+  readBin(con, "raw", n = length(src) + 1024L)
+})
+ok("gzip body decodes back to the fixture", identical(back, src))
 ok("gzip actually shrinks the JS fixture", length(gz) < file.info(f)$size)
 
 unlink(TMP, recursive = TRUE, force = TRUE)

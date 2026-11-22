@@ -14,9 +14,23 @@ http_static_gzip <- function(path, info, etag) {
   if (exists(key, envir = HTTP_STATIC_CACHE, inherits = FALSE))
     return(get(key, envir = HTTP_STATIC_CACHE, inherits = FALSE))
   raw <- readBin(path, "raw", as.integer(info$size))
-  gz <- memCompress(raw, type = "gzip")
+  gz <- http_static_gzip_raw(raw)
   assign(key, gz, envir = HTTP_STATIC_CACHE)
   gz
+}
+
+# memCompress(type = "gzip") is a zlib stream (78 9c), NOT a gzip container
+# (1f 8b). Sending zlib while declaring "Content-Encoding: gzip" makes every
+# browser reject the body: all scripts and styles drop to net::ERR_FAILED and
+# the page stays on its boot placeholder. gzfile is the base-R writer that
+# emits a real gzip container, so the declared encoding matches the bytes.
+http_static_gzip_raw <- function(raw) {
+  tmp <- tempfile(fileext = ".gz")
+  on.exit(unlink(tmp), add = TRUE)
+  con <- gzfile(tmp, "wb")
+  writeBin(raw, con)
+  close(con)
+  readBin(tmp, "raw", as.integer(file.info(tmp)$size))
 }
 
 http_static_etag <- function(path, info = NULL) {
