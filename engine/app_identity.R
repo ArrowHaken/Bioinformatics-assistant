@@ -51,11 +51,21 @@ pa_identity_connectors <- function() {
   out
 }
 
-# 当前监听端口。serve.R 里是全局 PORT；独立维护脚本没有它时读环境变量。
+# 当前监听端口。serve.R 里是 PORT；独立维护脚本没有它时读环境变量。
+#
+# 为什么要找两处：主进程用 Rscript 跑 serve.R，PORT 落在 .GlobalEnv；
+# 而请求 worker（engine/server_worker.R）把 serve.R source 进一个私有环境，
+# PORT 只存在于那个环境里，.GlobalEnv 中根本没有。旧实现只看 .GlobalEnv，
+# 于是 worker 永远解析不出端口，也就解析不出应用身份名；记录接口全部按
+# fail-closed 回 403「身份或数据库不可用」——页面能开、静态资源 200、
+# 日志无报错，只有新建分析失败。
+# 所以这里同时看 .GlobalEnv 和本函数的定义环境（即 serve.R 被 source 进去的那个）。
 pa_identity_port <- function(port = NULL) {
   if (!is.null(port) && length(port) == 1L && !is.na(port)) return(as.integer(port))
-  p <- get0("PORT", envir = .GlobalEnv, inherits = TRUE)
-  if (is.numeric(p) && length(p) == 1L && !is.na(p)) return(as.integer(p))
+  for (env in list(.GlobalEnv, environment())) {
+    p <- get0("PORT", envir = env, inherits = TRUE)
+    if (!is.null(p) && is.numeric(p) && length(p) == 1L && !is.na(p)) return(as.integer(p))
+  }
   p <- suppressWarnings(as.integer(pa_identity_env("PA_LOCAL_PORT")))
   if (is.na(p)) NULL else p
 }

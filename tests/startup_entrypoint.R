@@ -38,5 +38,27 @@ ok("engine root is resolved",
    identical(normalizePath(e$ENGINE_DIR, winslash = "/", mustWork = TRUE),
              normalizePath(file.path(APP, "engine"), winslash = "/", mustWork = TRUE)))
 
+# The request workers source serve.R into a private environment (see
+# engine/server_worker.R), so PORT never reaches .GlobalEnv there. Identity
+# resolution starts from the port, and a NA port makes every record endpoint
+# fail closed with 403 "身份或数据库不可用" while the page itself looks fine.
+# Assert the worker situation explicitly: PORT present in the sourcing env only.
+ok("PORT is defined in the sourcing environment",
+   exists("PORT", envir = e, inherits = FALSE))
+if (exists("pa_identity_port", envir = e, mode = "function")) {
+  ok("identity port resolves from the sourcing environment, not only .GlobalEnv",
+     identical(as.integer(e$pa_identity_port()), as.integer(e$PORT)),
+     paste("port", deparse(e$pa_identity_port())))
+} else {
+  ok("identity port helper is loaded", FALSE, "pa_identity_port missing")
+}
+if (exists("pa_app_id", envir = e, mode = "function")) {
+  detected <- e$pa_app_id()
+  ok("app identity is resolved for this installation", !is.na(detected) && nzchar(detected),
+     "no connector.json matched the listening port; records would 403")
+} else {
+  ok("app identity helper is loaded", FALSE, "pa_app_id missing")
+}
+
 cat(sprintf("\nPASS=%d FAIL=%d\n", PASS, FAIL))
 quit(save = "no", status = if (FAIL == 0L) 0L else 1L)
