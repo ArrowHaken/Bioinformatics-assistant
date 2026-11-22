@@ -543,6 +543,19 @@ sess_archive_restore <- function(app_dir, id, archive_id) {
   self <- tryCatch(sys.frame(1)$ofile, error = function(e) NULL)
   if (nzchar(as.character(self %||% ""))) dirname(self) else file.path(getwd(), "engine")
 }
-source(file.path(.sessions_engine_dir, "attempts.R"), local = FALSE)
-source(file.path(.sessions_engine_dir, "instruction_handoff.R"), local = FALSE)
+# Load the helpers into THIS file's environment, not .GlobalEnv.
+#   Why it matters: request workers source serve.R into a private environment
+#   (engine/server_worker.R). With local = FALSE these two files landed in
+#   .GlobalEnv while sess_* went into the worker env, so sess_set_pending()
+#   reached attempt_migrate() in .GlobalEnv and died on "could not find
+#   function sess_find". The failure was silently swallowed by its tryCatch,
+#   so the pending request id was never stored: the page then cleared the id it
+#   had just received, /api/instruction/prepare got an empty req_id, returned
+#   400 instruction_binding_required, and nothing was ever injected into the
+#   session — while the toast still said it had been handed to the assistant.
+#   Keep the helpers next to their callers so both end up in the same env.
+sys.source(file.path(.sessions_engine_dir, "attempts.R"),
+           envir = environment(), keep.source = FALSE)
+sys.source(file.path(.sessions_engine_dir, "instruction_handoff.R"),
+           envir = environment(), keep.source = FALSE)
 rm(.sessions_engine_dir)

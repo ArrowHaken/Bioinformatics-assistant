@@ -1417,6 +1417,16 @@ STEP_TASK <- list(
     title = "GO 富集",
     ask = paste0("对差异基因做 GO-BP 富集，出 dotplot 与富集汇总表，落到 10.figs/。"),
     writes = "10.figs/enrich_summary.xls、GO_BP_up.xls、30_GO_BP_dotplot.png"),
+  # extract 是 2026-11-21 从 SERVER_STAGES 摘掉 fullmark/diff 时一并进来的新环，
+  #   流程规格与 sc-report-extract 都登记了它，只有这张给助手的交代表漏了。
+  #   后果与当初漏掉 ppt/pack 一样：flow_spec 里能算出命令，
+  #   但 remote_step_instruction 取不到 STEP_TASK[[id]]，下发内容里没有可执行说明。
+  #   对账器把它报成「少了这些阶段：extract」，这条是真缺。
+  extract = list(
+    title = "提取报告关键指标",
+    ask = paste0("从注释后的对象与去双表抽出 PPT 第 3 页要用的六行指标，",
+                 "机读版落 11.report/report_stats.json，明细表落同目录。"),
+    writes = "11.report/report_stats.json、qc_stat.xls、celltype_composition.xls"),
   # ---- 第 11、12 环：ppt 与 pack（2026-11-03 补登记）----
   #   以前这两项没登记，后果不是"报错"，而是"下发的指令里没有可执行说明"：
   #   flow_spec 里已经有这两环、命令也能算出来，但 remote_step_instruction
