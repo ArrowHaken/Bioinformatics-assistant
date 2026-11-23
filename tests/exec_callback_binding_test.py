@@ -18,7 +18,7 @@ class WorkerCallbackBindingTest(unittest.TestCase):
             id="job-fixture", step="doublet", session_id="session-fixture",
             req_id="chain-fixture", chain_id="chain-fixture",
             attempt_id="attempt-fixture", version_id="version-fixture",
-            run_dir="/fixture/output",
+            run_id="run-fixture", run_dir="/fixture/output",
         )
         args = SimpleNamespace(worker_id="worker-fixture", pool_id="default")
         client = Mock()
@@ -31,7 +31,7 @@ class WorkerCallbackBindingTest(unittest.TestCase):
 
         report, = client.step_import.call_args[0]
         self.assertEqual(report["exec_id"], task["id"])
-        for key in ("session_id", "req_id", "step", "chain_id", "attempt_id", "version_id", "run_dir"):
+        for key in ("session_id", "req_id", "step", "chain_id", "attempt_id", "version_id", "run_id", "run_dir"):
             self.assertEqual(report[key], task[key], key)
         self.assertEqual(report["exit_code"], 255)
         self.assertEqual(report["status"], "failed")

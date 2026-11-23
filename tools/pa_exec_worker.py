@@ -227,6 +227,7 @@ def handle(task, args):
             "attempt_id": att,
             "exec_id": tid,
             "version_id": str(task.get("version_id") or ""),
+            "run_id": str(task.get("run_id") or ""),
             "run_dir": str(task.get("run_dir") or ""),
         }
         res = CLIENT.step_import(imp)

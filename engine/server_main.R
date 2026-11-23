@@ -8150,6 +8150,8 @@ serve_request <- function(con, req) {
       #   作业在集群上真跑完了，结果却写不回来。
       attempt_id = as.character(it$attempt_id %||% ""),
       version_id = as.character(it$version_id %||% ""),
+      run_id = as.character(it$run_id %||% ""),
+      executor_mode = as.character(it$executor_mode %||% ""),
       run_dir = if (nzchar(as.character(it$run_dir %||% "")))
         as.character(it$run_dir) else due_run_dir(it$session_id),
       mode = as.character(it$mode %||% ""),
@@ -8312,6 +8314,8 @@ serve_request <- function(con, req) {
                   #   否则它回写时还是缺这个值（2026-11-23 修）。
                   attempt_id = as.character(hit$attempt_id %||% ""),
                   version_id = as.character(hit$version_id %||% ""),
+                  run_id = as.character(hit$run_id %||% ""),
+                  executor_mode = as.character(hit$executor_mode %||% ""),
                   run_dir = as.character(hit$run_dir %||% ""),
                   pool_id = task_pool, worker_id = who,
                   script = as.character(hit$script %||% ""),
