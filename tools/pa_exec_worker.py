@@ -215,6 +215,7 @@ def handle(task, args):
             "step": step,
             "chain_id": chain,
             "status": "done" if ok else "failed",
+            "code": code,
             "exit_code": code,
             "log": tail,
             "worker_id": args.worker_id,

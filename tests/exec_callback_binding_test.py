@@ -33,6 +33,7 @@ class WorkerCallbackBindingTest(unittest.TestCase):
         self.assertEqual(report["exec_id"], task["id"])
         for key in ("session_id", "req_id", "step", "chain_id", "attempt_id", "version_id", "run_id", "run_dir"):
             self.assertEqual(report[key], task[key], key)
+        self.assertEqual(report["code"], 255)
         self.assertEqual(report["exit_code"], 255)
         self.assertEqual(report["status"], "failed")
         self.assertIn("Permission denied", report["log"])
