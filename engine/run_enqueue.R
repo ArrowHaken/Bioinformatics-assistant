@@ -241,7 +241,14 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
             if (is.null(x)) stepId else as.character(x$title)
           } else stepId)
           qd <- tryCatch(inject_enqueue(text = txt, session = decSid,
-                                        reason = "decision", step = stepId),
+                                        reason = "decision", step = stepId,
+                                        # 按钮名必须随入队一起存下去。
+                                        #   为什么（2026-11-23，云准助手扫全量入队点指出）：
+                                        #   九个入队点里这处最容易漏 —— 它只在派工被
+                                        #   「先定一件事」拦住时才触发，平时走不到。
+                                        #   漏了 origin，这条注入补发时就没有标题，
+                                        #   而 decision 类正是人要读的那一类。
+                                        origin = "需要你定一件事"),
                          error = function(e) NULL)
           return(send_json(con, 409, list(
             ok = FALSE, code = "need_decision", step = stepId,

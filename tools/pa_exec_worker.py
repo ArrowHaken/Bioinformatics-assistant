@@ -38,6 +38,7 @@ import json
 import os
 import shlex
 import subprocess
+import threading
 import sys
 import time
 import urllib.error
@@ -104,10 +105,13 @@ class Client:
     def step_import(self, payload):
         return self._req("POST", "/api/step/import", payload)
 
-    def done(self, task_id, ok, error=""):
+    def done(self, task_id, ok, error="", attempt_id=""):
+        # attempt_id 一起上报：done 也会走到判定与落库，
+        #   少了它，服务端只能回落到"按 req_id 猜是哪一次尝试"。
         return self._req("POST", "/api/exec/done", {
             "id": task_id, "ok": bool(ok), "error": error,
-            "worker_id": self.worker_id, "pool_id": self.pool_id})
+            "worker_id": self.worker_id, "pool_id": self.pool_id,
+            "attempt_id": str(attempt_id or "")})
 
 
 def build_remote_command(task, rscript):
@@ -189,6 +193,9 @@ def handle(task, args):
     sid = str(task.get("session_id") or "")
     rid = str(task.get("req_id") or "")
     chain = str(task.get("chain_id") or "")
+    # 这一次尝试的身份，来自 due/claim 下发。
+    #   服务端它自己生成的，回写时必须原样带回，否则只能按 req_id 猜（2026-11-23）。
+    att = str(task.get("attempt_id") or "")
 
     got = CLIENT.claim(tid)
     if not got.get("ok"):
@@ -212,17 +219,86 @@ def handle(task, args):
             "log": tail,
             "worker_id": args.worker_id,
             "pool_id": args.pool_id,
+            # 这一次尝试的身份 + 这条任务的号，必须原样带回去。
+            #   为什么（2026-11-23，子任务查证）：服务端在派工时生成了 attempt_id、
+            #   也写进了队列条目，但回写体里没有它，服务端只能按 req_id 去猜，
+            #   猜不中就判 attempt_id_unknown，19 条「回写未被接受」就这么丢的。
+            #   exec_id 一起带：服务端也要靠它定位是哪条任务在回写。
+            "attempt_id": str(task.get("attempt_id") or ""),
+            "exec_id": tid,
         }
         res = CLIENT.step_import(imp)
         if not res.get("ok"):
             log("环节回写未通过：%s" % (res.get("error") or res.get("code") or ""))
-            CLIENT.done(tid, False, "环节回写失败：%s" % (res.get("error") or res.get("code")))
+            CLIENT.done(tid, False, "环节回写失败：%s" % (res.get("error") or res.get("code")), attempt_id=att)
             return False
 
-    fin = CLIENT.done(tid, ok, "" if ok else ("exit=%s\n%s" % (code, tail[-1500:])))
+    fin = CLIENT.done(tid, ok, "" if ok else ("exit=%s\n%s" % (code, tail[-1500:])), attempt_id=att)
     if not fin.get("ok"):
         log("收尾回写失败：%s" % (fin.get("error") or fin.get("code") or ""))
     return ok
+
+
+def select_queued(items, pool_id):
+    """只挑属于本 pool 的排队任务。
+
+    为什么单独成函数（2026-11-23）：
+      下发是全量的，执行端又固定取第一条。队头只要压着一条别的 pool 的任务，
+      它每轮去领、每轮被拒，后面真正属于它的永远轮不到 —— 一条任务堵死一个 pool。
+      这段逻辑抽出来才能直接被测，否则只能靠人读主循环。
+
+    pool_id 为空的条目视为未指定，按兼容放行（历史任务不带这个字段）。
+    """
+    want = str(pool_id or "")
+    out = []
+    for x in (items or []):
+        if x.get("kind") != "queued":
+            continue
+        p = str(x.get("pool_id") or "")
+        if p and want and p != want:
+            continue
+        out.append(x)
+    return out
+
+
+def slot_worker(args, slot, stop_evt):
+    """一个执行槽：自己轮询、自己领取、自己盯到结束。
+
+    为什么可以并行（2026-11-23，gina 问"一台电脑上有多个任务需要运行"）：
+      主循环原来是同步的，领一条就盯到它结束，第二个任务只能干等。
+      分析作业真正跑在集群上，本地只做提交与盯梢，开几个槽不占多少资源。
+      同一条任务不会被两个槽同时领到 —— 领取在服务端是锁内完成的原子动作。
+    """
+    rounds = 0
+    while not stop_evt.is_set():
+        rounds += 1
+        d = CLIENT.due()
+        if not d.get("ok"):
+            log("[slot%s] 取队列失败：%s" % (slot, d.get("error") or d.get("code") or ""))
+        else:
+            items = d.get("items") or []
+            # 只挑属于自己的 pool。
+            #   为什么（2026-11-23）：下发是全量的，执行端又固定取第一条。
+            #   队头只要压着一条别的 pool 的任务，它每轮去领、每轮被拒，
+            #   后面真正属于它的任务永远轮不到 —— 一条任务就能把这个 pool 堵死。
+            #   pool_id 为空视为未指定，按兼容放行（历史任务不带这个字段）。
+            queued = select_queued(items, args.pool_id)
+            if queued:
+                t = queued[0]
+                if args.dry_run:
+                    log("[slot%s] dry-run：将领取 %s step=%s" % (slot, t.get("id"), t.get("step")))
+                else:
+                    got = handle(t, args)
+                    # got 为 None 表示压根没领到（被别处抢走/条目不存在）。
+                    #   这时不能 continue：continue 会跳过本轮末尾的 sleep，
+                    #   拿同一条空转，把 CPU 打满还一直刷日志。
+                    if got is not None:
+                        continue
+            elif rounds % 6 == 1:
+                log("[slot%s] 队列空闲（queued=0 running=%s）" % (slot, d.get("running")))
+        if args.once:
+            break
+        time.sleep(args.interval)
 
 
 def loop(args):
@@ -234,33 +310,27 @@ def loop(args):
         log("令牌必须是本应用签发的 worker 令牌（tools/issue_worker_token.R）。")
         if hb.get("_http_status") in (401, 403):
             return 2
-    log("已在队列上线：worker=%s pool=%s" % (args.worker_id, args.pool_id))
+    slots = max(1, int(getattr(args, "slots", 1) or 1))
+    log("已在队列上线：worker=%s pool=%s slots=%d" % (args.worker_id, args.pool_id, slots))
 
+    # 心跳由这里统一发，不放进每个槽：
+    #   心跳表达的是"这台执行端活着"，跟开了几个槽无关。
+    #   每个槽各发一次只会让服务端收到重复报信，看不出任何额外信息。
+    stop_evt = threading.Event()
+    threads = [threading.Thread(target=slot_worker, args=(args, i + 1, stop_evt),
+                                daemon=True)
+               for i in range(slots)]
+    for t in threads:
+        t.start()
     last_hb = time.time()
-    rounds = 0
-    while True:
-        rounds += 1
-        if time.time() - last_hb >= args.heartbeat_every:
-            CLIENT.heartbeat("alive")
-            last_hb = time.time()
-        d = CLIENT.due()
-        if not d.get("ok"):
-            log("取队列失败：%s" % (d.get("error") or d.get("code") or ""))
-        else:
-            items = d.get("items") or []
-            queued = [x for x in items if x.get("kind") == "queued"]
-            if queued:
-                t = queued[0]
-                if args.dry_run:
-                    log("dry-run：将领取 %s step=%s" % (t.get("id"), t.get("step")))
-                else:
-                    handle(t, args)
-                    continue
-            elif rounds % 6 == 1:
-                log("队列空闲（queued=0 running=%s）" % d.get("running"))
-        if args.once:
-            break
-        time.sleep(args.interval)
+    try:
+        while any(t.is_alive() for t in threads):
+            if time.time() - last_hb >= args.heartbeat_every:
+                CLIENT.heartbeat("alive")
+                last_hb = time.time()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        stop_evt.set()
     return 0
 
 
@@ -409,6 +479,13 @@ def main(argv=None):
     p.add_argument("--heartbeat-every", type=float, default=60.0)
     p.add_argument("--task-timeout", type=int, default=0, help="单任务超时秒，0 表示不限")
     p.add_argument("--once", action="store_true", help="只跑一轮")
+    # 并行槽数：一台电脑要同时跑多个任务时调大。
+    #   为什么需要（2026-11-23，gina 问"一台电脑上有多个任务需要运行"）：
+    #   主循环原来是同步的，领一条就盯到它结束，第二个任务只能干等。
+    #   分析作业真正跑在集群上，本地只是提交与盯梢，开几个槽不占多少资源。
+    #   默认 1，保持既有部署的行为不变。
+    p.add_argument("--slots", type=int, default=1,
+                   help="并行执行槽数（默认 1）")
     p.add_argument("--dry-run", action="store_true", help="只观察，不领取不执行")
     p.add_argument("--local", action="store_true", help="在运行本脚本的机器上执行，不 SSH")
     p.add_argument("--ssh-host", default=os.environ.get("PA_EXEC_SSH_HOST", ""))

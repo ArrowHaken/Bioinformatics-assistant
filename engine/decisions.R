@@ -468,7 +468,11 @@ dec_answer <- function(sid, id, answer, detail = "") {
 # 把"要人决定什么"写成一段人能直接读懂的话（会真的发进会话）。
 dec_ask_text <- function(items, stepTitle = "") {
   if (!length(items)) return("")
-  L <- c("【来自 个性化分析助手】需要你定一件事，定完才能往下跑。", "")
+  # 首行只写"这件事是什么"，不写来源。
+  #   为什么（2026-11-23）：标题由入队时的 origin 统一生成 【按钮名】，
+  #   这里再带一个 【来自 个性化分析助手】 会变成两行标题，
+  #   而 gina 的要求是第一行标明她点的是哪个按钮，来源不是按钮名。
+  L <- c("需要你定一件事，定完才能往下跑。", "")
   for (i in seq_along(items)) {
     it <- items[[i]]
     L <- c(L, paste0(i, ". ", as.character(it$title %||% "")))

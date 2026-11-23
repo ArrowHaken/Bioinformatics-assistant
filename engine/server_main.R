@@ -51,6 +51,18 @@ inject_with_origin <- function(text, origin) {
   paste0(pre, "\n", t0)
 }
 
+# 去掉可选标题前缀，只留正文主体。
+#   合并判据用它比较，而不是比全文。
+#   为什么（2026-11-23，云准助手交接件举了反例、本机同型）：
+#     先以没有按钮名的方式入队，带按钮名重试时正文多了 【按钮名】 前缀，
+#     按全文比对就不相等，于是新建一条。旧那条 origin 仍是空的、首行仍没前缀，
+#     照旧继续补发。面板上看起来像两件事，其实是同一件被记了两次。
+#   判据改成"正文主体一致就是同一条"，标题差异就地升级，不另起一条。
+inject_body_of <- function(text) {
+  s <- as.character(text %||% "")
+  sub("^【[^】]{1,24}】\r?\n?", "", s)
+}
+
 # 进会话那段短指针。抽成函数有两个原因：
 #   一是 reuse 与新建两条分支原来各抄一份字符串，改一处会漏另一处；
 #   二是它要能被直接跑正反例，埋在几千行的处理器里只能靠人读。
@@ -683,6 +695,97 @@ exec_task_pool <- function(it) {
 }
 
 
+# ---------------------------------------------------------------------
+#  队列写锁：读-改-写必须是一个不可分割的动作
+#
+#  为什么必须有（2026-11-23 用两个独立进程实测复现）：
+#    两个执行端同时领任务时，两边都打印了「已领到」，文件里最后只剩后写的那个。
+#    过程是 A 读、B 读、A 整份写回、B 整份写回 —— A 的改动被 B 的旧快照覆盖。
+#    能触发它的场景不止两台电脑：同一台机器装了两个执行端、或者 cron 里的
+#    回收器与服务端同时写，都是跨进程写同一个文件。
+#
+#  为什么用文件锁而不是版本号重试：
+#    这里所有写者都在同一台主机上（服务端、回收器 cron、执行端收尾），
+#    文件锁能覆盖全部，而乐观锁要在每个调用点都写一遍重试逻辑。
+#    锁用目录实现（mkdir 原子），带陈旧锁回收：持有者进程已不在或锁过期太久就清掉，
+#    否则一次崩溃会让队列永久不可写。
+#
+#  为什么要有进程内重入计数：
+#    回收器会调用 rc_callback，回调路径里可能再进一次队列写入。
+#    同进程第二次拿锁若直接失败，就变成自己把自己锁死。计数只解决同进程重入，
+#    跨进程仍然严格互斥。
+.exec_lock_state <- new.env(parent = emptyenv())
+.exec_lock_state$depth <- 0L
+
+exec_lock_dir <- function() paste0(EXEC_FILE, ".lock")
+
+exec_lock <- function(timeout_secs = 20, stale_secs = 120) {
+  if (isTRUE(.exec_lock_state$depth > 0L)) {
+    .exec_lock_state$depth <- .exec_lock_state$depth + 1L
+    return(TRUE)
+  }
+  lk <- exec_lock_dir()
+  dir.create(dirname(lk), showWarnings = FALSE, recursive = TRUE)
+  deadline <- Sys.time() + timeout_secs
+  repeat {
+    if (dir.create(lk, mode = "0700", showWarnings = FALSE)) {
+      tryCatch(cat(as.character(Sys.getpid()), file = file.path(lk, "pid")),
+               error = function(e) NULL)
+      .exec_lock_state$depth <- 1L
+      return(TRUE)
+    }
+    mt <- tryCatch(file.info(lk)$mtime, error = function(e) NA)
+    stale <- FALSE
+    if (!is.na(mt)) {
+      age <- as.numeric(difftime(Sys.time(), mt, units = "secs"))
+      if (is.finite(age) && age > stale_secs) stale <- TRUE
+    }
+    if (!stale) {
+      holder <- tryCatch(suppressWarnings(
+        as.integer(readLines(file.path(lk, "pid"), warn = FALSE)[1])),
+        error = function(e) NA_integer_)
+      # 只有能确认持有者已死才抢锁；读不到 pid 时宁可等，避免误清掉正在用的锁。
+      #   /proc 只在 Linux 有。没有它就只靠 stale_secs 兜底，
+      #   否则在其它平台上每一把锁都会被判成"持有者已死"，等于没有锁。
+      has_proc <- dir.exists("/proc")
+      if (has_proc && !is.na(holder) && holder > 0L &&
+          !dir.exists(file.path("/proc", as.character(holder))))
+        stale <- TRUE
+    }
+    if (stale) { unlink(lk, recursive = TRUE, force = TRUE); next }
+    if (Sys.time() > deadline) return(FALSE)
+    Sys.sleep(0.02)
+  }
+}
+
+exec_unlock <- function() {
+  if (isTRUE(.exec_lock_state$depth > 1L)) {
+    .exec_lock_state$depth <- .exec_lock_state$depth - 1L
+    return(invisible(FALSE))
+  }
+  .exec_lock_state$depth <- 0L
+  unlink(exec_lock_dir(), recursive = TRUE, force = TRUE)
+  invisible(TRUE)
+}
+
+exec_with_lock <- function(fn, timeout_secs = 20) {
+  if (!isTRUE(exec_lock(timeout_secs))) stop("exec_queue_busy")
+  on.exit(exec_unlock(), add = TRUE)
+  fn()
+}
+
+# 在锁内读、改、写。fn 收 d 返回 list(data = <新队列>, value = <可选返回值>)。
+exec_mutate <- function(fn, timeout_secs = 20) {
+  exec_with_lock(function() {
+    d <- exec_read()
+    out <- fn(d)
+    dd <- if (is.list(out) && !is.null(out$data)) out$data else out
+    val <- if (is.list(out)) out$value else NULL
+    exec_write(dd)
+    val
+  }, timeout_secs)
+}
+
 exec_read <- function() {
   if (!file.exists(EXEC_FILE)) return(list(items = list()))
   x <- tryCatch(jsonlite::fromJSON(read_text_any(EXEC_FILE), simplifyVector = FALSE),
@@ -787,7 +890,106 @@ exec_reaper_status <- function(now = Sys.time(), expect_secs = 300L) {
     expect_secs = as.numeric(expect_secs),
     last_scanned = if (!is.null(lastScan)) as.integer(lastScan$scanned %||% 0L) else NULL,
     last_reaped = if (!is.null(lastScan)) as.integer(lastScan$reaped %||% 0L) else NULL,
+    # 调度是否存在，跟"最近有没有扫过"是两件事。
+    #   为什么必须分开（2026-11-23，云准助手那台实测）：
+    #   那台没有任何 cron、没有 timer，回收器从来没被独立调度过。
+    #   它偶尔有扫描记录，是因为有人打开页面、请求里顺手调了一次 exec_reap。
+    #   于是"看起来在跑"，实际上没人打开页面就永远不跑。
+    #   只报 alive 不足以说明这件事，必须同时报"有没有调度"。
+    schedule = tryCatch(exec_reaper_schedule_check(), error = function(e) NULL),
     recent = reapedRecent)
+}
+
+# ---- 回收器的独立调度：检测 + 缺失时补上 ---------------------------
+#   为什么要管调度（2026-11-23，gina 指出"回收器从未跑"不能就这么留着）：
+#     回收逻辑写在 exec_reap 里，但它过去只在有请求进来时被顺手调用。
+#     没有 cron 的部署上，这个功能等于不存在，而且界面上看不出来 ——
+#     直到某条任务该被回收却一直挂着，才发现没人扫。
+#   做法：检查 crontab 里有没有这条；没有就追加一条，已有的不动。
+#     为什么追加而不是覆盖：这台机器上还有别人配的任务，覆盖等于替别人做主。
+#     为什么失败也要记下来：补不上就得让人看见"补不上"，
+#     否则又是一个静默失效。
+exec_reaper_cron_line <- function(app_dir = APP_DIR) {
+  paste0("*/5 * * * * cd ", shQuote(app_dir),
+         " && /usr/bin/Rscript engine/exec_reaper.R >> state/reaper_cron.log 2>&1")
+}
+
+exec_reaper_schedule_check <- function(app_dir = APP_DIR, now = Sys.time()) {
+  # 判据一（主）：审计里有没有 kind=scan。
+  #   为什么不用 crontab 命令（2026-11-23 实测踩到）：
+  #     crontab 二进制是 setgid 的，而本服务的 systemd unit 开了
+  #     NoNewPrivileges=true —— 两者冲突，服务进程里调 crontab 必然失败。
+  #     于是检测恒为"缺失"，还会误判成"需要人工配置"，把本来好的部署报成坏的。
+  #   而 kind=scan 只有独立入口 exec_reaper.R 会写：
+  #     内联的 exec_reap 只记回收动作，不记 scan。
+  #   所以它是"有没有独立调度在跑"的直接证据，不依赖任何外部命令。
+  f <- exec_reap_audit_path()
+  scan_at <- ""
+  if (file.exists(f)) {
+    lines <- tryCatch(readLines(f, warn = FALSE, encoding = "UTF-8"),
+                      error = function(e) character(0))
+    lines <- lines[nzchar(trimws(lines))]
+    for (x in rev(utils::tail(lines, 500L))) {
+      j <- tryCatch(jsonlite::fromJSON(x, simplifyVector = FALSE), error = function(e) NULL)
+      if (!is.list(j)) next
+      if (identical(as.character(j$kind %||% ""), "scan")) {
+        scan_at <- as.character(j$at %||% "")
+        break
+      }
+    }
+  }
+  if (nzchar(scan_at)) {
+    t0 <- exec_parse_ts(scan_at)
+    age <- if (is.na(t0)) Inf else as.numeric(difftime(now, t0, units = "secs"))
+    # ok 的含义是"存在独立调度"，不是"刚才扫过"。
+    #   两件事必须分开：调度配过但坏了（有记录、不新鲜），和从来没配过（无记录）。
+    #   前者看 alive，后者看这里。混成一个布尔值会让"刚重启还没到点"被误判成没配。
+    return(list(ok = TRUE, source = "audit_scan", last_scan_at = scan_at,
+                age_secs = if (is.finite(age)) round(age) else NULL,
+                fresh = is.finite(age) && age < 86400,
+                checked_at = exec_ts(now)))
+  }
+  # 判据二（兜底）：crontab 文件。服务里通常读不到，读不到就是未知，按缺失处理。
+  u <- Sys.getenv("USER", unset = "")
+  if (!nzchar(u)) u <- as.character(Sys.info()[["user"]] %||% "")
+  txt <- character(0)
+  if (nzchar(u)) {
+    p <- file.path("/var/spool/cron/crontabs", u)
+    txt <- tryCatch(readLines(p, warn = FALSE), error = function(e) character(0))
+  }
+  has <- any(grepl("exec_reaper\\.R", txt))
+  list(ok = has, source = if (has) "crontab_file" else "none",
+       last_scan_at = NULL, checked_at = exec_ts(now))
+}
+
+exec_reaper_ensure_schedule <- function(app_dir = APP_DIR) {
+  chk <- tryCatch(exec_reaper_schedule_check(app_dir), error = function(e) list(ok = FALSE))
+  if (isTRUE(chk$ok)) return(list(ok = TRUE, added = FALSE,
+                                  source = as.character(chk$source %||% ""),
+                                  checked_at = exec_ts()))
+  # 到这里说明真的一条独立扫描都没有。尝试补上，补不上就明确记下来。
+  #   为什么补不上是正常的：NoNewPrivileges 下 crontab 调不动。
+  #   所以这条路径的重点不是"一定补上"，而是"补不上要留下准确的说明和命令"，
+  #   让人一次配好，而不是反复看到一句含糊的"调度缺失"。
+  cur <- tryCatch(system2("crontab", "-l", stdout = TRUE, stderr = FALSE),
+                  error = function(e) NULL)
+  if (is.null(cur)) cur <- character(0)
+  cur <- cur[nzchar(trimws(cur)) & !grepl("^#", cur)]
+  cur <- c(cur, exec_reaper_cron_line(app_dir))
+  tmp <- tempfile("pa-cron-")
+  writeLines(cur, tmp)
+  st <- tryCatch(suppressWarnings(system2("crontab", tmp)), error = function(e) 1L)
+  unlink(tmp)
+  ok <- identical(as.integer(st), 0L)
+  rec <- list(checked_at = exec_ts(), ok = ok, added = TRUE,
+              source = if (ok) "crontab_written" else "none",
+              cron_line = exec_reaper_cron_line(app_dir),
+              note = if (ok) "已追加回收器调度"
+                     else "服务进程内写不了 crontab（NoNewPrivileges 与 setgid 冲突），需要部署方加一条")
+  tryCatch(write_json_file(file.path(STATE_DIR, "reaper_schedule.json"), rec),
+           error = function(e) NULL)
+  list(ok = ok, added = TRUE, checked_at = rec$checked_at, note = rec$note,
+       cron_line = rec$cron_line)
 }
 
 # ---- 检测不到执行端时，主动发起"启动执行端"请求 -------------------
@@ -923,7 +1125,18 @@ exec_reap <- function(d = NULL, now = Sys.time(), audit = TRUE) {
     changed <- TRUE
   }
   if (changed) {
-    d$items <- items; exec_write(d)
+    # 写回必须在锁内：回收器是独立 cron 进程，服务端同时在处理执行端请求，
+    #   两个进程各持一份旧快照整份写回，谁后写谁把对方的改动抹掉。
+    exec_mutate(function(dd) {
+      # 锁内重读，用最新条目做替换，避免把锁外这段时间别人的改动覆盖掉。
+      fresh <- dd$items %||% list()
+      for (i in seq_along(fresh)) {
+        id <- as.character(fresh[[i]]$id %||% "")
+        hit <- Filter(function(x) identical(as.character(x$id %||% ""), id), items)
+        if (length(hit)) fresh[[i]] <- hit[[1]]
+      }
+      list(data = list(items = fresh))
+    })
     if (isTRUE(audit)) for (rec in reaped) exec_reap_audit_append(rec)
     for (it in items) if (isTRUE(it$stale_reaped) && nzchar(as.character(it$chain_id %||% "")))
       rc_callback(list(session_id = it$session_id, req_id = it$chain_id,
@@ -936,6 +1149,12 @@ exec_reap <- function(d = NULL, now = Sys.time(), audit = TRUE) {
 exec_enqueue <- function(step, session_id = "", note = "", script = "", script_args = "", req_id = "",
                          params = NULL, params_rel = "", run_dir = "", mode = "",
                          reference_id = "", ref_mode = "", ref_path = "", pool_id = NULL) {
+  # 整个"读-去重-追加-写"必须在锁内。
+  #   为什么不能只锁写：去重是靠读到的现状判断的。两个执行端/两个点击同时进来，
+  #   各自读到"还没有同 step+session 的任务"，就各自追加一条，
+  #   于是同一步出现两个任务号、写同一个输出目录（2026-11-22 实测的那对
+  #   ex-20261122151017-qugm 与 ex-20261122173829-nhlu 就是这么来的）。
+  exec_with_lock(function() {
   d <- exec_read()
   # 持久幂等：同一个 session+step+req_id 不论当前是 queued/running/done/failed
   # 都只返回原任务。要重跑必须换新 req_id；这条比旧的「仅 queued/running
@@ -1017,6 +1236,7 @@ exec_enqueue <- function(step, session_id = "", note = "", script = "", script_a
   d$items <- c((d$items %||% list()), list(it))
   exec_write(d)
   it
+  })
 }
 
 exec_by_req <- function(step, session_id, req_id) {
@@ -1269,12 +1489,15 @@ exec_keepalive <- function(id, job = "", note = "", job_number = "",
 }
 
 exec_set <- function(id, fields) {
-  d <- exec_read()
-  for (i in seq_along(d$items)) {
-    if (!identical(as.character(d$items[[i]]$id %||% ""), id)) next
-    for (nm in names(fields)) d$items[[i]][[nm]] <- fields[[nm]]
-  }
-  exec_write(d)
+  # 读-改-写在锁内完成：两个执行端同时改不同条目时，谁后写谁整份覆盖，
+  #   先写的那条改动会凭空消失（2026-11-23 实测）。
+  exec_mutate(function(d) {
+    for (i in seq_along(d$items)) {
+      if (!identical(as.character(d$items[[i]]$id %||% ""), id)) next
+      for (nm in names(fields)) d$items[[i]][[nm]] <- fields[[nm]]
+    }
+    list(data = d)
+  })
   invisible(TRUE)
 }
 
@@ -1457,13 +1680,21 @@ inject_enqueue <- function(text, session = "", req_id = "", reason = "", step = 
     if (!identical(sess_chr(it$instruction_id), sess_chr(instruction_id))) next
     if (!identical(sess_chr(it$analysis_id), sess_chr(analysis_id))) next
     if (!identical(sess_chr(it$purpose %||% "execute"), sess_chr(purpose))) next
-    if (!identical(as.character(it$text %||% ""), txt)) next
+    # 正文主体一致就是同一条：标题只是前缀，不该让同一条指令变成两条。
+    if (!identical(inject_body_of(it$text), inject_body_of(txt))) next
     if (!identical(as.character(it$step %||% ""), as.character(step %||% ""))) next
     if (!identical(as.character(it$req_id %||% ""), as.character(req_id %||% ""))) next
     # 命中已有条目：只把会话号补正，不新增、不重置重试计数。
     d$items[[i]]$session <- if (nzchar(session)) session else as.character(it$session %||% "")
     if (nzchar(as.character(reason %||% ""))) d$items[[i]]$reason <- as.character(reason)
-    if (nzchar(as.character(origin %||% ""))) d$items[[i]]$origin <- as.character(origin)
+    if (nzchar(as.character(origin %||% ""))) {
+      d$items[[i]]$origin <- as.character(origin)
+      # 原来入库时没有按钮名、这次有：就地把正文升级成带首行的版本。
+      #   不升级会留下两种首行：面板上显示的是旧的无标题正文，
+      #   补发路径却按 origin 又重建一次首行，同一条记录两种样子。
+      if (!identical(as.character(d$items[[i]]$text %||% ""), txt))
+        d$items[[i]]$text <- txt
+    }
     inject_write(d)
     return(d$items[[i]])
   }
@@ -7422,7 +7653,15 @@ serve_request <- function(con, req) {
                          step = as.character(b$step %||% ""),
                          analysis_id = as.character(b$session_id %||% ""),
                          purpose = as.character(b$purpose %||% "execute"),
-                         instruction_id = instruction_id),
+                         instruction_id = instruction_id,
+                         # 按钮名必须随入队一起存下去。
+                         #   为什么（2026-11-23，云准助手交接件指出、本机核实）：
+                         #   这里已经把 origin_lab 算出来并写进了正文首行，
+                         #   却没传给 inject_enqueue —— 于是队列条目 origin 字段为空，
+                         #   补发时 inject_with_origin 拿不到按钮名，无法重建成 【按钮名】 首行；
+                         #   而正文里那行前缀又因为文本比对不进来而不走合并分支。
+                         #   结果是同一条指令在不同路径下首行不一致。
+                         origin = origin_lab),
           error = function(e) NULL)
         return(send_json(con, 200, prepared))
       }
@@ -7502,7 +7741,12 @@ serve_request <- function(con, req) {
                        step = as.character(b$step %||% ""),
                        analysis_id = as.character(b$session_id %||% ""),
                        purpose = as.character(b$purpose %||% "execute"),
-                       instruction_id = instruction_id),
+                       instruction_id = instruction_id,
+                       # 与上面 reuse 分支同样补上按钮名。
+                       #   两处是同一件事的两条路：一条复用已生成的包，一条新建。
+                       #   只补一处会让"同一条指令首次入队有标题、复用后没标题"，
+                       #   人看到的差别取决于服务端走了哪条分支，比一直错更难查。
+                       origin = origin_lab),
         error = function(e) NULL)
       prepared
     }, error = function(e) list(ok = FALSE, code = paste0("instruction_", prepare_stage, "_failed"),
@@ -7869,6 +8113,13 @@ serve_request <- function(con, req) {
       #   但它仍要把"这份产物属于哪次作业"带给判定层，
       #   而 worker 在复用路径上没有 submit 返回值，只能从这里取。
       job_number = as.character(it$job_number %||% ""),
+      # 这一次尝试的身份，必须随任务下发。
+      #   为什么（2026-11-23，子任务查证）：attempt_id 由服务端在派工时生成、
+      #   也写进了队列条目，但 due/claim 两条下发路径都不带它 ——
+      #   执行端回写时根本没有这个值，服务端只能靠 req_id 去猜，
+      #   猜不中就判 attempt_id_unknown，19 条「回写未被接受」就是这么来的。
+      #   作业在集群上真跑完了，结果却写不回来。
+      attempt_id = as.character(it$attempt_id %||% ""),
       run_dir = if (nzchar(as.character(it$run_dir %||% "")))
         as.character(it$run_dir) else due_run_dir(it$session_id),
       mode = as.character(it$mode %||% ""),
@@ -7964,28 +8215,61 @@ serve_request <- function(con, req) {
     wa <- worker_route_auth(req, claimed_w, as.character(b$pool_id %||% ""), "queue")
     if (!isTRUE(wa$ok)) return(send_json(con, wa$status, wa))
     who <- wa$worker_id
-    d <- exec_read()
-    hit <- NULL
-    for (it in (d$items %||% list())) {
-      if (identical(as.character(it$id %||% ""), want) &&
-          identical(as.character(it$status %||% ""), "queued")) hit <- it
+    # 领取必须"判断 + 占用"是一个原子动作。
+    #   为什么（2026-11-23 实测）：原来读在锁外、写在锁内，两个执行端同时读到
+    #   同一条 queued，两边都通过判断、都回报"已领到"，实际只有一个能占住，
+    #   另一个拿着同一份任务去跑 —— 同一条任务跑两遍，产物写同一个目录。
+    #   现在把判断挪进锁内：锁内重读，先确认它仍是 queued，再占用。
+    claim <- exec_mutate(function(d) {
+      it0 <- NULL
+      for (it in (d$items %||% list()))
+        if (identical(as.character(it$id %||% ""), want)) it0 <- it
+      if (is.null(it0))
+        return(list(data = d, value = list(ok = FALSE, code = "exec_task_missing",
+          error = "队列里没有这条任务。")))
+      st0 <- as.character(it0$status %||% "")
+      if (!identical(st0, "queued")) {
+        mine <- identical(trimws(as.character(it0$worker_id %||% it0$claimed_by %||% "")), who)
+        if (identical(st0, "running") && mine)
+          return(list(data = d, value = list(ok = TRUE, idempotent = TRUE, item = it0)))
+        # 另一个执行端先一步占住了：明确告诉它，别让它以为领到了。
+        return(list(data = d, value = list(ok = FALSE, code = "exec_task_taken",
+          status = st0,
+          by = as.character(it0$worker_id %||% it0$claimed_by %||% ""),
+          error = paste0("这条任务已被 ", st0, " 状态占用，不是你可以接的。" ))))
+      }
+      task_pool0 <- exec_task_pool(it0)
+      if (!identical(task_pool0, wa$pool_id))
+        return(list(data = d, value = list(ok = FALSE, code = "worker_pool_mismatch_queue",
+          error = paste0("任务属于 pool ", task_pool0, "，当前 worker 属于 ", wa$pool_id, "。"))))
+      now0 <- exec_ts()
+      for (i in seq_along(d$items)) {
+        if (!identical(as.character(d$items[[i]]$id %||% ""), want)) next
+        d$items[[i]]$status <- "running"
+        d$items[[i]]$claimed_at <- now0
+        d$items[[i]]$last_seen <- now0
+        d$items[[i]]$claimed_by <- who
+        d$items[[i]]$worker_id <- who
+        d$items[[i]]$pool_id <- wa$pool_id
+      }
+      list(data = d, value = list(ok = TRUE, idempotent = FALSE, item = it0,
+                                  task_pool = task_pool0))
+    })
+    if (!isTRUE(claim$ok)) {
+      # 幂等命中与"被别人领走"都是 200，前者是正常重试，后者要让调用方看见原因。
+      if (isTRUE(claim$idempotent))
+        return(send_json(con, 200, list(ok = TRUE, idempotent = TRUE, item = claim$item)))
+      if (identical(as.character(claim$code %||% ""), "worker_pool_mismatch_queue"))
+        return(send_json(con, 409, claim))
+      return(send_json(con, 200, claim))
     }
-    if (is.null(hit)) {
-      cur <- Filter(function(it) identical(as.character(it$id %||% ""), want),
-                    d$items %||% list())
-      if (length(cur) && identical(as.character(cur[[1]]$status %||% ""), "running") &&
-          identical(trimws(as.character(cur[[1]]$worker_id %||% cur[[1]]$claimed_by %||% "")),
-                    who))
-        return(send_json(con, 200, list(ok = TRUE, idempotent = TRUE, item = cur[[1]])))
-      return(send_json(con, 200, list(ok = FALSE, error = "不在队列里")))
-    }
-    task_pool <- exec_task_pool(hit)
-    if (!identical(task_pool, wa$pool_id))
-      return(send_json(con, 409, list(ok = FALSE, code = "worker_pool_mismatch_queue",
-        error = paste0("任务属于 pool ", task_pool, "，当前 worker 属于 ", wa$pool_id, "。"))))
-    now <- exec_ts()
-    exec_set(want, list(status = "running", claimed_at = now, last_seen = now,
-                        claimed_by = who, worker_id = who, pool_id = wa$pool_id))
+    # 同一个 worker 重复领同一条：这是重试，不是新领到。
+    #   必须在这里返回，否则会落到下面的"领取成功"分支，
+    #   把幂等命中报成一次新的成功领取（2026-11-23 路由实测踩到）。
+    if (isTRUE(claim$idempotent))
+      return(send_json(con, 200, list(ok = TRUE, idempotent = TRUE, item = claim$item)))
+    hit <- claim$item
+    task_pool <- claim$task_pool
     exec_worker_hb_write(wa$worker_id, wa$pool_id,
                          version = as.character(b$version %||% ""), note = "claim")
     return(send_json(con, 200, list(
@@ -7994,6 +8278,9 @@ serve_request <- function(con, req) {
                   req_id = hit$req_id, chain_id = hit$chain_id,
                   job_id = as.character(hit$job_id %||% ""),
                   job_number = as.character(hit$job_number %||% ""),
+                  # 与 due 同源：领取时也要把这一次尝试的身份交给执行端，
+                  #   否则它回写时还是缺这个值（2026-11-23 修）。
+                  attempt_id = as.character(hit$attempt_id %||% ""),
                   run_dir = as.character(hit$run_dir %||% ""),
                   pool_id = task_pool, worker_id = who,
                   script = as.character(hit$script %||% ""),
@@ -8042,18 +8329,25 @@ serve_request <- function(con, req) {
       return(send_json(con, 403, list(ok = FALSE, code = "exec_task_not_owned",
         error = "这条任务由另一个执行端领取，不能由当前 worker 收尾。")))
     bind_w <- if (nzchar(task_w)) list() else list(worker_id = wa$worker_id)
+    # 执行端这次上报的尝试身份，写回队列条目。
+    #   为什么（2026-11-23，子任务查证）：attempt_id 是服务端派工时生成的，
+    #   以前只在派工那一次写进队列，收尾时既不校验也不更新 ——
+    #   执行端带回来的值如果和队列不一致，没有任何地方会说话。
+    #   现在把它落回条目，队列与库能对上，也能在事后看出是哪一次尝试。
+    att_in_ep <- trimws(as.character(b$attempt_id %||% ""))
+    bind_att <- if (nzchar(att_in_ep)) list(attempt_id = att_in_ep) else list()
     if (length(task) && nzchar(as.character(task[[1]]$chain_id %||% ""))) {
       it <- task[[1]]
       if (okk && (!isTRUE(it$callback_received) || !isTRUE(it$callback_accepted)))
         return(send_json(con, 409, list(ok = FALSE, code = "stage_callback_required")))
-      exec_set(want, c(bind_w, list(status = if (okk) "done" else "failed",
+      exec_set(want, c(bind_w, bind_att, list(status = if (okk) "done" else "failed",
         finished_at = exec_ts(), error = if (okk) NULL else as.character(b$error %||% ""))))
       exec_worker_hb_write(wa$worker_id, wa$pool_id, note = "done")
       if (!okk) rc_callback(list(session_id = it$session_id, req_id = it$chain_id,
         step = it$step, status = "failed", code = 1L), FALSE)
       return(send_json(con, 200, list(ok = TRUE)))
     }
-    exec_set(want, c(bind_w, list(status = if (okk) "done" else "failed",
+    exec_set(want, c(bind_w, bind_att, list(status = if (okk) "done" else "failed",
                         finished_at = exec_ts(),
                         error = if (okk) NULL else as.character(b$error %||% ""))))
     exec_worker_hb_write(wa$worker_id, wa$pool_id, note = "done")
@@ -8260,14 +8554,24 @@ serve_request <- function(con, req) {
     }
     why <- trimws(as.character(b$reason %||% ""))
     if (!nzchar(why)) why <- "人工作废：排队期间无人认领，为解除后续环节的阻塞"
-    d$items[[hit]]$status <- "failed"
-    d$items[[hit]]$finished_at <- exec_ts()
-    d$items[[hit]]$error <- paste0("已由人工作废（", why, "）。这不是这一步本身跑失败：",
-                                   "它在服务器上没有产出，重派即可。")
-    d$items[[hit]]$cancelled_by <- "user"
-    d$items[[hit]]$cancelled_at <- exec_ts()
-    d$items[[hit]]$cancel_previous_status <- st
-    exec_write(d)
+    # 作废也走锁内读改写：上面的判断基于锁外读到的快照，
+    #   写完这段时间执行端可能刚好领取或回写了同一份队列，
+    #   整份覆盖会把它的改动抹掉（2026-11-23 实测的丢更新同型）。
+    #   这里按 id 重新定位后再改，不用锁外的索引。
+    exec_mutate(function(dd) {
+      for (i in seq_along(dd$items %||% list())) {
+        if (!identical(as.character(dd$items[[i]]$id %||% ""), want)) next
+        dd$items[[i]]$status <- "failed"
+        dd$items[[i]]$finished_at <- exec_ts()
+        dd$items[[i]]$error <- paste0("已由人工作废（", why,
+                                      "）。这不是这一步本身跑失败：",
+                                      "它在服务器上没有产出，重派即可。")
+        dd$items[[i]]$cancelled_by <- "user"
+        dd$items[[i]]$cancelled_at <- exec_ts()
+        dd$items[[i]]$cancel_previous_status <- st
+      }
+      list(data = dd)
+    })
     # 作废链上的任务，必须同时告诉链"这一步失败了"。
     #   为什么（2026-11-22 实测）：链的 req_id 全链共用，作废后如果只改任务状态、
     #   不通知链，链会永远停在 running；此后同一条链再点，rc_begin 走的是
@@ -10940,6 +11244,26 @@ main <- function() {
     say("")
     say("  [!] 身份自检没通过。这个状态下记录接口会一律 403，不是页面坏了。")
     say("      正名顺序：设环境变量 PA_APP_ID，或让 connector.json 的 localPort 等于 ", PORT, "。")
+  }
+  # 回收器调度自检：没有调度就补上，补不上要让人一眼看见。
+  #   为什么放在启动段（2026-11-23，gina 指出"回收器从未跑"不能就这么留着）：
+  #     回收逻辑过去只在有请求进来时被顺手调用。没有 cron 的部署上这个功能等于
+  #     不存在，而界面上完全看不出来 —— 只能等某条任务该回收却一直挂着才发现。
+  #     所以判定从"最近有没有扫过"扩成"有没有调度"，并在启动时补一次。
+  .reapchk <- tryCatch(
+    if (exists("exec_reaper_ensure_schedule", mode = "function"))
+      exec_reaper_ensure_schedule(APP_DIR)
+    else list(ok = FALSE, added = FALSE, note = "调度自检函数未加载"),
+    error = function(e) list(ok = FALSE, added = FALSE, note = conditionMessage(e)))
+  if (isTRUE(.reapchk$ok)) {
+    say("  回收器调度： 已配置",
+        if (isTRUE(.reapchk$added)) "（本次启动补上的）" else "")
+  } else {
+    say("  回收器调度： 缺失")
+    say("  [!] 没有定时回收：失联任务不会被自动收尾，队列状态会停在旧样子。")
+    say("      补一条 crontab 即可：")
+    say("      */5 * * * * cd ", APP_DIR,
+        " && /usr/bin/Rscript engine/exec_reaper.R >> state/reaper_cron.log 2>&1")
   }
   say("===========================================================")
   say("")

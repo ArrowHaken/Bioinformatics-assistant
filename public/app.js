@@ -971,6 +971,19 @@ let busyForce = null;
 //   取不到就退回空串，由调用点给一个中性名字。
 let lastInvokeLabel = '';
 
+// 取一次就清空。
+//   为什么要清（2026-11-23）：这个值是全局的，只在点 [data-run] / [data-req]
+//   卡片时赋值，之后一直留着。于是先点了「交给助手去跑」，再点另一个完全
+//   不相干的按钮，那个按钮的注入标题会被写成上一次那张卡片的字 ——
+//   人看到「明明我点的按钮不叫这个」。
+//   清掉之后，谁没自己赋值就只能拿到空串，由调用点给中性名字，
+//   不会再借到别人的名字。
+function takeInvokeLabel() {
+  const v = String(lastInvokeLabel || '').trim();
+  lastInvokeLabel = '';
+  return v;
+}
+
 function showBusySheet(stepId, t, onForce) {
   const title = stepTitleCN(stepId) || stepId;
   const isRun = String(t.status) === 'running';
@@ -4666,7 +4679,10 @@ async function runPickedSteps() {
         //   把 purpose 一起带过去，队列与回执里都留得下这个标记。
         await recordAwait(injectToSession(sendTxt, function () {},
           r.mode === 'observe' ? 'observe' : 'execute', {step:id, reqId:r.req_id || r.request_id || ''},
-          lastInvokeLabel || '一键全流程'), __recordScope);
+          // 这条路径就是「一键全流程」，标题固定写它自己。
+          //   不能读全局的 lastInvokeLabel：那是上一张卡片的字，
+          //   借过来就会变成"我点的是全流程，会话里却写着别的东西"。
+          '一键全流程'), __recordScope);
       }
     } catch (e) {
     if (!recordCurrent(__recordScope)) return;
@@ -4741,7 +4757,7 @@ async function runStep(id, reqNote, force, extra = {}) {
       //   已入队时那段是"只观察"的，purpose 一起带过去，队列里也留得下标记。
       const sendTxt = r.session_text || r.instruction || '';
       const purpose = r.mode === 'observe' ? 'observe' : 'execute';
-      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}, lastInvokeLabel || stepTitleCN(id) || '跑这一步'), __recordScope);
+      const res = await recordAwait(injectToSession(sendTxt, function () {}, purpose, {step:id, reqId:r.req_id || r.request_id || ''}, takeInvokeLabel() || stepTitleCN(id) || '跑这一步'), __recordScope);
       // 这一步的作业在服务端就已经排进执行队列了（r.delegated 本身就是"已入队"）。
       //   注入会话只是顺带通知助手，不是被执行的前提。
       //   以前把注入结果当成败判据：会话通道一断，页面就报"没送进"，人以为活没派出去，

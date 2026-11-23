@@ -773,6 +773,16 @@ db_ensure_project <- function(con, owner_key, name, project_id = NULL) {
 
 db_ensure_version <- function(con, project_id, owner_key, version_id = NULL,
                               label = NULL, reason = NULL, parent = NULL) {
+  # NA 与空串一律按"未指定"处理。
+  #   为什么（2026-11-23，本机契约测试抓到）：R 里 nzchar(NA) 返回 TRUE，
+  #   于是 NA 会被当成"已经指定了版本号"，下面那次查询拿不到又把它原样返回。
+  #   这个 NA 接着进 step_attempts.version_id，而那一列是 NOT NULL ——
+  #   整份回写被判 db_report_error：作业在集群上真跑完了，结果却写不回来。
+  #   这条路径不是想象出来的：DBI 把 SQL NULL 读回来就是 NA。
+  if (!is.null(version_id)) {
+    v <- suppressWarnings(as.character(version_id))
+    if (!length(v) || is.na(v[1]) || !nzchar(trimws(v[1]))) version_id <- NULL
+  }
   if (!is.null(version_id) &&
       nzchar(as.character(db_scalar(con, "SELECT version_id FROM versions WHERE version_id=?",
                                     list(version_id)) %||% "")))
