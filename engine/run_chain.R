@@ -117,6 +117,31 @@ rc_begin <- function(sid, run_dir, req_id = "", owner_ctx = list(), overwrite = 
       rc_write(c)
       c <- NULL
     }
+    # ---- 链说在跑，但队列里已经没有任务在管它：这是死状态，必须自愈 ----
+    #   为什么（2026-11-23，gina 报"旧任务一直卡着，新任务进不去，进程完全锁死"）：
+    #     下面那条 "same && running" 直接回 duplicate=TRUE。它假设
+    #     running 的链一定有一条任务在队列里推进。实测不成立：
+    #     任务被人工作废、被回收器标成 failed、或回写失败后链没收到通知，
+    #     链就停在 running，而队列里一条都不剩。
+    #     此后无论点多少次，都只回"已交接"，页面画成成功，实际什么都没派出去 ——
+    #     唯一出路是去改文件。这不是保护，是把人挡在系统外面。
+    #   判据只认队列事实：这条链名下还有没有 queued/running 的任务。
+    #     有，就是真的在跑，照旧回 duplicate；没有，就把链标成可重开。
+    if (identical(c$status, "running") || identical(c$status, "starting")) {
+      live <- Filter(function(it) identical(as.character(it$session_id %||% ""), sid) &&
+        identical(as.character(it$chain_id %||% ""), as.character(c$req_id %||% "")) &&
+        as.character(it$status %||% "") %in% c("queued", "running"),
+        exec_read()$items %||% list())
+      if (!length(live)) {
+        c$status <- "superseded"
+        c$superseded_by <- req_id
+        c$superseded_at <- exec_ts()
+        c$orphan_recovered_at <- exec_ts()
+        c$orphan_recovered_reason <- "链名下已无 queued/running 任务，判定为孤儿链"
+        rc_write(c)
+        c <- NULL
+      }
+    }
     if (same && c$status %in% c("running", "starting", "done"))
       return(list(code = 200L, body = list(ok = TRUE, delegated = identical(c$status, "running"),
         duplicate = TRUE, chain_id = c$req_id, step = c$todo[[c$index]], chain_status = c$status)))
