@@ -24,6 +24,7 @@ FLOW_ORDER <- function(profile) c("first", "second")
 flow_stage <- function(id, profile) list(cover_by = "")
 
 captured_req <- NULL
+exec_with_lock <- function(fn) fn()
 serve_request <- function(con, req) {
   captured_req <<- req
   # 模拟修复前的坏行为只需改这里：标记丢失时 handler 会被守卫拦住。

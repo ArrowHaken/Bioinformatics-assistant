@@ -13,6 +13,7 @@ HAS_SESSIONS <- FALSE
 FLOW_ORDER <- function(profile) c("first", "second")
 flow_stage <- function(id, profile) list(cover_by="")
 last_dispatch <- NULL
+exec_with_lock <- function(fn) fn()
 serve_request <- function(con, req) {
   last_dispatch <<- jsonlite::fromJSON(req$body, simplifyVector=FALSE)
   list(code=200L, body=list(ok=TRUE, delegated=TRUE, title=last_dispatch$step))

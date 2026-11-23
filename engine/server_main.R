@@ -1160,7 +1160,8 @@ exec_reap <- function(d = NULL, now = Sys.time(), audit = TRUE) {
 
 exec_enqueue <- function(step, session_id = "", note = "", script = "", script_args = "", req_id = "",
                          params = NULL, params_rel = "", run_dir = "", mode = "",
-                         reference_id = "", ref_mode = "", ref_path = "", pool_id = NULL) {
+                         reference_id = "", ref_mode = "", ref_path = "", pool_id = NULL,
+                         prepare = NULL) {
   # 整个"读-去重-追加-写"必须在锁内。
   #   为什么不能只锁写：去重是靠读到的现状判断的。两个执行端/两个点击同时进来，
   #   各自读到"还没有同 step+session 的任务"，就各自追加一条，
@@ -1245,6 +1246,12 @@ exec_enqueue <- function(step, session_id = "", note = "", script = "", script_a
     worker_id = NULL,
     status = "queued", created_at = exec_ts(),
     claimed_at = NULL, claimed_by = NULL, finished_at = NULL, error = NULL)
+  # Publish the job only after its writeback identity has been prepared.
+  if (!is.null(prepare)) {
+    prepared <- prepare(it)
+    if (!isTRUE(prepared$ok)) return(list(dispatch_error = prepared))
+    it <- c(it, prepared$fields)
+  }
   d$items <- c((d$items %||% list()), list(it))
   exec_write(d)
   it
