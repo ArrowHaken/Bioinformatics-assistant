@@ -829,26 +829,27 @@ db_ensure_session_version <- function(con, session_id, owner_key) {
     if (!length(v) || is.na(v[1]) || !nzchar(trimws(v[1]))) return("")
     trimws(v[1])
   }
-  pid <- ""; vid <- ""; nm <- sid
-  row <- tryCatch(db_rows(con,
+  row <- db_rows(con,
     "SELECT project_id, version_id, name FROM sessions WHERE session_id = ?",
-    list(sid)), error = function(e) NULL)
-  if (!is.null(row) && nrow(row)) {
-    sr <- as.list(row[1, ])
-    pid <- norm_id(sr$project_id)
-    vid <- norm_id(sr$version_id)
-    nm0 <- trimws(as.character(sr$name))
-    if (nzchar(nm0) && !is.na(nm0)) nm <- nm0
-  }
-  if (!nzchar(pid)) pid <- as.character(db_ensure_project(con, octx, nm))
+    list(sid))
+  if (nrow(row) != 1L) return(list(ok = FALSE, code = "no_session"))
+  pid <- norm_id(row$project_id)
+  vid <- norm_id(row$version_id)
+  if (nzchar(pid) && nzchar(vid))
+    return(list(ok = TRUE, project_id = pid, version_id = vid))
+  nm <- norm_id(row$name)
+  if (!nzchar(pid)) pid <- as.character(db_ensure_project(con, octx, if (nzchar(nm)) nm else sid))
   if (!nzchar(vid)) vid <- as.character(db_ensure_version(con, pid, octx))
   if (!nzchar(pid) || !nzchar(vid))
     return(list(ok = FALSE, code = "version_unavailable"))
-  tryCatch(DBI::dbExecute(con,
-    "UPDATE sessions SET project_id = COALESCE(project_id, ?),
-                         version_id = COALESCE(version_id, ?)
-     WHERE session_id = ?", list(pid, vid, sid)), error = function(e) NULL)
-  list(ok = TRUE, project_id = pid, version_id = vid)
+  DBI::dbExecute(con,
+    "UPDATE sessions SET project_id = COALESCE(NULLIF(TRIM(project_id), ''), ?),
+                         version_id = COALESCE(NULLIF(TRIM(version_id), ''), ?)
+     WHERE session_id = ?", list(pid, vid, sid))
+  saved <- db_rows(con, "SELECT project_id, version_id FROM sessions WHERE session_id = ?", list(sid))
+  if (nrow(saved) != 1L || !nzchar(norm_id(saved$project_id)) || !nzchar(norm_id(saved$version_id)))
+    return(list(ok = FALSE, code = "version_unavailable"))
+  list(ok = TRUE, project_id = norm_id(saved$project_id), version_id = norm_id(saved$version_id))
 }
 
 db_ensure_run <- function(con, version_id, owner_key, run_id = NULL,

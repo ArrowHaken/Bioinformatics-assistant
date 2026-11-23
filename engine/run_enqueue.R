@@ -773,7 +773,6 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
       }
       if (!nzchar(exec_ref$ref_path) && identical(exec_ref$ref_mode, "path"))
         exec_ref$ref_path <- record_trim(exec_srv$ref_path)
-      bindWarn <- ""
       enq <- NULL
       # ---- 没有执行端在线，就不派活 ----------------------------------
       #   为什么（2026-11-22，gina 报「它的回复报错」）：
@@ -837,6 +836,39 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
             run_dir = as.character(execVars$work_root %||% ""),
             step = as.character(stepId %||% ""))
         }
+        # con is the HTTP response connection. Internal dispatch has no HTTP
+        # connection, but uses the same application database as manual dispatch.
+        prepare_task <- function(task) {
+          failure <- function(detail) list(ok = FALSE, detail = detail)
+          if (!isTRUE(DB_READY) || is.null(DB_CON)) return(failure("数据库不可用"))
+          owner <- owner_ctx_key(owner_ctx)
+          if (length(owner) != 1L || is.na(owner) || !nzchar(owner))
+            return(failure("无法确认分析记录的归属"))
+          tryCatch({
+            version <- db_ensure_session_version(DB_CON, execSid, owner)
+            if (!isTRUE(version$ok)) return(failure(as.character(version$code)))
+            mode <- if (isTRUE((execStage %||% list())$qsub)) "batch" else "login"
+            binding <- db_register_dispatch(
+              DB_CON, owner_key = owner, session_id = execSid,
+              version_id = version$version_id, step_id = stepId,
+              req_id = stepRq, exec_id = task$id,
+              script_path = as.character(enqCmd %||% ""),
+              script_digest = as.character(b$script_digest %||% b$script_md5 %||% ""),
+              run_dir = task$run_dir, executor_mode = mode)
+            if (!isTRUE(binding$ok) || !nzchar(record_trim(binding$attempt_id)))
+              return(failure(as.character(binding$error %||% binding$code %||% "无法登记运行")))
+            legacy <- attempt_register(APP_DIR, execSid, stepRq, origin = "step_run")
+            if (!isTRUE(legacy$ok))
+              return(failure(as.character(legacy$error %||% "无法登记本步请求")))
+            pending <- sess_set_pending(APP_DIR, execSid, stepRq, slot = "step")
+            if (!isTRUE(pending$ok))
+              return(failure(as.character(pending$error %||% "无法登记待回写请求")))
+            fields <- list(attempt_id = binding$attempt_id, run_id = binding$run_id,
+                           version_id = binding$version_id, executor_mode = mode)
+            if (nzchar(chainRq)) fields$chain_id <- chainRq
+            list(ok = TRUE, fields = fields)
+          }, error = function(e) failure(conditionMessage(e)))
+        }
         enq <- tryCatch(exec_enqueue(stepId, session_id = execSid,
                             script = enqCmd, script_args = enqArgs, req_id = stepRq,
                             params = execParams, params_rel = execParamsRel,
@@ -845,152 +877,18 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
                             reference_id = exec_ref$reference_id,
                             ref_mode = exec_ref$ref_mode,
                             ref_path = exec_ref$ref_path,
-                            pool_id = exec_default_pool_id()),
+                            pool_id = exec_default_pool_id(), prepare = prepare_task),
                          error = function(e) NULL)
-      }
-      # ---- one stable attempt id before either executor mode sees the task ----
-      # qsub/batch and login/interactive observe must report the same id. The
-      # dispatcher, not the executor, owns this number.
-      if (!is.null(enq) && !nzchar(as.character(enq$attempt_id %||% "")) &&
-          nzchar(as.character(enq$req_id %||% "")) && isTRUE(DB_READY) && !is.null(con)) {
-        oldr <- tryCatch(db_rows(con,
-          paste0("SELECT * FROM step_attempts WHERE req_id = ? AND step_id = ? ",
-                 "ORDER BY attempt_no DESC LIMIT 1"),
-          list(as.character(enq$req_id), stepId)), error = function(e) NULL)
-        if (!is.null(oldr) && nrow(oldr)) {
-          enq$attempt_id <- as.character(oldr$attempt_id[[1]])
-          enq$run_id <- as.character(oldr$run_id[[1]])
-          enq$version_id <- as.character(oldr$version_id[[1]])
-          exec_set(as.character(enq$id %||% ""), list(
-            attempt_id = enq$attempt_id, run_id = enq$run_id,
-            version_id = enq$version_id))
+        if (!is.null(enq$dispatch_error)) {
+          return(send_json(con, 409, list(ok = FALSE, code = "dispatch_binding_unavailable",
+            step = stepId, detail = enq$dispatch_error$detail, wrote_queue = FALSE,
+            error = "无法登记本次运行，作业未入队。")))
         }
       }
-      if (!is.null(enq) && nzchar(stepRq) &&
-          identical(as.character(enq$req_id %||% ""), stepRq) &&
-          isTRUE(DB_READY) && !is.null(con)) {
-        vinfo0 <- tryCatch(db_api_version_of(con, execSid), error = function(e) NULL)
-        vid0 <- as.character((vinfo0 %||% list())$version_id %||% "")
-        if (!nzchar(vid0)) vid0 <- as.character(access$ctx$version_id %||% "")
-        octx0 <- if (is.null(owner_ctx$key) || is.na(owner_ctx$key)) "unattributed"
-                 else as.character(owner_ctx$key)
-        # ---- 派工前先把这一版记录的身份号建出来 --------------------------
-        #   为什么不能等回写时再补（2026-11-23，真实点击 12:18 那次失败后修）：
-        #     db_register_dispatch 要求版本号非空，拿不到就直接返回
-        #     dispatch_binding_unavailable，attempt 根本建不起来。
-        #     执行端领了任务、跑完来交结果时没有 attempt_id，只能按 req_id+step 猜；
-        #     猜不中就 403 run_log_not_owner —— 服务器上一个细胞都没算，8 秒判失败。
-        #   实测本机 14 条记录里 11 条 version_id 为空，这不是偶发，是通病。
-        #   建出来还必须写回 sessions：不写回的话下一个环节会再建一个新版本，
-        #     同一条记录的产物散落在不同版本里，闸门按版本查上游就查不到。
-        if (!nzchar(vid0)) {
-          # 实现抽在 db.R 的 db_ensure_session_version 里，这里只负责调用。
-          #   抽出去的原因（2026-11-23）：契约要能直接测这段
-          #   "记录没版本 → 建号 → 写回" 的行为；内联在派工段里只能等真实点击才暴露。
-          ev0 <- tryCatch(db_ensure_session_version(con, execSid, octx0),
-                          error = function(e) list(ok = FALSE))
-          if (isTRUE(ev0$ok)) vid0 <- as.character(ev0$version_id)
-        }
-        reg0 <- tryCatch(
-          db_register_dispatch(
-            con, owner_key = octx0,
-            session_id = execSid, version_id = vid0, step_id = stepId,
-            req_id = stepRq, exec_id = as.character(enq$id %||% ""),
-            script_path = as.character(enqCmd %||% ""),
-            script_digest = as.character(b$script_digest %||% b$script_md5 %||% ""),
-            run_dir = as.character(V$run_dir %||% ""),
-            executor_mode = if (isTRUE((execStage %||% list())$qsub)) "batch" else "login"),
-          error = function(e) list(ok = FALSE, code = "dispatch_attempt_error",
-                                   error = conditionMessage(e)))
-        if (isTRUE(reg0$ok)) {
-          enq$attempt_id <- reg0$attempt_id
-          enq$run_id <- reg0$run_id
-          enq$version_id <- reg0$version_id
-          enq$executor_mode <- if (isTRUE((execStage %||% list())$qsub)) "batch" else "login"
-          exec_set(as.character(enq$id %||% ""), list(
-            attempt_id = enq$attempt_id, run_id = enq$run_id,
-            version_id = enq$version_id, executor_mode = enq$executor_mode))
-        } else {
-          # 建不起尝试身份就不要派工（2026-11-23，12:18 那次真实失败后修）。
-          #   原来这里只记一条 warning 就继续派：执行端领了活、跑到回写才发现
-          #   认不出身份，白占一次执行端轮次，任务还留在队列里当僵尸。
-          #   现在直接拒派并说清缺什么，人一眼知道该来改哪里。
-          code0 <- as.character(reg0$code %||% "")
-          why0 <- as.character(reg0$error %||% "")
-          tryCatch({
-            af0 <- file.path(STATE_DIR, "exec_binding_warnings.jsonl")
-            dir.create(dirname(af0), showWarnings = FALSE, recursive = TRUE)
-            cat(paste0(jsonlite::toJSON(list(
-              at = exec_ts(), kind = "dispatch_refused_binding",
-              exec_id = as.character(enq$id %||% ""), session_id = execSid,
-              step = stepId, req_id = stepRq,
-              code = code0, why = why0), auto_unbox = TRUE), "\n"),
-              file = af0, append = TRUE)
-          }, error = function(e) NULL)
-          # 刚入队的这条不能留着：一个永远交不回结果的任务只会挡住后续环节。
-          tryCatch(exec_set(as.character(enq$id %||% ""), list(
-            status = "failed", finished_at = exec_ts(),
-            error = paste0("未派工：这条记录还没有版本号，建不起尝试身份（",
-                           code0, "）。补上版本后重跑即可。"),
-            cancelled_by = "system")), error = function(e) NULL)
-          return(send_json(con, 409, list(
-            ok = FALSE, code = "dispatch_binding_unavailable", step = stepId,
-            detail = if (nzchar(why0)) why0 else code0,
-            error = "这条分析记录还没有版本号，建不起尝试身份，已停止派工。",
-            hint = "再点一次通常会自动补建版本号；若仍失败，说明数据库写不进去。")))
-        }
-      }
-      # ---- 只有确实由本次新建的任务才登记绑定 --------------------------
-      #   双重保险：上面已用 exec_active_for 挡掉"复用"的情况，
-      #   这里再断言任务带回的 req_id 就是本次生成的号。
-      #   两者只要有一个不成立，就说明这条 enq 不是本次新建的 ——
-      #   此时登记 pending 会把别人的任务错绑到新号上，绝不能做。
-      if (!is.null(enq) && nzchar(stepRq) &&
-          identical(as.character(enq$req_id %||% ""), stepRq)) {
-        reg <- tryCatch(attempt_register(APP_DIR, execSid, stepRq, origin = "step_run"),
-                        error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-        if (!isTRUE(reg$ok)) {
-          why <- as.character(reg$error %||% "未知")
-          bindWarn <- paste0("作业已派出，但本步 attempt 没能登记（", why,
-                             "）；完成回写时会按 exec_id 走兼容绑定。")
-          # 审计：留一份，事后可查这条为什么没有 attempt。
-          tryCatch({
-            af <- file.path(STATE_DIR, "exec_binding_warnings.jsonl")
-            dir.create(dirname(af), showWarnings = FALSE, recursive = TRUE)
-            cat(paste0(jsonlite::toJSON(list(
-              at = exec_ts(), kind = "step_attempt_register_failed",
-              exec_id = as.character(enq$id %||% ""), session_id = execSid,
-              step = stepId, req_id = stepRq, why = why), auto_unbox = TRUE), "\n"),
-              file = af, append = TRUE)
-          }, error = function(e) NULL)
-        } else {
-          pend <- tryCatch(sess_set_pending(APP_DIR, execSid, stepRq, slot = "step"),
-                           error = function(e) list(ok = FALSE, error = conditionMessage(e)))
-          # 判据必须是 pend$ok，不是 pend 本身。
-          #   sess_set_pending 成功时返回 list(ok=TRUE, slot=…, pending_req=…)，
-          #   不是逻辑 TRUE。早先写成 isTRUE(pend)，成功也永远是假 ——
-          #   于是每点一次按钮就挂一条"槽没设上"的假警告，
-          #   真出问题时反而看不出差别。
-          if (!isTRUE(pend$ok)) {
-            bindWarn <- paste0("本步请求号已登记，但待回写槽没设上（",
-                               as.character(pend$error %||% "未知"),
-                               "）；回写时需带 req_id 或 exec_id，否则会被判成别的题次。")
-            tryCatch({
-              af <- file.path(STATE_DIR, "exec_binding_warnings.jsonl")
-              cat(paste0(jsonlite::toJSON(list(
-                at = exec_ts(), kind = "step_pending_not_set",
-                exec_id = as.character(enq$id %||% ""), session_id = execSid,
-                step = stepId, req_id = stepRq), auto_unbox = TRUE), "\n"),
-                file = af, append = TRUE)
-            }, error = function(e) NULL)
-          }
-        }
-      }
-
-      if (chain_dispatch && !is.null(enq)) {
-        # 只补 chain_id。req_id 早在入队时就已经是链请求号，
-        #   在这里再改一次只会把新登记好的 attempt/pending 冲掉。
-        exec_set(enq$id, list(chain_id = active_chain$req_id))
+      if (nzchar(chainRq) && !is.null(enq) &&
+          !identical(as.character(enq$chain_id %||% ""), chainRq)) {
+        return(send_json(con, 409, list(ok = FALSE, code = "chain_task_conflict", step = stepId,
+          error = "这个环节已有一条不属于本流程的任务，请等原任务结束后再启动。")))
       }
 
       # ---- 质检闸门：上一步没过审 ----

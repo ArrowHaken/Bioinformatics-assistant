@@ -50,15 +50,19 @@ rc_dispatch <- function(c) {
   #   而 blocked 又在拦截名单里，页面每次重试都撞同一句，永不自愈。
   #   走 req 而不是 body：req 由这里构造，客户端塞不进来；body 外部可控，
   #   放行类标记一律不能从 body 读。
-  ans <- handler(NULL, list(target = "/api/run", method = "POST", headers = list(),
-    pa_chain_dispatch = TRUE,
-    body = as.character(jsonlite::toJSON(list(step = stage, session_id = c$session_id,
-      req_id = c$req_id), auto_unbox = TRUE))))
-  c$status <- if (ans$code == 200L) "running" else "blocked"
-  c$blocked <- if (ans$code == 200L) NULL else ans$body
-  rc_write(c)
-  ans$body$chain_id <- c$req_id
-  ans
+  # Claim uses this same lock. Publish the chain transition before a worker
+  # can claim and report a fast completion for the newly queued stage.
+  exec_with_lock(function() {
+    ans <- handler(NULL, list(target = "/api/run", method = "POST", headers = list(),
+      pa_chain_dispatch = TRUE,
+      body = as.character(jsonlite::toJSON(list(step = stage, session_id = c$session_id,
+        req_id = c$req_id), auto_unbox = TRUE))))
+    c$status <- if (ans$code == 200L) "running" else "blocked"
+    c$blocked <- if (ans$code == 200L) NULL else ans$body
+    rc_write(c)
+    ans$body$chain_id <- c$req_id
+    ans
+  })
 }
 # 单步点击的链守卫：只有一个地方判断「现在能不能派这一步」。
 #   chain_dispatch=TRUE 表示这次派工由协调器在回调之后发起，它比任何状态判断
