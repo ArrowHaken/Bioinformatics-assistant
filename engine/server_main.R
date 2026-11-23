@@ -964,9 +964,14 @@ exec_reaper_schedule_check <- function(app_dir = APP_DIR, now = Sys.time()) {
 
 exec_reaper_ensure_schedule <- function(app_dir = APP_DIR) {
   chk <- tryCatch(exec_reaper_schedule_check(app_dir), error = function(e) list(ok = FALSE))
-  if (isTRUE(chk$ok)) return(list(ok = TRUE, added = FALSE,
-                                  source = as.character(chk$source %||% ""),
-                                  checked_at = exec_ts()))
+  if (isTRUE(chk$ok))
+    # fresh 一起透传：调用方要能区分"配过且在跑"和"配过但停了"。
+    #   只回一个 ok，cron 停三天也会报"已配置"，等于把"曾经"当"现在"。
+    return(list(ok = TRUE, added = FALSE,
+                source = as.character(chk$source %||% ""),
+                fresh = isTRUE(chk$fresh),
+                age_secs = chk$age_secs,
+                checked_at = exec_ts()))
   # 到这里说明真的一条独立扫描都没有。尝试补上，补不上就明确记下来。
   #   为什么补不上是正常的：NoNewPrivileges 下 crontab 调不动。
   #   所以这条路径的重点不是"一定补上"，而是"补不上要留下准确的说明和命令"，
@@ -11256,8 +11261,21 @@ main <- function() {
     else list(ok = FALSE, added = FALSE, note = "调度自检函数未加载"),
     error = function(e) list(ok = FALSE, added = FALSE, note = conditionMessage(e)))
   if (isTRUE(.reapchk$ok)) {
-    say("  回收器调度： 已配置",
-        if (isTRUE(.reapchk$added)) "（本次启动补上的）" else "")
+    if (isTRUE(.reapchk$fresh)) {
+      say("  回收器调度： 在跑",
+          if (isTRUE(.reapchk$added)) "（本次启动补上的）" else "")
+    } else {
+      # 有过扫描记录但已经不新鲜：说明调度配过、现在停了。
+      #   这种必须单独说，而不是并进"已配置"里 —— 后者会让人以为一切正常。
+      say("  回收器调度： 停了")
+      say("  [!] 上次独立扫描已经是 ",
+          if (is.finite(as.numeric(.reapchk$age_secs %||% NA)))
+            paste0(round(as.numeric(.reapchk$age_secs) / 3600, 1), " 小时前") else "很久以前",
+          "：调度配过但现在没在跑，失联任务不会被自动收尾。")
+      say("      检查 crontab 里这一条还在不在：")
+      say("      */5 * * * * cd ", APP_DIR,
+          " && /usr/bin/Rscript engine/exec_reaper.R >> state/reaper_cron.log 2>&1")
+    }
   } else {
     say("  回收器调度： 缺失")
     say("  [!] 没有定时回收：失联任务不会被自动收尾，队列状态会停在旧样子。")
