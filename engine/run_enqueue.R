@@ -874,6 +874,23 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
         if (!nzchar(vid0)) vid0 <- as.character(access$ctx$version_id %||% "")
         octx0 <- if (is.null(owner_ctx$key) || is.na(owner_ctx$key)) "unattributed"
                  else as.character(owner_ctx$key)
+        # ---- 派工前先把这一版记录的身份号建出来 --------------------------
+        #   为什么不能等回写时再补（2026-11-23，真实点击 12:18 那次失败后修）：
+        #     db_register_dispatch 要求版本号非空，拿不到就直接返回
+        #     dispatch_binding_unavailable，attempt 根本建不起来。
+        #     执行端领了任务、跑完来交结果时没有 attempt_id，只能按 req_id+step 猜；
+        #     猜不中就 403 run_log_not_owner —— 服务器上一个细胞都没算，8 秒判失败。
+        #   实测本机 14 条记录里 11 条 version_id 为空，这不是偶发，是通病。
+        #   建出来还必须写回 sessions：不写回的话下一个环节会再建一个新版本，
+        #     同一条记录的产物散落在不同版本里，闸门按版本查上游就查不到。
+        if (!nzchar(vid0)) {
+          # 实现抽在 db.R 的 db_ensure_session_version 里，这里只负责调用。
+          #   抽出去的原因（2026-11-23）：契约要能直接测这段
+          #   "记录没版本 → 建号 → 写回" 的行为；内联在派工段里只能等真实点击才暴露。
+          ev0 <- tryCatch(db_ensure_session_version(con, execSid, octx0),
+                          error = function(e) list(ok = FALSE))
+          if (isTRUE(ev0$ok)) vid0 <- as.character(ev0$version_id)
+        }
         reg0 <- tryCatch(
           db_register_dispatch(
             con, owner_key = octx0,
@@ -894,19 +911,33 @@ run_enqueue <- function(con = NULL, req = NULL, q = list(), body = list(), owner
             attempt_id = enq$attempt_id, run_id = enq$run_id,
             version_id = enq$version_id, executor_mode = enq$executor_mode))
         } else {
-          bindWarn <- paste0("作业已派出，但稳定 attempt 未登记：",
-                             as.character(reg0$error %||% reg0$code %||% "unknown"))
+          # 建不起尝试身份就不要派工（2026-11-23，12:18 那次真实失败后修）。
+          #   原来这里只记一条 warning 就继续派：执行端领了活、跑到回写才发现
+          #   认不出身份，白占一次执行端轮次，任务还留在队列里当僵尸。
+          #   现在直接拒派并说清缺什么，人一眼知道该来改哪里。
+          code0 <- as.character(reg0$code %||% "")
+          why0 <- as.character(reg0$error %||% "")
           tryCatch({
             af0 <- file.path(STATE_DIR, "exec_binding_warnings.jsonl")
             dir.create(dirname(af0), showWarnings = FALSE, recursive = TRUE)
             cat(paste0(jsonlite::toJSON(list(
-              at = exec_ts(), kind = "dispatch_attempt_register_failed",
+              at = exec_ts(), kind = "dispatch_refused_binding",
               exec_id = as.character(enq$id %||% ""), session_id = execSid,
               step = stepId, req_id = stepRq,
-              code = as.character(reg0$code %||% ""),
-              why = as.character(reg0$error %||% "")), auto_unbox = TRUE), "\n"),
+              code = code0, why = why0), auto_unbox = TRUE), "\n"),
               file = af0, append = TRUE)
           }, error = function(e) NULL)
+          # 刚入队的这条不能留着：一个永远交不回结果的任务只会挡住后续环节。
+          tryCatch(exec_set(as.character(enq$id %||% ""), list(
+            status = "failed", finished_at = exec_ts(),
+            error = paste0("未派工：这条记录还没有版本号，建不起尝试身份（",
+                           code0, "）。补上版本后重跑即可。"),
+            cancelled_by = "system")), error = function(e) NULL)
+          return(send_json(con, 409, list(
+            ok = FALSE, code = "dispatch_binding_unavailable", step = stepId,
+            detail = if (nzchar(why0)) why0 else code0,
+            error = "这条分析记录还没有版本号，建不起尝试身份，已停止派工。",
+            hint = "再点一次通常会自动补建版本号；若仍失败，说明数据库写不进去。")))
         }
       }
       # ---- 只有确实由本次新建的任务才登记绑定 --------------------------

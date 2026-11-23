@@ -811,6 +811,46 @@ db_ensure_version <- function(con, project_id, owner_key, version_id = NULL,
   vid
 }
 
+db_ensure_session_version <- function(con, session_id, owner_key) {
+  # 确保这条分析记录有 project_id 与 version_id，缺什么建什么，并写回记录。
+  #   为什么必须单列一个函数（2026-11-23，12:18 那次真实点击失败后）：
+  #     派工前拿不到版本号时，db_register_dispatch 会直接返回
+  #     dispatch_binding_unavailable，attempt 建不起来。执行端领了活、跑完来交结果，
+  #     服务端认不出这属于哪一次尝试，403 run_log_not_owner —— 一个细胞都没算就判失败。
+  #   为什么抽出来：内联在派工段里只能等真实点击才暴露；抽成函数契约能直接测。
+  #   为什么必须写回：不写回的话下一个环节又会建一个新版本，
+  #     同一条记录的产物散落在不同版本里，闸门按版本查上游就查不到。
+  sid <- trimws(as.character(session_id))
+  if (is.null(con) || !nzchar(sid)) return(list(ok = FALSE, code = "no_session"))
+  octx <- trimws(as.character(owner_key))
+  if (!nzchar(octx) || is.na(octx)) octx <- "unattributed"
+  norm_id <- function(x) {
+    v <- suppressWarnings(as.character(x))
+    if (!length(v) || is.na(v[1]) || !nzchar(trimws(v[1]))) return("")
+    trimws(v[1])
+  }
+  pid <- ""; vid <- ""; nm <- sid
+  row <- tryCatch(db_rows(con,
+    "SELECT project_id, version_id, name FROM sessions WHERE session_id = ?",
+    list(sid)), error = function(e) NULL)
+  if (!is.null(row) && nrow(row)) {
+    sr <- as.list(row[1, ])
+    pid <- norm_id(sr$project_id)
+    vid <- norm_id(sr$version_id)
+    nm0 <- trimws(as.character(sr$name))
+    if (nzchar(nm0) && !is.na(nm0)) nm <- nm0
+  }
+  if (!nzchar(pid)) pid <- as.character(db_ensure_project(con, octx, nm))
+  if (!nzchar(vid)) vid <- as.character(db_ensure_version(con, pid, octx))
+  if (!nzchar(pid) || !nzchar(vid))
+    return(list(ok = FALSE, code = "version_unavailable"))
+  tryCatch(DBI::dbExecute(con,
+    "UPDATE sessions SET project_id = COALESCE(project_id, ?),
+                         version_id = COALESCE(version_id, ?)
+     WHERE session_id = ?", list(pid, vid, sid)), error = function(e) NULL)
+  list(ok = TRUE, project_id = pid, version_id = vid)
+}
+
 db_ensure_run <- function(con, version_id, owner_key, run_id = NULL,
                           work_root = NULL, host = NULL, pc = NULL) {
   # 同一版本已有 run 就复用，不要每次回写都新建一个。
