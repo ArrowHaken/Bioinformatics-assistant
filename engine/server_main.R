@@ -914,7 +914,8 @@ exec_reaper_cron_line <- function(app_dir = APP_DIR) {
          " && /usr/bin/Rscript engine/exec_reaper.R >> state/reaper_cron.log 2>&1")
 }
 
-exec_reaper_schedule_check <- function(app_dir = APP_DIR, now = Sys.time()) {
+exec_reaper_schedule_check <- function(app_dir = APP_DIR, now = Sys.time(),
+                                       expect_secs = 300L) {
   # 判据一（主）：审计里有没有 kind=scan。
   #   为什么不用 crontab 命令（2026-11-23 实测踩到）：
   #     crontab 二进制是 setgid 的，而本服务的 systemd unit 开了
@@ -944,9 +945,15 @@ exec_reaper_schedule_check <- function(app_dir = APP_DIR, now = Sys.time()) {
     # ok 的含义是"存在独立调度"，不是"刚才扫过"。
     #   两件事必须分开：调度配过但坏了（有记录、不新鲜），和从来没配过（无记录）。
     #   前者看 alive，后者看这里。混成一个布尔值会让"刚重启还没到点"被误判成没配。
+    # fresh 用与 alive 同一个判据：expect_secs * 3。
+    #   原来这里写 24 小时，而 cron 是 5 分钟一次、alive 用 15 分钟 ——
+    #   同一份代码两套阈值，cron 停 23 小时照样报 fresh=true、"在跑"，
+    #   等于只把"曾经"从三天缩成一天（2026-11-23，云准助手复验时指出）。
+    #   现在两处共用一个阈值，看板与接口不会再各说各话。
     return(list(ok = TRUE, source = "audit_scan", last_scan_at = scan_at,
                 age_secs = if (is.finite(age)) round(age) else NULL,
-                fresh = is.finite(age) && age < 86400,
+                fresh = is.finite(age) && age < as.numeric(expect_secs) * 3,
+                fresh_window_secs = as.numeric(expect_secs) * 3,
                 checked_at = exec_ts(now)))
   }
   # 判据二（兜底）：crontab 文件。服务里通常读不到，读不到就是未知，按缺失处理。
@@ -5385,6 +5392,16 @@ serve_request <- function(con, req) {
           b$version_id <- as.character(ex_bind$version_id)
       }
     }
+    # 这里不额外去 ex_bind 补 version_id（2026-11-23 核实后决定不补）。
+    #   本来打算把版本补写从上面的 attempt_id 条件里拆出来，理由是"执行端自带
+    #   attempt_id 时这段不进去"。核实后：拆不拆结果都一样。
+    #   wbi_bind_attempt 一旦收到 attempt_id，就只按 attempt_id 命中记录
+    #   （wbi_attempt_by_id），不做任何版本过滤；版本不一致时只记一条 overrides，
+    #   随后仍用 att$version_id 覆盖 —— attempt 本身就是版本的真相。
+    #   带 "AND version_id = ?" 过滤的只有 req_id 分支，而那条用的是
+    #   记录当前版本的 target_vid，不是回写请求里带的那份版本。
+    #   所以补不补都不影响成败，唯一差别是 overrides 里多一条观测记录。
+    #   为一条观测记录去动回写主路径，不值得，保持最小。
     if (!nzchar(rq_in) && nzchar(exid_in) && HAS_SESSIONS) {
       sid_in <- trimws(as.character(b$session_id %||% ""))
       stp_in <- trimws(as.character(b$step %||% ""))
